@@ -1,0 +1,44 @@
+# MR/Issue のドラフト・作業記録 (ローカルのみ、リモート未 push)
+docs/mr/
+docs/issue/
+
+# 環境変数・シークレット
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+coverage/
+
+# 機械学習モデルのキャッシュ
+.cache/
+models/
+.huggingface/
+
+# Docker のボリューム
+infra/pgdata/
+
+# エディタ・OS
+.DS_Store
+.idea/
+*.swp
