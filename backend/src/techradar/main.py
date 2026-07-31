@@ -32,8 +32,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     起動時に設定を読み込んで検証し、以降のリクエストで例外が出ないようにする。
     Embedding モデルのロード（Issue #6）とジョブワーカーの起動（Issue #8）も
     ここに追加する。
+
+    `create_app` が設定を注入済みの場合は上書きしない（テストから差し替えた
+    設定が起動処理で握り潰されるのを防ぐ）。
     """
-    app.state.settings = get_settings()
+    if getattr(app.state, "settings", None) is None:
+        app.state.settings = get_settings()
     yield
 
 
