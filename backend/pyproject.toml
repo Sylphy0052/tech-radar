@@ -8,6 +8,10 @@ dependencies = [
     "uvicorn[standard]>=0.38",
     "pydantic>=2.12",
     "pydantic-settings>=2.7",
+    "sqlalchemy>=2.0",
+    "alembic>=1.14",
+    "psycopg[binary]>=3.2",
+    "pgvector>=0.4",
 ]
 
 [project.optional-dependencies]
@@ -58,6 +62,9 @@ ignore = [
     "S101", # テストでの assert を許可
     "ANN",  # テストの型注釈は必須にしない
 ]
+# Alembic が自動生成するリビジョンは機械生成物のため lint 対象から外す。
+# 手を入れた箇所 (拡張の作成など) は結合テストで振る舞いを検証している。
+"migrations/versions/*.py" = ["ALL"]
 
 [tool.ruff.format]
 quote-style = "double"

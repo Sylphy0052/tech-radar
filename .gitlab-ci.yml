@@ -39,6 +39,16 @@ backend:ty-check:
 backend:pytest:
   extends: .backend
   stage: test
+  # 結合テストは pgvector 入りの PostgreSQL を必要とする。
+  services:
+    - name: pgvector/pgvector:pg17
+      alias: postgres
+  variables:
+    POSTGRES_USER: techradar
+    POSTGRES_PASSWORD: techradar
+    POSTGRES_DB: techradar
+    # サービスコンテナのホスト名は alias を使う。
+    DATABASE_URL: postgresql+psycopg://techradar:techradar@postgres:5432/techradar
   script:
     - uv run pytest --junitxml=pytest.xml --cov-report=xml
   coverage: '/^TOTAL.*\s+(\d+(?:\.\d+)?%)$/'

@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // vitest のカバレッジ出力は生成物のため対象外にする。
+    "coverage/**",
   ]),
 ]);
 
