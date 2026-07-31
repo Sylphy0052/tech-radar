@@ -40,20 +40,27 @@ log "PostgreSQL (pgvector) を起動します"
 docker compose -f "$COMPOSE_FILE" up -d postgres
 
 log "PostgreSQL の起動を待機します"
+# コンテナ内の pg_isready はホスト側 TCP の受付可否までは保証しないため、
+# アプリと同じ経路 (localhost:5432) で接続できるまで待つ。
+postgres_accepts_connections() {
+  docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready \
+    -U "${POSTGRES_USER:-techradar}" -d "${POSTGRES_DB:-techradar}" >/dev/null 2>&1 \
+    && (exec 3<>"/dev/tcp/${POSTGRES_HOST:-localhost}/${POSTGRES_PORT:-5432}") 2>/dev/null
+}
+
 deadline=$((SECONDS + PG_READY_TIMEOUT_SECONDS))
-until docker compose -f "$COMPOSE_FILE" exec -T postgres \
-  pg_isready -U "${POSTGRES_USER:-techradar}" -d "${POSTGRES_DB:-techradar}" >/dev/null 2>&1; do
-  ((SECONDS < deadline)) || fail "PostgreSQL が ${PG_READY_TIMEOUT_SECONDS} 秒以内に起動しませんでした"
+until postgres_accepts_connections; do
+  ((SECONDS < deadline)) \
+    || fail "PostgreSQL が ${PG_READY_TIMEOUT_SECONDS} 秒以内に接続を受け付けませんでした"
   sleep 1
 done
 log "PostgreSQL 起動完了"
 
-# マイグレーションは Issue #2 で Alembic を導入したら以下を有効化する。
-# log "マイグレーションを適用します"
-# (cd backend && uv run alembic upgrade head) || fail "マイグレーション失敗"
-
 log "backend の依存関係を同期します"
 (cd backend && uv sync --extra dev >/dev/null) || fail "backend: uv sync失敗"
+
+log "マイグレーションを適用します"
+(cd backend && uv run alembic upgrade head) || fail "マイグレーション失敗"
 
 if [[ ! -d frontend/node_modules ]]; then
   log "frontend の依存関係をインストールします"
