@@ -21,7 +21,7 @@ from techradar.api.deps import get_session
 from techradar.config import Settings
 from techradar.db.enums import JobStatus, JobType
 from techradar.db.models import ACTIVE_CRAWL_JOB_INDEX_PREDICATE, Job
-from techradar.jobs.queue import claim_next, complete, enqueue
+from techradar.jobs.queue import claim_next, complete, enqueue, ownership_token
 from techradar.jobs.status import running_status_for
 from techradar.main import create_app
 
@@ -170,7 +170,7 @@ class TestCreateCrawlRun:
         job = db_session.get(Job, first_job_id)
         assert job is not None
         claim_next(db_session)
-        complete(db_session, job)
+        complete(db_session, job, claimed_at=ownership_token(job))
 
         # Act
         second_response = client.post("/api/crawl/runs")
@@ -273,7 +273,7 @@ class TestCreateCrawlRunUnderConcurrency:
         session = independent_sessions()
         job = enqueue(session, JobType.CRAWL_SOURCES, {})
         claim_next(session)
-        complete(session, job)
+        complete(session, job, claimed_at=ownership_token(job))
         session.commit()
 
         # Act: 2件目を積む
