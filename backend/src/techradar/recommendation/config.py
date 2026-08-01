@@ -124,6 +124,8 @@ class FeedCompositionConfig(BaseModel):
     primary_source: float = Field(ge=0.0, le=1.0)
     exploration: float = Field(ge=0.0, le=1.0)
     diversity: float = Field(ge=0.0, le=1.0)
+    strong_interest_min_similarity: float = Field(ge=0.0, le=1.0)
+    exploration_min_novelty: float = Field(ge=0.0, le=1.0)
 
 
 class LimitsConfig(BaseModel):
@@ -214,6 +216,8 @@ class ScoringConfig(BaseModel):
                 primary_source=self.feed_composition.primary_source,
                 exploration=self.feed_composition.exploration,
                 diversity=self.feed_composition.diversity,
+                strong_interest_min_similarity=self.feed_composition.strong_interest_min_similarity,
+                exploration_min_novelty=self.feed_composition.exploration_min_novelty,
             ),
             limits=RankingLimits(
                 max_candidates_per_run=self.limits.max_candidates_per_run,

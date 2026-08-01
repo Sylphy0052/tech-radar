@@ -70,6 +70,13 @@ feed_composition:
   primary_source: 0.25
   exploration: 0.15
   diversity: 0.05
+  # weights.interest_similarity 側の authority_gate 閾値（0.35）とは別物。
+  # 「強い関心一致」枠は一致度の中央よりやや高い水準で切り、フィードの主力枠に
+  # ふさわしい候補だけを入れる
+  strong_interest_min_similarity: 0.5
+  # novelty は topics 未知率（0〜1）。半分より多くが未知テーマの記事を
+  # 「新規テーマ探索」枠の対象にする
+  exploration_min_novelty: 0.6
 
 limits:
   # 1 回の実行で採点する候補数の上限。dedup.yaml の max_articles_per_run と

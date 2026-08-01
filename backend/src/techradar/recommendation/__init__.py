@@ -1,5 +1,13 @@
 """推薦ランキング（`PROJECT_SPEC.md` §13, §14, §15）。"""
 
+from techradar.recommendation.composition import (
+    ComposedFeed,
+    CompositionStats,
+    FeedSlot,
+    SlotStats,
+    compose_feed,
+    compose_feed_with_stats,
+)
 from techradar.recommendation.config import (
     ScoringConfig,
     ScoringConfigError,
@@ -34,7 +42,10 @@ from techradar.recommendation.ranking import (
 __all__ = [
     "AuthorityGate",
     "CandidateSignature",
+    "ComposedFeed",
+    "CompositionStats",
     "FeedComposition",
+    "FeedSlot",
     "FreshnessSettings",
     "InterestProfile",
     "InterestSettings",
@@ -48,7 +59,10 @@ __all__ = [
     "ScoringConfig",
     "ScoringConfigError",
     "ScoringSettings",
+    "SlotStats",
     "build_reason_summary",
+    "compose_feed",
+    "compose_feed_with_stats",
     "compute_freshness",
     "compute_interest_similarity",
     "compute_novelty",
