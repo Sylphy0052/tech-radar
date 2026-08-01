@@ -7,40 +7,56 @@
 
 `--allowedTools ""` はツールを無効化しない。実測で、この指定のみでは
 `Read` が実行され `/etc/hostname` の内容が返った（`num_turns` が 2 になる）。
-広く使われる書き方だが効果がないため、次の 3 つを併用する。
+広く使われる書き方だが効果がない。
 
-1. `--settings` の `permissions.deny` にツール名を列挙する
-   （実測で最も強く、ツール呼び出しの試行自体が発生しなくなる）
-2. `--disallowedTools` にも同じ一覧を渡す
-3. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP サーバーを読み込ませない
+主防御は `--tools ""` で、CLI のヘルプに「Use "" to disable all tools」と
+明記されたフラグ。組み込みツールを列挙ではなく構造的に空にするため、
+新しいツールが増えても漏れない。
 
-いずれも**列挙式**であり、CLI に新しいツールが増えると漏れる。
-そのため実行後に `num_turns` と `permission_denials` を検査し、
-ツール使用の兆候があれば結果を採用せず失敗させる。
+これに次を重ねる。
+
+1. `--bare` で hooks / plugin / CLAUDE.md 自動探索を止める。
+   hooks はツール許可とは別経路で任意コマンドを実行しうるため、
+   ツール無効化だけでは塞げない
+2. `--setting-sources ""` で設定ファイルを読み込ませない
+3. `--settings` の `permissions.deny` と `--disallowedTools` にツール名を列挙（保険）
+4. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない
+5. 環境変数を許可リストで絞り、DB 接続文字列などを子プロセスへ渡さない
+6. 一時ディレクトリを cwd にし、実行場所由来の設定を拾わせない
+
+3 は列挙式で漏れうる。そのため実行後に `num_turns` と `permission_denials` を
+検査し、ツール使用の兆候があれば結果を採用せず失敗させる。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import tempfile
 import time
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from techradar.config import Settings, get_settings
-from techradar.llm.base import LLMCompletion, LLMUsage
+from techradar.llm.base import LLMCompletion, LLMUsage, validate_response
 from techradar.llm.errors import (
-    LLMInvalidResponseError,
     LLMInvocationError,
     LLMTimeoutError,
     LLMToolUseDetectedError,
 )
 from techradar.llm.prompt import SYSTEM_PROMPT, build_user_prompt
 
-# CLI が認識するツール名のみを列挙する。未知の名前を渡すと警告が出るだけで
-# 拒否には寄与しないため、実在するものに絞る。
+# `--tools` に渡す値。CLI のヘルプに「Use "" to disable all tools」と明記されており、
+# 組み込みツールを列挙ではなく構造的に空にする。新しいツールが増えても漏れない。
+NO_TOOLS = ""
+
+# 上の指定が将来効かなくなった場合に備えた二重化。列挙式なので漏れうるが、
+# `--tools ""` が主防御であり、これは保険として置く。
+# CLI が認識しない名前を渡すと起動時に警告が出て終了コードが 1 になるため、
+# 実在するツール名だけを列挙する（`MultiEdit` / `SlashCommand` は存在しない）。
 DENIED_TOOLS: tuple[str, ...] = (
     "Read",
     "Write",
@@ -56,11 +72,36 @@ DENIED_TOOLS: tuple[str, ...] = (
     "Agent",
     "NotebookEdit",
     "TodoWrite",
-    "Artifact",
+    "AskUserQuestion",
+    "ExitPlanMode",
+    "SendUserMessage",
+    "ListMcpResources",
+    "ReadMcpResource",
 )
 
 # MCP サーバーを 1 つも読み込ませない設定。
 EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
+
+# 子プロセスへ渡す環境変数。既定では親の環境がすべて継承され、DB 接続文字列などが
+# CLI プロセスから見えてしまう。認証と実行に必要なものだけを通す。
+ENV_ALLOWLIST: tuple[str, ...] = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+)
+
+
+def build_environment() -> dict[str, str]:
+    """CLI へ渡す環境変数を許可リストで絞る。"""
+    return {name: os.environ[name] for name in ENV_ALLOWLIST if name in os.environ}
+
 
 # 応答がコードフェンスで包まれることがあるため取り除く。
 _CODE_FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
@@ -83,6 +124,19 @@ def _build_command(settings: Settings, prompt: str) -> list[str]:
         "json",
         "--system-prompt",
         SYSTEM_PROMPT,
+        # 組み込みツールを構造的に空にする（主防御）。
+        "--tools",
+        NO_TOOLS,
+        # 設定ファイル（user / project / local）を一切読み込ませない。
+        # hooks はここに定義され、ツール許可とは別経路で任意コマンドを実行しうる。
+        # 実測で input_tokens が 4076 -> 175 に落ちることから、設定と
+        # CLAUDE.md が読み込まれていないことを確認している。
+        #
+        # `--bare` でも hooks を止められるが、OAuth を読まなくなり
+        # ANTHROPIC_API_KEY が必須になるため使わない
+        # （サブスク枠で動かすという ADR 0001 の決定と両立しない）。
+        "--setting-sources",
+        "",
         "--settings",
         permission_settings,
         "--strict-mcp-config",
@@ -92,7 +146,7 @@ def _build_command(settings: Settings, prompt: str) -> list[str]:
         *DENIED_TOOLS,
     ]
     if settings.claude_cli_model:
-        command += ["--model", settings.claude_cli_model]
+        command = [*command, "--model", settings.claude_cli_model]
     return command
 
 
@@ -102,9 +156,19 @@ def _assert_no_tool_use(envelope: dict[str, Any]) -> None:
     無効化の指定は列挙式で漏れうるため、結果側からも検証する。
     ツールを 1 度も呼ばなければ `num_turns` は 1 になる。
     """
-    denials = envelope.get("permission_denials") or []
-    turns = envelope.get("num_turns", 1)
-    if denials or (isinstance(turns, int) and turns > 1):
+    denials = envelope.get("permission_denials")
+    turns = envelope.get("num_turns")
+
+    # 期待するフィールドが無い・型が違う場合は「ツールを使っていない」と
+    # みなさず失敗させる。CLI の更新で検知が静かに無効化されるのを防ぐ。
+    if not isinstance(turns, int) or not isinstance(denials, list):
+        message = (
+            "CLI の応答にツール使用を判定できるフィールドがありません: "
+            f"num_turns={turns!r}, permission_denials={denials!r}"
+        )
+        raise LLMInvocationError(message)
+
+    if denials or turns > 1:
         message = f"ツール使用が観測されました: num_turns={turns}, denials={len(denials)}"
         raise LLMToolUseDetectedError(message)
 
@@ -166,14 +230,8 @@ class ClaudeCliProvider:
         _assert_no_tool_use(envelope)
 
         raw_text = _strip_code_fence(str(envelope.get("result", "")))
-        try:
-            validated = schema.model_validate_json(raw_text)
-        except ValidationError as exc:
-            message = f"応答がスキーマを満たしません: {exc.error_count()} 件"
-            raise LLMInvalidResponseError(message) from exc
-
         return LLMCompletion(
-            data=validated.model_dump(),
+            data=validate_response(schema, raw_text),
             usage=_extract_usage(envelope),
             raw_text=raw_text,
         )
@@ -182,6 +240,11 @@ class ClaudeCliProvider:
         """CLI を実行して JSON 封筒を返す。"""
         command = _build_command(self._settings, prompt)
         started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="techradar-llm-") as working_directory:
+            return self._run(command, started, working_directory)
+
+    def _run(self, command: list[str], started: float, working_directory: str) -> dict[str, Any]:
+        """組み立て済みのコマンドを実行する。"""
         try:
             completed = subprocess.run(  # noqa: S603 — 引数は自前で構築し shell を介さない
                 command,
@@ -191,6 +254,10 @@ class ClaudeCliProvider:
                 check=False,
                 # 記事本文を扱うプロセスに標準入力を渡さない。
                 stdin=subprocess.DEVNULL,
+                # 親の環境をそのまま渡すと DB 接続文字列などが CLI から見える。
+                env=build_environment(),
+                # 実行ディレクトリ由来の設定を拾わせないため空ディレクトリで動かす。
+                cwd=working_directory,
             )
         except subprocess.TimeoutExpired as exc:
             elapsed = int((time.monotonic() - started) * 1000)

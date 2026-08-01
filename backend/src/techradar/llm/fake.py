@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
-from techradar.llm.base import LLMCompletion, LLMUsage
-from techradar.llm.errors import LLMError, LLMInvalidResponseError
+from techradar.llm.base import LLMCompletion, LLMUsage, validate_response
+from techradar.llm.errors import LLMError
 
 
 class FakeLLMProvider:
@@ -25,6 +25,9 @@ class FakeLLMProvider:
     name = "fake"
 
     def __init__(self, responses: Sequence[str | LLMError | dict]) -> None:
+        if not responses:
+            message = "responses を空にはできません"
+            raise ValueError(message)
         self._responses = list(responses)
         self.calls: list[dict[str, str]] = []
 
@@ -47,14 +50,8 @@ class FakeLLMProvider:
         raw_text = (
             json.dumps(response, ensure_ascii=False) if isinstance(response, dict) else response
         )
-        try:
-            validated = schema.model_validate_json(raw_text)
-        except ValidationError as exc:
-            message = f"応答がスキーマを満たしません: {exc.error_count()} 件"
-            raise LLMInvalidResponseError(message) from exc
-
         return LLMCompletion(
-            data=validated.model_dump(),
+            data=validate_response(schema, raw_text),
             usage=LLMUsage(model="fake-model", input_tokens=100, output_tokens=20, duration_ms=5),
             raw_text=raw_text,
         )

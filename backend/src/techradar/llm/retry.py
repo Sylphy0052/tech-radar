@@ -6,10 +6,13 @@
 
 from __future__ import annotations
 
+import logging
 import time
+import uuid
 from collections.abc import Callable
 
 from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from techradar.config import Settings, get_settings
@@ -20,6 +23,8 @@ from techradar.llm.errors import LLMError, LLMToolUseDetectedError
 # 再試行しても解消しない失敗。
 NON_RETRYABLE = (LLMToolUseDetectedError,)
 
+logger = logging.getLogger(__name__)
+
 
 def complete_json_with_retry(
     provider: LLMProvider,
@@ -29,7 +34,7 @@ def complete_json_with_retry(
     schema: type[BaseModel],
     operation: str,
     session: Session | None = None,
-    article_id: object | None = None,
+    article_id: uuid.UUID | None = None,
     settings: Settings | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> LLMCompletion:
@@ -85,7 +90,10 @@ def complete_json_with_retry(
             return completion
 
     duration_ms = int((time.monotonic() - started) * 1000)
-    assert last_error is not None  # noqa: S101 — ループ構造上ここには失敗時のみ到達する
+    if last_error is None:
+        # ループ構造上ここには失敗時のみ到達する。到達したら実装の不整合。
+        message = "リトライが終了したが失敗理由が記録されていません"
+        raise RuntimeError(message)
     _record(
         session,
         operation=operation,
@@ -103,7 +111,7 @@ def _record(
     *,
     operation: str,
     status: str,
-    article_id: object | None = None,
+    article_id: uuid.UUID | None = None,
     model: str | None = None,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
@@ -113,21 +121,28 @@ def _record(
 ) -> None:
     """`operation_logs` へ 1 件記録する。
 
-    ログの失敗で本処理を巻き込まないよう、session が無い場合は何もしない。
+    session が無い場合は何もしない。書き込みに失敗しても例外を伝播させず
+    警告ログに留める。ログの失敗で本処理の結果や例外をすり替えないため。
     """
     if session is None:
         return
-    session.add(
-        OperationLog(
-            operation=operation,
-            status=status,
-            article_id=article_id,
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            duration_ms=duration_ms,
-            error_reason=error_reason,
-            details=details or {},
+    try:
+        session.add(
+            OperationLog(
+                operation=operation,
+                status=status,
+                article_id=article_id,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_ms=duration_ms,
+                error_reason=error_reason,
+                details=details or {},
+            )
         )
-    )
-    session.flush()
+        session.flush()
+    except SQLAlchemyError:
+        # ログの書き込み失敗で本処理の結果や例外をすり替えない。
+        logger.warning(
+            "operation_logs への記録に失敗しました: operation=%s", operation, exc_info=True
+        )
