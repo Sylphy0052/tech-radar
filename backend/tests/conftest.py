@@ -7,6 +7,7 @@ DB を使うテストは専用のテストデータベースに対して実行�
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -21,7 +22,25 @@ from sqlalchemy.orm import Session
 from techradar.config import get_settings
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-TEST_DATABASE_NAME = "techradar_test"
+
+# テスト用 DB 名の接尾辞に使うハッシュの長さ。DB 名の上限（63 バイト）に収めつつ、
+# worktree 数十個程度で衝突しない長さにする。
+_DATABASE_SUFFIX_LENGTH = 8
+
+
+def _test_database_name() -> str:
+    """この作業ディレクトリ専用のテスト用 DB 名を返す（Issue #23）。
+
+    テスト用 DB は毎回 DROP / CREATE するため、複数の worktree が同じ名前を使うと
+    別の worktree のテスト実行中に DB を落としてしまい、無関係なテストが
+    `AdminShutdown` などで落ちる。worktree のパスから決まる接尾辞を付けて分離する。
+    同じ worktree では毎回同じ名前になるため、DB が無尽蔵に増えることはない。
+    """
+    digest = hashlib.blake2s(str(BACKEND_ROOT).encode("utf-8")).hexdigest()
+    return f"techradar_test_{digest[:_DATABASE_SUFFIX_LENGTH]}"
+
+
+TEST_DATABASE_NAME = _test_database_name()
 
 # テストで生成される `Settings()`（引数無し）は既定でジョブワーカーを起動しない。
 # 実ワーカーが DB をポーリングし始めると、テストが不安定になりテスト用 DB の
