@@ -1,11 +1,26 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import Home from "@/app/page";
 
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status });
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("Home", () => {
   it("renders the service name as the heading", () => {
-    // Arrange / Act
+    // Arrange — DiscoverFeed がマウント時にフィードを取得するため、実ネットワーク
+    // 呼び出しを避けるよう fetch をスタブする。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null })),
+    );
+
+    // Act
     render(<Home />);
 
     // Assert
