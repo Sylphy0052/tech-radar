@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_session
@@ -15,6 +16,12 @@ from techradar.config import Settings
 from techradar.db.enums import JobType
 from techradar.db.models import ArticleRegistration, Job
 from techradar.main import create_app
+
+
+class _ForeignKeyViolation(Exception):
+    """外部キー違反を模した DBAPI 例外（`is_unique_violation` の判定用）。"""
+
+    sqlstate = "23503"
 
 
 @pytest.fixture
@@ -97,6 +104,28 @@ class TestCreateArticleRegistration:
         assert response.status_code == 201
         registration_id = uuid.UUID(response.json()["id"])
         assert observer.get(ArticleRegistration, registration_id) is not None
+
+    def test_does_not_swallow_an_integrity_error_that_is_not_a_unique_violation(
+        self, client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """一意制約違反以外の整合性エラーを「重複登録」として握り潰さない。
+
+        握り潰すと、原因の異なる失敗が「既存の登録を返した」という正常応答に
+        化けてしまい、実際には登録されていないことに気付けない。
+        """
+        # Arrange — 外部キー違反（SQLSTATE 23503）を模した整合性エラー
+        original_flush = db_session.flush
+
+        def _raise_foreign_key_violation(*args: object, **kwargs: object) -> None:
+            del args, kwargs
+            monkeypatch.setattr(db_session, "flush", original_flush)
+            raise IntegrityError("INSERT ...", {}, orig=_ForeignKeyViolation())
+
+        monkeypatch.setattr(db_session, "flush", _raise_foreign_key_violation)
+
+        # Act / Assert — 200/201 ではなく例外として表に出る
+        with pytest.raises(IntegrityError):
+            client.post("/api/articles", json={"url": "https://example.com/article"})
 
     def test_does_not_expose_normalized_url_or_user_id(self, client: TestClient) -> None:
         """内部情報（正規化 URL・ユーザー ID）を無用に露出させない。"""

@@ -12,6 +12,7 @@ import logging
 import uuid
 from collections.abc import Callable
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from techradar.config import Settings
@@ -86,6 +87,67 @@ def record_registration_failure(
     session.flush()
 
 
+def record_registration_failure_safely(
+    session: Session,
+    registration_id: uuid.UUID,
+    reason: RegistrationErrorReason,
+    *,
+    context: JobContext,
+    settings: Settings,
+) -> None:
+    """処理が失敗したときに、トランザクションの状態によらず失敗理由を記録する。
+
+    失敗の原因が DB 由来の例外（制約違反など）だと、その時点でトランザクションは
+    中断状態になっている。そのまま `record_registration_failure` を呼ぶと書き込み自体が
+    `InFailedSqlTransaction` で失敗し、記録が残らないばかりか呼び出し元へ伝播する例外まで
+    元の原因からすり替わる。まず素直に記録を試し、書けなかったときだけ巻き戻して書き直す
+    （中断しているかは `Session.is_active` では判別できない。DBAPI 側で中断していても
+    セッションとしては active のままのため）。
+
+    巻き戻すと、この試行が途中まで書いた内容（取得できた記事や実行中 status）も消える。
+    ジョブは同じ payload で再試行されるため取り直せる一方、失敗理由を残せないままだと
+    登録が実行中のまま取り残されるので、記録できることを優先する。
+    """
+    if _try_record_failure(session, registration_id, reason, context=context, settings=settings):
+        return
+
+    session.rollback()
+    if not _try_record_failure(
+        session, registration_id, reason, context=context, settings=settings
+    ):
+        logger.exception(
+            "job_handlers.failure_record_failed registration_id=%s job_id=%s",
+            registration_id,
+            context.job_id,
+        )
+
+
+def _try_record_failure(
+    session: Session,
+    registration_id: uuid.UUID,
+    reason: RegistrationErrorReason,
+    *,
+    context: JobContext,
+    settings: Settings,
+) -> bool:
+    """失敗理由の記録を1度だけ試し、書けたかどうかを返す。
+
+    登録行が存在しない場合も「これ以上やることは無い」ため書けた扱いにする
+    （呼び出し側に巻き戻しと再試行をさせない）。
+    """
+    try:
+        registration = session.get(ArticleRegistration, registration_id)
+        if registration is None:
+            logger.warning("job_handlers.registration_missing registration_id=%s", registration_id)
+            return True
+        record_registration_failure(
+            session, registration, reason, context=context, settings=settings
+        )
+    except SQLAlchemyError:
+        return False
+    return True
+
+
 async def run_job_in_thread(
     context: JobContext, settings: Settings, operation: JobOperation
 ) -> None:
@@ -97,7 +159,7 @@ async def run_job_in_thread(
 def _run_sync(context: JobContext, settings: Settings, operation: JobOperation) -> None:
     """`operation` をセッション付きで実行し、成否によらず結果を確定させる。
 
-    失敗時も `operation` 内で `record_registration_failure` により
+    失敗時も `operation` 内で `record_registration_failure_safely` により
     分類済みの理由が既に flush 済みのため、ここで rollback するとその記録
     ごと失ってしまう。そのため例外発生時も commit してから再送出する
     （ワーカー側の `fail()` はジョブ自体の状態遷移を別途行う）。

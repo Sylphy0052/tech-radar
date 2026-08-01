@@ -21,7 +21,7 @@ from techradar.embedding import (
 )
 from techradar.jobs.handlers._shared import (
     load_registration,
-    record_registration_failure,
+    record_registration_failure_safely,
     run_job_in_thread,
     start_registration_step,
 )
@@ -63,9 +63,9 @@ def process_embed_article(
         registration.status = JobStatus.COMPLETED.value
         session.flush()
     except Exception as exc:
-        record_registration_failure(
+        record_registration_failure_safely(
             session,
-            registration,
+            registration_id,
             classify_embedding_error(exc),
             context=context,
             settings=settings,
