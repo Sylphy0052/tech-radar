@@ -9,6 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from pydantic import BaseModel, ValidationError
+
+from techradar.llm.errors import LLMInvalidResponseError
+
 
 @dataclass(frozen=True)
 class LLMUsage:
@@ -32,6 +36,23 @@ class LLMCompletion:
     raw_text: str = field(repr=False, default="")
 
 
+def validate_response(schema: type[BaseModel], raw_text: str) -> dict[str, Any]:
+    """応答を `schema` で検証して辞書へ変換する。
+
+    Pydantic は不正な入力に対して `ValidationError` 以外（極端なネストによる
+    `RecursionError` など）を投げうる。すべて `LLMInvalidResponseError` へ
+    正規化し、呼び出し側がリトライ対象として扱えるようにする。
+    """
+    try:
+        return schema.model_validate_json(raw_text).model_dump()
+    except ValidationError as exc:
+        message = f"応答がスキーマを満たしません: {exc.error_count()} 件"
+        raise LLMInvalidResponseError(message) from exc
+    except (ValueError, RecursionError, TypeError) as exc:
+        message = f"応答を解釈できません: {type(exc).__name__}"
+        raise LLMInvalidResponseError(message) from exc
+
+
 @runtime_checkable
 class LLMProvider(Protocol):
     """LLM プロバイダーが満たすべきインターフェース。
@@ -47,7 +68,7 @@ class LLMProvider(Protocol):
         *,
         instruction: str,
         untrusted_content: str,
-        schema: type,
+        schema: type[BaseModel],
     ) -> LLMCompletion:
         """指示と非信頼テキストから、`schema` で検証済みの JSON を得る。
 

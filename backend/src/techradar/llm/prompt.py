@@ -30,8 +30,11 @@ SYSTEM_PROMPT = f"""あなたは技術記事から構造化データを抽出す
 """
 
 # 本文側から区切りタグを閉じられると、以降が指示として解釈されうる。
-# 大文字小文字と空白の揺れを含めて検出する。
-_TAG_PATTERN = re.compile(r"</?\s*untrusted_content\s*>", re.IGNORECASE)
+# 大文字小文字・空白の揺れ・属性付き（`</untrusted_content foo="bar">`）まで含めて検出する。
+_TAG_PATTERN = re.compile(r"<\s*/?\s*untrusted_content\b[^>]*>", re.IGNORECASE)
+
+# 見た目を同じにしたままタグ判定を回避されないよう、判定前に除去する不可視文字。
+_INVISIBLE_CHARACTERS = re.compile(r"[​-‏‪-‮⁠-⁯﻿]")
 
 
 def neutralize_delimiters(content: str) -> str:
@@ -39,9 +42,12 @@ def neutralize_delimiters(content: str) -> str:
 
     タグそのものを削除すると本文の意味が変わりうるため、記号を置換して
     タグとして解釈されない形にする。
+
+    ゼロ幅文字を挟んで判定を回避されないよう、先に不可視文字を取り除く。
     """
+    without_invisible = _INVISIBLE_CHARACTERS.sub("", content)
     return _TAG_PATTERN.sub(
-        lambda match: match.group(0).replace("<", "＜").replace(">", "＞"), content
+        lambda match: match.group(0).replace("<", "＜").replace(">", "＞"), without_invisible
     )
 
 
