@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, apiFetch, getApiBaseUrl, getHealth } from "@/lib/api";
+import type { Health } from "@/lib/api";
 
 const ORIGINAL_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 
@@ -74,5 +75,25 @@ describe("getHealth", () => {
     // Assert
     expect(result).toEqual(payload);
     expect(fetchMock.mock.calls[0][0]).toContain("/api/health");
+  });
+
+  it("resolves to a value assignable to the generated HealthResponse schema type", async () => {
+    // Arrange — `satisfies` により、生成型 (openapi-typescript) からずれると
+    // `tsc --noEmit` が失敗する。手書きの Health 型を生成型から導出済みであることの検証。
+    const payload = {
+      status: "ok",
+      version: "0.1.0",
+      brave_search_enabled: false,
+    } satisfies Health;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Act
+    const result: Health = await getHealth();
+
+    // Assert
+    expect(result).toEqual(payload);
   });
 });

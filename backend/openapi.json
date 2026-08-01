@@ -1,0 +1,892 @@
+{
+  "components": {
+    "schemas": {
+      "ArticleRegistrationCreate": {
+        "additionalProperties": false,
+        "description": "URL 登録リクエスト。\n\nSSRF 対策そのもの（内部アドレスの拒否等）は実際に取得する\n`techradar.fetcher` 側の責務のため、ここではスキームと長さの形式検証に\n留める（`crawl.py` の `CrawlRunCreate` と同じ方針）。",
+        "properties": {
+          "url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "ArticleRegistrationCreate",
+        "type": "object"
+      },
+      "ArticleRegistrationResponse": {
+        "description": "登録の公開表現。\n\n`normalized_url` と `user_id` は含めない。内部の正規化結果やユーザー識別子を\n無用に露出させないため（`jobs.py` の `JobResponse` と同じ方針）。",
+        "properties": {
+          "article_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Article Id"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Reason"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "status",
+          "article_id",
+          "error_reason",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ArticleRegistrationResponse",
+        "type": "object"
+      },
+      "CrawlRunCreate": {
+        "additionalProperties": false,
+        "description": "巡回ジョブの起動リクエスト。省略可能。",
+        "properties": {
+          "source_domain": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Domain"
+          }
+        },
+        "title": "CrawlRunCreate",
+        "type": "object"
+      },
+      "CrawlRunResponse": {
+        "description": "巡回ジョブの起動結果。",
+        "properties": {
+          "job_id": {
+            "format": "uuid",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "status"
+        ],
+        "title": "CrawlRunResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "description": "ヘルスチェックのレスポンス。",
+        "properties": {
+          "brave_search_enabled": {
+            "title": "Brave Search Enabled",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "version",
+          "brave_search_enabled"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "JobResponse": {
+        "description": "ジョブ 1 件の進捗レスポンス。\n\n`payload` は含めない。ジョブの投入内容には将来 URL など内部情報が\n入りうるため、進捗確認 API で無条件に露出させない。\n\n`last_error` も同様の理由で含めない。失敗理由は例外メッセージそのものであり、\n今後 fetch_article などが外部 HTTP を叩くハンドラを持つと、アクセス先 URL や\nクエリパラメータ（API キーを含みうる）がそのまま入りうる。この進捗確認 API は\n無認証で叩けるため、ここで露出させると内部情報の漏洩経路になる。失敗理由は\n`operation_logs.error_reason`（非公開経路）に別途記録される。",
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "available_at": {
+            "format": "date-time",
+            "title": "Available At",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "status",
+          "attempts",
+          "created_at",
+          "available_at",
+          "started_at",
+          "finished_at"
+        ],
+        "title": "JobResponse",
+        "type": "object"
+      },
+      "SourceCreate": {
+        "additionalProperties": false,
+        "description": "レジストリの新規登録。",
+        "properties": {
+          "authority_score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Authority Score",
+            "type": "number"
+          },
+          "domain": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Domain",
+            "type": "string"
+          },
+          "entity_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Entity Name",
+            "type": "string"
+          },
+          "github_org": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Github Org"
+          },
+          "path_pattern": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Pattern"
+          },
+          "source_type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "verified": {
+            "default": true,
+            "title": "Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "entity_name",
+          "domain",
+          "source_type",
+          "authority_score"
+        ],
+        "title": "SourceCreate",
+        "type": "object"
+      },
+      "SourceResponse": {
+        "description": "レジストリ 1 件のレスポンス。",
+        "properties": {
+          "authority_score": {
+            "title": "Authority Score",
+            "type": "number"
+          },
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "entity_name": {
+            "title": "Entity Name",
+            "type": "string"
+          },
+          "github_org": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Github Org"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "path_pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Pattern"
+          },
+          "source_type": {
+            "title": "Source Type",
+            "type": "string"
+          },
+          "verified": {
+            "title": "Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "entity_name",
+          "domain",
+          "path_pattern",
+          "github_org",
+          "source_type",
+          "authority_score",
+          "verified"
+        ],
+        "title": "SourceResponse",
+        "type": "object"
+      },
+      "SourceType": {
+        "description": "情報源の種別（`PROJECT_SPEC.md` §10 の Tier 分類に対応）。",
+        "enum": [
+          "official_documentation",
+          "api_specification",
+          "standard_specification",
+          "official_release_notes",
+          "official_blog",
+          "official_research",
+          "original_paper",
+          "official_github_release",
+          "company_tech_blog",
+          "maintainer_article",
+          "personal_article",
+          "tech_media",
+          "news_repost",
+          "summary_repost",
+          "unknown"
+        ],
+        "title": "SourceType",
+        "type": "string"
+      },
+      "SourceUpdate": {
+        "additionalProperties": false,
+        "description": "レジストリの部分更新。\n\n省略した項目は変更しない。`domain`・`path_pattern`・`github_org` は一意制約\n`uq_source_registry_domain` を構成するキーであり、`service._rule_key` の\n同一性判定にも使われるため変更させない（別のパターンにしたい場合は新規登録\nする）。ここを変更可能にすると、PATCH で行のキーを変えた後にシーダーを\n走らせたとき、変更前のキーに一致する config 側の原ルールが「存在しない」と\n判定されて別行として再投入され、手直しした行と矛盾する形で併存してしまう。",
+        "properties": {
+          "authority_score": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authority Score"
+          },
+          "entity_name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Name"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceType"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verified": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified"
+          }
+        },
+        "title": "SourceUpdate",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "TechRadar API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/articles": {
+      "post": {
+        "description": "URL を登録し、記事取得ジョブを積む。\n\n同じ URL（正規化後）を何度も登録しても fetch ジョブを積み増さないよう、\n既存登録があればそれをそのまま返す。",
+        "operationId": "create_article_registration_api_articles_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArticleRegistrationCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleRegistrationResponse"
+                }
+              }
+            },
+            "description": "同一 URL の登録が既に存在するため、新規作成せず既存の登録を返した。"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleRegistrationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Article Registration",
+        "tags": [
+          "articles"
+        ]
+      }
+    },
+    "/api/articles/registrations/{registration_id}": {
+      "get": {
+        "description": "登録の状態を取得する。",
+        "operationId": "get_article_registration_api_articles_registrations__registration_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "registration_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Registration Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleRegistrationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Article Registration",
+        "tags": [
+          "articles"
+        ]
+      }
+    },
+    "/api/crawl/runs": {
+      "post": {
+        "description": "巡回ジョブを enqueue する。\n\nUI のボタン連打などで重複起動されると、`crawl_sources` 1件ごとに発生する\n検索 API / LLM 呼び出しが無制限に積み上がり、追加課金ゼロという前提に\n直接影響する。pending または実行中 status の `crawl_sources` ジョブが既に\n存在する場合は新規作成せず、その job_id を 200 OK で返す。存在しなければ\n従来どおり新規に enqueue して 201 Created を返す。",
+        "operationId": "create_crawl_run_api_crawl_runs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CrawlRunCreate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CrawlRunResponse"
+                }
+              }
+            },
+            "description": "pending または実行中の crawl_sources ジョブが既に存在するため、新規作成せず既存ジョブを返した。"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CrawlRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Crawl Run",
+        "tags": [
+          "crawl"
+        ]
+      }
+    },
+    "/api/health": {
+      "get": {
+        "description": "アプリケーションの稼働状態を返す。",
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/api/jobs/{job_id}": {
+      "get": {
+        "description": "ジョブの進捗を取得する。",
+        "operationId": "get_job_api_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/sources": {
+      "get": {
+        "description": "登録済みの情報源を一覧する。",
+        "operationId": "list_sources_api_sources_get",
+        "parameters": [
+          {
+            "description": "ドメインの部分一致で絞り込む",
+            "in": "query",
+            "name": "domain",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ドメインの部分一致で絞り込む",
+              "title": "Domain"
+            }
+          },
+          {
+            "description": "企業・OSS 名の部分一致で絞り込む",
+            "in": "query",
+            "name": "entity_name",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "企業・OSS 名の部分一致で絞り込む",
+              "title": "Entity Name"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SourceResponse"
+                  },
+                  "title": "Response List Sources Api Sources Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Sources",
+        "tags": [
+          "sources"
+        ]
+      },
+      "post": {
+        "description": "情報源を登録する。",
+        "operationId": "create_source_api_sources_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Source",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/sources/{source_id}": {
+      "patch": {
+        "description": "情報源を部分更新する。\n\n更新した行は手動確認済みとして扱う（`verified` を明示指定した場合はそれに従う）。",
+        "operationId": "update_source_api_sources__source_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Source",
+        "tags": [
+          "sources"
+        ]
+      }
+    }
+  }
+}
