@@ -32,6 +32,10 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 4. **実装** — `implement` (TDD: RED→GREEN→REFACTOR) → `gitlab-commit`
 5. **MR** — `gitlab-mr-flow` で MR作成 (Draft) → self review (`gitlab-mr-review` self) → 指摘修正 (`gitlab-mr-address`) → merge。マージ条件は下記「自己マージ許可」に従う
 6. **終了時の更新** — `gitlab-cleanup` で Issue を `Done` + close、`docs/mr/` `docs/issue/` の移動、ブランチ/worktree掃除まで実行する。親ロードマップIssue (`label=roadmap`) のチェック項目も `gitlab-roadmap update` で更新する
+7. **セッション終了の明示** — cleanup 完了後、以下3点を必ず出力してから応答を終える。黙って次の作業へ進まない
+   - **セッション終了**であることを明示する (「1サイクル完了、セッション終了」と書く)
+   - **次に着手するIssue**を提案する (`gitlab-roadmap next` の結果を根拠に、IID・タイトル・選定理由を1行ずつ)
+   - 提案できるIssueが無い、または今回の作業で**新たな課題を検出した**場合は、`gitlab-issue` でIssueを新規作成してからその IID を次着手候補として提示する
 
 ### よく使うskill (グローバル定義)
 
@@ -59,14 +63,14 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 
 グローバル規約の「MR自己マージ禁止」は**本リポジトリでは適用しない**。以下を満たせば作成者自身が `glab mr merge <IID> --remove-source-branch` を実行してよい (理由: 1名運用でレビュアーが不在。承認待ちと冷却期間が無意味な遅延にしかならない)。
 
-- [ ] CI pipeline が全緑
 - [ ] `gitlab-mr-review` skill の self モードを実行済みで、CRITICAL/HIGH の指摘がゼロ
 
-上記2点が揃えば即マージする。以下のグローバル要件は本リポジトリでは**撤廃**する:
+上記を満たせば即マージする。以下のグローバル要件は本リポジトリでは**撤廃**する:
 
 - reviewer への承認依頼 (`gitlab-mr-flow` の「reviewer依頼note投稿」ステップは不要)
 - reviewer または権限保有者による merge 実行 (`~/.claude/skills/gitlab-mr-flow/SKILL.md` L112, L134)
 - self-merge 前の24時間待機・翌日見直し (`~/.claude/docs/gitlab/README.md` L98)
+- **CI pipeline の完了待ち** — commit 前に `scripts/ai-harness/check.sh` が全緑であることを hook が強制済みのため、同じ検証を CI で待ち直さない。pipeline が pending / running のままでもマージしてよい (`glab mr merge <IID> --remove-source-branch`)。ただし CI が **失敗** していると判明した場合は、原因を潰すまでマージしない
 
 ### 維持する項目 (緩和禁止)
 
