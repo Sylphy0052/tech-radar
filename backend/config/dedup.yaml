@@ -1,0 +1,48 @@
+# 重複記事の判定設定（PROJECT_SPEC.md §17, §24）
+#
+# 閾値・減点・独自価値判定の絞り込み条件をコードに埋め込まず、この設定ファイルで
+# 管理する。運用しながら調整するため、値の変更にコード修正とデプロイを伴わせない。
+#
+# 判定の仕様:
+#   thresholds  : 重複と判定する類似度の下限 (0.0-1.0)。タイトルは編集距離ベース、
+#                 Embedding はコサイン類似度
+#   penalties   : 重複と判定された記事に掛ける減点。完全一致に近い段ほど大きくする
+#   unique_value: 代表以外を LLM の独自価値判定に回す条件（コスト管理のための絞り込み）
+#   limits      : 1 回の実行の処理量に掛ける安全弁（コスト管理のための上限）
+
+thresholds:
+  # タイトル類似度。「【転載】」のような接頭辞付与を拾いつつ、別トピックの
+  # 記事を誤って重複扱いしないよう高めに設定する
+  title_similarity: 0.90
+  # Embedding のコサイン類似度。タイトルが大きく異なる転載・翻訳記事を拾う
+  embedding_similarity: 0.92
+
+penalties:
+  # canonical URL / 正規化 URL / body_hash の一致は同一記事とほぼ断定できるため満額
+  canonical_url: 1.0
+  normalized_url: 1.0
+  body_hash: 1.0
+  # タイトル・Embedding 一致は誤判定の余地があるため弱める
+  title: 0.8
+  embedding: 0.6
+
+unique_value:
+  # LLM へ独自価値を問う価値がある記事の性質（PROJECT_SPEC.md §9）
+  content_types: [implementation, research]
+  # この技術品質を下回る記事は独自価値判定に回さない
+  min_technical_quality: 0.70
+  # 代表記事との authority 差がこれを超える記事は判定に回さない
+  # （権威の低い情報源の転載は独自検証があっても優先度が低いため）
+  max_authority_gap: 0.30
+  # 1 クラスタあたり LLM に問う候補数の上限。全候補を再ランキングしないための上限
+  max_candidates_per_cluster: 2
+
+limits:
+  # 1 回の実行で処理する記事数の上限。収集元が短期間に大量の記事を入れても
+  # 実行コスト（O(n^2) のクラスタリング）が際限なく増えないための安全弁。
+  # 超過分は決定的な順序（記事 ID 昇順）で切り捨て、切り捨てた件数を
+  # warning ログに残す
+  max_articles_per_run: 500
+  # 1 回の実行で LLM（独自価値判定）を呼ぶ総数の上限。到達した以降の候補は
+  # 判定せず安全側（重複）として扱う
+  max_llm_calls_per_run: 50

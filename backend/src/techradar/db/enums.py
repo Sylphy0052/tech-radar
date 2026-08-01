@@ -28,6 +28,7 @@ class JobType(StrEnum):
     EMBED_ARTICLE = "embed_article"
     CRAWL_SOURCES = "crawl_sources"
     GENERATE_FEED = "generate_feed"
+    DEDUPLICATE_ARTICLES = "deduplicate_articles"
 
 
 class ArticleOrigin(StrEnum):
