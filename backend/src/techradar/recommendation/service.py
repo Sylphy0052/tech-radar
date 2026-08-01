@@ -52,7 +52,8 @@ _OWNED_ORIGIN_VALUES = frozenset(
     origin.value for origin in (ArticleOrigin.MANUAL, ArticleOrigin.GOOD, ArticleOrigin.SAVED)
 )
 # 既読とみなす origin（`PROJECT_SPEC.md` §6.1「既読記事の再表示は抑制する」）。
-_READ_ORIGIN_VALUES = frozenset(
+# `api/recommendations.py`（レスポンスの is_read 判定）と共有するため公開名にする。
+READ_ORIGIN_VALUES = frozenset(
     origin.value for origin in (ArticleOrigin.READ_FULL, ArticleOrigin.CLICKED)
 )
 
@@ -253,7 +254,7 @@ def load_candidates(
     return tuple(
         _to_candidate_signature(
             article,
-            is_read=bool(origins_by_article_id.get(article.id, set()) & _READ_ORIGIN_VALUES),
+            is_read=bool(origins_by_article_id.get(article.id, set()) & READ_ORIGIN_VALUES),
             source_entity_names=tuple(entity_names_by_domain.get(article.source_domain, ())),
         )
         for article in articles
