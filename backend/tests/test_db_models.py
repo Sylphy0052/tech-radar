@@ -340,6 +340,33 @@ class TestSourceRegistry:
         assert entry.authority_score == pytest.approx(1.0)
         assert entry.verified is False
 
+    def test_rejects_duplicate_domain_when_path_pattern_is_null(self, db_session: Session):
+        # Arrange — PostgreSQL は既定で NULL 同士を別の値として扱うため、
+        # path_pattern を持たないドメインが何度でも登録できてしまわないことを確認する
+        db_session.add(
+            SourceRegistry(
+                entity_name="Anthropic",
+                domain="anthropic.com",
+                path_pattern=None,
+                source_type=SourceType.OFFICIAL_BLOG,
+                authority_score=0.9,
+            )
+        )
+        db_session.flush()
+
+        # Act / Assert
+        db_session.add(
+            SourceRegistry(
+                entity_name="Anthropic (duplicate)",
+                domain="anthropic.com",
+                path_pattern=None,
+                source_type=SourceType.OFFICIAL_BLOG,
+                authority_score=0.2,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db_session.flush()
+
     def test_rejects_duplicate_domain_and_path_pattern(self, db_session: Session):
         # Arrange
         db_session.add(
@@ -478,6 +505,116 @@ class TestJobAndLog:
         # Assert — ログは残り、参照だけが外れる
         assert db_session.get(OperationLog, log.id) is not None
         assert log.job_id is None
+
+
+class TestArticleDeletionCascade:
+    def test_removes_dependent_rows_and_clears_optional_references(self, db_session: Session):
+        # Arrange — 記事に紐づく全種類の行を作る
+        article = make_article()
+        db_session.add(article)
+        db_session.flush()
+        user_id = uuid.uuid4()
+        db_session.add(
+            UserArticle(
+                user_id=user_id,
+                article_id=article.id,
+                origin=ArticleOrigin.MANUAL,
+                interest_weight=1.0,
+            )
+        )
+        db_session.add(
+            ArticleFeedback(user_id=user_id, article_id=article.id, action=FeedbackAction.GOOD)
+        )
+        run = RecommendationRun(
+            user_id=user_id,
+            source_article_id=article.id,
+            mode=RecommendationMode.ARTICLE_BASED,
+        )
+        db_session.add(run)
+        db_session.flush()
+        db_session.add(
+            Recommendation(run_id=run.id, article_id=article.id, score=0.5, reasons={}, rank=1)
+        )
+        log = OperationLog(operation="analyze_article", status="completed", article_id=article.id)
+        db_session.add(log)
+        db_session.flush()
+
+        # Act
+        db_session.delete(article)
+        db_session.flush()
+        db_session.expire_all()
+
+        # Assert — 従属データは消え、任意参照は NULL になり行自体は残る
+        assert db_session.scalars(select(UserArticle)).all() == []
+        assert db_session.scalars(select(ArticleFeedback)).all() == []
+        assert db_session.scalars(select(Recommendation)).all() == []
+        assert db_session.get(RecommendationRun, run.id) is not None
+        assert run.source_article_id is None
+        assert db_session.get(OperationLog, log.id) is not None
+        assert log.article_id is None
+
+
+class TestUpdates:
+    def test_updates_topic_preference_weights(self, db_session: Session):
+        # Arrange — Good/Bad の蓄積で更新される中核テーブル
+        preference = UserTopicPreference(
+            user_id=uuid.uuid4(), topic="MCP", positive_weight=0.8, effective_weight=0.8
+        )
+        db_session.add(preference)
+        db_session.flush()
+
+        # Act
+        preference.negative_weight = 0.8
+        preference.effective_weight = 0.0
+        db_session.flush()
+        db_session.expire(preference)
+
+        # Assert
+        assert preference.negative_weight == pytest.approx(0.8)
+        assert preference.effective_weight == pytest.approx(0.0)
+
+    def test_updates_source_authority_for_misclassified_source(self, db_session: Session):
+        # Arrange — 誤った公式判定を修正できること (PROJECT_SPEC.md §27 運用)
+        entry = SourceRegistry(
+            entity_name="Example",
+            domain="misjudged.example.com",
+            path_pattern="/blog",
+            source_type=SourceType.OFFICIAL_BLOG,
+            authority_score=0.9,
+        )
+        db_session.add(entry)
+        db_session.flush()
+
+        # Act
+        entry.authority_score = 0.45
+        entry.source_type = SourceType.TECH_MEDIA
+        entry.verified = True
+        db_session.flush()
+        db_session.expire(entry)
+
+        # Assert
+        assert entry.authority_score == pytest.approx(0.45)
+        assert entry.source_type == SourceType.TECH_MEDIA
+        assert entry.verified is True
+
+    def test_deletes_interest_cluster(self, db_session: Session):
+        # Arrange
+        cluster = UserInterestCluster(
+            user_id=uuid.uuid4(),
+            label="AI Agent Engineering",
+            weight=1.0,
+            topics=["MCP"],
+        )
+        db_session.add(cluster)
+        db_session.flush()
+        cluster_id = cluster.id
+
+        # Act
+        db_session.delete(cluster)
+        db_session.flush()
+
+        # Assert
+        assert db_session.get(UserInterestCluster, cluster_id) is None
 
 
 class TestSchema:

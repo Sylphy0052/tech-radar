@@ -22,6 +22,10 @@ from techradar.config import get_settings
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 TEST_DATABASE_NAME = "techradar_test"
 
+# テスト用 DB の作り直しは破壊的なため、接続先をローカルと CI のサービスコンテナに限定する。
+# "postgres" は GitLab CI の service alias。
+ALLOWED_TEST_DB_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "postgres"})
+
 
 def _test_database_url() -> str:
     """開発用 DB と同じサーバー上のテスト用 DB を指す URL を返す。"""
@@ -38,13 +42,31 @@ def _database_url_for(database: str) -> str:
     return base.set(database=database).render_as_string(hide_password=False)
 
 
+def _assert_safe_to_drop(url: str) -> None:
+    """破壊的 DDL を実行してよい接続先かを検証する。
+
+    `DROP DATABASE` を無条件に実行すると、`DATABASE_URL` が共有 DB や
+    ステージングを指していた場合に、同名の DB を巻き添えで破壊しうる。
+    ローカルまたは CI のサービスコンテナ以外へは接続させない。
+    """
+    host = (make_url(url).host or "").lower()
+    if host not in ALLOWED_TEST_DB_HOSTS:
+        message = (
+            f"テスト用 DB の再作成は {sorted(ALLOWED_TEST_DB_HOSTS)} に対してのみ許可しています "
+            f"(接続先ホスト: {host or '(未指定)'})。DATABASE_URL を確認してください。"
+        )
+        raise RuntimeError(message)
+
+
 def _recreate_test_database() -> None:
     """テスト用データベースを作り直す。
 
     接続には維持管理用の `postgres` データベースを使う。CREATE / DROP DATABASE は
     トランザクション内で実行できないため AUTOCOMMIT にする。
     """
-    admin_engine = create_engine(_database_url_for("postgres"), isolation_level="AUTOCOMMIT")
+    admin_url = _database_url_for("postgres")
+    _assert_safe_to_drop(admin_url)
+    admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
     try:
         with admin_engine.connect() as connection:
             # 既存接続が残っていると DROP が失敗するため強制切断する。

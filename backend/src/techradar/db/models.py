@@ -1,7 +1,12 @@
 """DB モデル定義（`PROJECT_SPEC.md` §19 に対応）。
 
-全テーブルが `user_id` を持つ。MVP は単一ユーザーだが、将来のマルチユーザー化を
-妨げないため（`PROJECT_SPEC.md` §4）。
+ユーザー固有のデータを持つテーブル（`user_articles` / `article_feedback` /
+`recommendation_runs` / `user_interest_clusters` / `user_topic_preferences`）は
+すべて `user_id` を持つ。MVP は単一ユーザーだが、将来のマルチユーザー化を妨げない
+ため（`PROJECT_SPEC.md` §4）。
+
+`articles` / `source_registry` / `jobs` / `operation_logs` はユーザー横断で共有する
+データのため `user_id` を持たない。
 
 列挙値は text 列として保持する。値の追加でマイグレーションが必要にならないようにするため、
 検証は `techradar.db.enums` を使ってアプリ側で行う。
@@ -11,6 +16,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -54,7 +60,8 @@ class Article(Base):
     body: Mapped[str | None] = mapped_column(Text)
     source_domain: Mapped[str] = mapped_column(Text, nullable=False)
     author: Mapped[str | None] = mapped_column(Text)
-    language: Mapped[str | None] = mapped_column(String(16))
+    # BCP-47 の拡張タグ (例: zh-Hans-CN-x-...) は長くなりうるため長さを制限しない。
+    language: Mapped[str | None] = mapped_column(Text)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fetched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -167,7 +174,7 @@ class Recommendation(Base):
         ForeignKey("articles.id", ondelete="CASCADE"), nullable=False
     )
     score: Mapped[float] = mapped_column(Float, nullable=False)
-    reasons: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    reasons: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
 
     __table_args__ = (
@@ -196,7 +203,15 @@ class SourceRegistry(Base):
 
     __table_args__ = (
         # 同一ドメイン・同一パスパターンの重複登録を防ぐ。
-        UniqueConstraint("domain", "path_pattern", name="uq_source_registry_domain"),
+        # PostgreSQL は既定で NULL 同士を別の値として扱うため、そのままでは
+        # path_pattern を持たないドメイン (ドメイン全体にかかる規則) を何度でも
+        # 登録できてしまう。NULLS NOT DISTINCT で NULL も同値として扱う。
+        UniqueConstraint(
+            "domain",
+            "path_pattern",
+            name="uq_source_registry_domain",
+            postgresql_nulls_not_distinct=True,
+        ),
         Index("ix_source_registry_domain", "domain"),
     )
 
@@ -246,7 +261,7 @@ class Job(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     type: Mapped[str] = mapped_column(Text, nullable=False)
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -279,7 +294,7 @@ class OperationLog(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     error_reason: Mapped[str | None] = mapped_column(Text)
-    details: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

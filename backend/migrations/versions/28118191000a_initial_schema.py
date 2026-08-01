@@ -38,7 +38,7 @@ def upgrade() -> None:
         sa.Column("body", sa.Text(), nullable=True),
         sa.Column("source_domain", sa.Text(), nullable=False),
         sa.Column("author", sa.Text(), nullable=True),
-        sa.Column("language", sa.String(length=16), nullable=True),
+        sa.Column("language", sa.Text(), nullable=True),
         sa.Column("published_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "fetched_at",
@@ -50,7 +50,10 @@ def upgrade() -> None:
         sa.Column("domain", sa.Text(), nullable=True),
         sa.Column("category", sa.Text(), nullable=True),
         sa.Column(
-            "topics", postgresql.JSONB(astext_type=sa.Text()), server_default="[]", nullable=False
+            "topics",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default="[]",
+            nullable=False,
         ),
         sa.Column(
             "technologies",
@@ -85,7 +88,10 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("type", sa.Text(), nullable=False),
         sa.Column(
-            "payload", postgresql.JSONB(astext_type=sa.Text()), server_default="{}", nullable=False
+            "payload",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default="{}",
+            nullable=False,
         ),
         sa.Column("status", sa.Text(), server_default="pending", nullable=False),
         sa.Column("attempts", sa.Integer(), server_default="0", nullable=False),
@@ -112,7 +118,12 @@ def upgrade() -> None:
         sa.Column("authority_score", sa.Float(), nullable=False),
         sa.Column("verified", sa.Boolean(), server_default="false", nullable=False),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_source_registry")),
-        sa.UniqueConstraint("domain", "path_pattern", name="uq_source_registry_domain"),
+        sa.UniqueConstraint(
+            "domain",
+            "path_pattern",
+            name="uq_source_registry_domain",
+            postgresql_nulls_not_distinct=True,
+        ),
     )
     op.create_index("ix_source_registry_domain", "source_registry", ["domain"], unique=False)
     op.create_table(
@@ -122,9 +133,16 @@ def upgrade() -> None:
         sa.Column("label", sa.Text(), nullable=False),
         sa.Column("weight", sa.Float(), nullable=False),
         sa.Column(
-            "topics", postgresql.JSONB(astext_type=sa.Text()), server_default="[]", nullable=False
+            "topics",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default="[]",
+            nullable=False,
         ),
-        sa.Column("centroid_embedding", pgvector.sqlalchemy.vector.VECTOR(dim=1024), nullable=True),
+        sa.Column(
+            "centroid_embedding",
+            pgvector.sqlalchemy.vector.VECTOR(dim=1024),
+            nullable=True,
+        ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
@@ -134,7 +152,10 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_user_interest_clusters")),
     )
     op.create_index(
-        "ix_user_interest_clusters_user_id", "user_interest_clusters", ["user_id"], unique=False
+        "ix_user_interest_clusters_user_id",
+        "user_interest_clusters",
+        ["user_id"],
+        unique=False,
     )
     op.create_table(
         "user_topic_preferences",
@@ -172,7 +193,10 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("user_id", "article_id", name="pk_article_feedback"),
     )
     op.create_index(
-        "ix_article_feedback_article_id", "article_feedback", ["article_id"], unique=False
+        "ix_article_feedback_article_id",
+        "article_feedback",
+        ["article_id"],
+        unique=False,
     )
     op.create_table(
         "operation_logs",
@@ -187,7 +211,10 @@ def upgrade() -> None:
         sa.Column("duration_ms", sa.Integer(), nullable=True),
         sa.Column("error_reason", sa.Text(), nullable=True),
         sa.Column(
-            "details", postgresql.JSONB(astext_type=sa.Text()), server_default="{}", nullable=False
+            "details",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default="{}",
+            nullable=False,
         ),
         sa.Column(
             "created_at",
@@ -202,7 +229,10 @@ def upgrade() -> None:
             ondelete="SET NULL",
         ),
         sa.ForeignKeyConstraint(
-            ["job_id"], ["jobs.id"], name=op.f("fk_operation_logs_job_id_jobs"), ondelete="SET NULL"
+            ["job_id"],
+            ["jobs.id"],
+            name=op.f("fk_operation_logs_job_id_jobs"),
+            ondelete="SET NULL",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_operation_logs")),
     )
@@ -234,7 +264,10 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_recommendation_runs")),
     )
     op.create_index(
-        "ix_recommendation_runs_user_id", "recommendation_runs", ["user_id"], unique=False
+        "ix_recommendation_runs_user_id",
+        "recommendation_runs",
+        ["user_id"],
+        unique=False,
     )
     op.create_table(
         "user_articles",
@@ -265,7 +298,10 @@ def upgrade() -> None:
         sa.Column("article_id", sa.Uuid(), nullable=False),
         sa.Column("score", sa.Float(), nullable=False),
         sa.Column(
-            "reasons", postgresql.JSONB(astext_type=sa.Text()), server_default="{}", nullable=False
+            "reasons",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default="{}",
+            nullable=False,
         ),
         sa.Column("rank", sa.Integer(), nullable=False),
         sa.ForeignKeyConstraint(
@@ -283,7 +319,10 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("run_id", "article_id", name="pk_recommendations"),
     )
     op.create_index(
-        "ix_recommendations_run_id_rank", "recommendations", ["run_id", "rank"], unique=False
+        "ix_recommendations_run_id_rank",
+        "recommendations",
+        ["run_id", "rank"],
+        unique=False,
     )
     # ### end Alembic commands ###
 

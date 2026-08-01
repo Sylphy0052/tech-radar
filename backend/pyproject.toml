@@ -91,4 +91,5 @@ exclude_lines = [
 
 [tool.ty.environment]
 python-version = "3.12"
-root = ["./src"]
+# tests は `tests.conftest` のヘルパーを import するためパッケージとして解決させる。
+root = ["./src", "."]
