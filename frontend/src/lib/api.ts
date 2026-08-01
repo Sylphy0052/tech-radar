@@ -2,7 +2,13 @@
  * バックエンド API クライアント。
  *
  * すべてのリクエストはこのモジュールを経由させ、ベース URL とエラー処理を一箇所に集約する。
+ *
+ * レスポンス型は手書きせず、`api-schema.d.ts`（`npm run gen:api-types` が
+ * `backend/openapi.json` から生成）から導出する。DB / API / UI 間の型不整合を
+ * 防ぐため（`PROJECT_SPEC.md` §24）、生成型が最新かは `scripts/ai-harness/check.sh` で検証する。
  */
+
+import type { components } from "@/lib/api-schema";
 
 const DEFAULT_API_BASE_URL = "http://localhost:8000";
 
@@ -37,11 +43,7 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   return (await response.json()) as T;
 }
 
-export type Health = {
-  status: string;
-  version: string;
-  brave_search_enabled: boolean;
-};
+export type Health = components["schemas"]["HealthResponse"];
 
 export function getHealth(): Promise<Health> {
   return apiFetch<Health>("/api/health");

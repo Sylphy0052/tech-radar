@@ -67,6 +67,14 @@ if [[ -f backend/pyproject.toml ]]; then
   log "backend: pytest"
   uv run pytest || fail "backend: pytest失敗"
 
+  log "backend: openapi.jsonの鮮度チェック"
+  OPENAPI_TMP="$(mktemp --suffix=.json)"
+  uv run python -m techradar.openapi_export "$OPENAPI_TMP" \
+    || fail "backend: openapi.jsonの生成に失敗しました"
+  diff -q openapi.json "$OPENAPI_TMP" >/dev/null \
+    || fail "backend: openapi.jsonが最新ではありません（uv run python -m techradar.openapi_exportで再生成してcommitしてください）"
+  rm -f "$OPENAPI_TMP"
+
   popd >/dev/null
 fi
 
@@ -85,6 +93,14 @@ if [[ -f frontend/package.json ]]; then
 
   log "frontend: vitest"
   npm test || fail "frontend: test失敗"
+
+  log "frontend: api-schema.d.tsの鮮度チェック"
+  API_SCHEMA_TMP="$(mktemp --suffix=.d.ts)"
+  npx openapi-typescript "$REPO_ROOT/backend/openapi.json" -o "$API_SCHEMA_TMP" \
+    || fail "frontend: api-schema.d.tsの生成に失敗しました"
+  diff -q src/lib/api-schema.d.ts "$API_SCHEMA_TMP" >/dev/null \
+    || fail "frontend: api-schema.d.tsが最新ではありません（npm run gen:api-typesで再生成してcommitしてください）"
+  rm -f "$API_SCHEMA_TMP"
 
   popd >/dev/null
 fi

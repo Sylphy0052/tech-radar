@@ -79,6 +79,31 @@ class TestCreateCrawlRun:
         assert track_response.status_code == 200
         assert track_response.json()["id"] == job_id
 
+    def test_commits_the_job_before_responding(
+        self, independent_sessions: Callable[[], Session]
+    ) -> None:
+        """受入基準: 応答を受け取った時点で、別接続からもジョブを追跡できること。
+
+        リクエスト単位のセッションは FastAPI の依存の後処理でコミットされるが、
+        後処理が走るのはレスポンス送信より後になる。UI は応答直後に
+        `GET /api/jobs/{job_id}` を叩くため、コミットを応答前に済ませておかないと
+        起動したばかりのジョブが 404 になる。
+        """
+        # Arrange
+        api_session = independent_sessions()
+        observer = independent_sessions()
+        app = create_app(Settings(_env_file=None))
+        app.dependency_overrides[get_session] = lambda: api_session
+
+        # Act
+        with TestClient(app) as test_client:
+            response = test_client.post("/api/crawl/runs")
+
+        # Assert — 応答時点で別接続から見えること（コミット済みであること）
+        assert response.status_code == 201
+        job_id = uuid.UUID(response.json()["job_id"])
+        assert observer.get(Job, job_id) is not None
+
     def test_allows_an_omitted_body(self, client: TestClient) -> None:
         # Act
         response = client.post("/api/crawl/runs")

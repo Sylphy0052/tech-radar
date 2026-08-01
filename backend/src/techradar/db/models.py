@@ -1,9 +1,9 @@
 """DB モデル定義（`PROJECT_SPEC.md` §19 に対応）。
 
 ユーザー固有のデータを持つテーブル（`user_articles` / `article_feedback` /
-`recommendation_runs` / `user_interest_clusters` / `user_topic_preferences`）は
-すべて `user_id` を持つ。MVP は単一ユーザーだが、将来のマルチユーザー化を妨げない
-ため（`PROJECT_SPEC.md` §4）。
+`recommendation_runs` / `user_interest_clusters` / `user_topic_preferences` /
+`article_registrations`）はすべて `user_id` を持つ。MVP は単一ユーザーだが、
+将来のマルチユーザー化を妨げないため（`PROJECT_SPEC.md` §4）。
 
 `articles` / `source_registry` / `jobs` / `operation_logs` はユーザー横断で共有する
 データのため `user_id` を持たない。
@@ -280,6 +280,60 @@ class UserTopicPreference(Base):
     )
 
     __table_args__ = (PrimaryKeyConstraint("user_id", "topic", name="pk_user_topic_preferences"),)
+
+
+class ArticleRegistration(Base):
+    """ユーザーによる URL 登録の状態（`PROJECT_SPEC.md` §6.2）。
+
+    `articles` は取得できて初めて `canonical_url` / `title` が確定するユーザー横断の
+    共有データであり、登録直後の状態をそこに持たせると、取得に失敗した URL の
+    ゴミ行が残り続け推薦クエリ側で常に除外条件が要る。登録はユーザー操作単位の
+    関心事のため、`articles` とは別テーブルに分離する。
+    """
+
+    __tablename__ = "article_registrations"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    # ユーザーが入力した元の URL（表示用）。
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    # 重複登録判定に使う正規化済み URL（`techradar.fetcher.url.normalize_url`）。
+    normalized_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # 処理状態（`JobStatus` の値）。初期値は pending。
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    # 取得完了後に確定する。取得前は未確定のため nullable。
+    article_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("articles.id", ondelete="SET NULL")
+    )
+    # 進行中ジョブの追跡用。ジョブが完了・削除されても登録行自体は残す。
+    job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"))
+    # ユーザーに見せてよい分類済みの理由。例外メッセージそのものは入れない
+    # （`jobs.last_error` と異なり、この列は登録状態確認 API から直接返す前提のため）。
+    error_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # 状態が進むたびに書き換える。server_default だけでは INSERT 時の値が残り続け、
+    # 登録がどこまで進んだかを時刻から追えない。
+    #
+    # 更新時刻に now() ではなく statement_timestamp() を使うのは、now() が
+    # トランザクション開始時刻を返すため。1つのトランザクションで複数回状態を
+    # 進めても同じ値になってしまい、「最後に動いたのはいつか」を表さない。
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.statement_timestamp(),
+    )
+
+    __table_args__ = (
+        # 同じ URL を何度も登録して fetch ジョブを積み増さないための重複登録判定。
+        UniqueConstraint(
+            "user_id", "normalized_url", name="uq_article_registrations_user_id_normalized_url"
+        ),
+        # 関心記事一覧（§6.3）でユーザー単位の一覧取得に使う。
+        Index("ix_article_registrations_user_id", "user_id"),
+    )
 
 
 # 巡回ジョブの重複起動を1件に制限する部分ユニークインデックスの述語。

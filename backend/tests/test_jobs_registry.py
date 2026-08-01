@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 
+from techradar.config import Settings
 from techradar.db.enums import JobType
 from techradar.jobs.registry import JobContext, JobHandlerRegistry, create_default_registry
 
@@ -46,15 +47,25 @@ def test_register_raises_value_error_on_duplicate_registration() -> None:
         registry.register(JobType.FETCH_ARTICLE, _noop_handler)
 
 
-def test_create_default_registry_registers_only_crawl_sources() -> None:
-    """`fetch_article` 等はまだ実装がないため、未登録種別として検出できるままにする。"""
+def test_create_default_registry_registers_url_registration_and_crawl_handlers() -> None:
+    """受入基準: URL 登録の end-to-end（Issue #12 T3）に必要な種別が登録される。
+
+    `generate_feed` / `deduplicate_articles` はまだハンドラの実装が無い
+    後続タスクの担当のため、未登録種別として検出できるままにする。
+    """
     # Arrange / Act
-    registry = create_default_registry()
+    registry = create_default_registry(Settings(_env_file=None))
 
     # Assert
-    assert registry.registered_types == frozenset({JobType.CRAWL_SOURCES})
+    registered = {
+        JobType.CRAWL_SOURCES,
+        JobType.FETCH_ARTICLE,
+        JobType.ANALYZE_ARTICLE,
+        JobType.EMBED_ARTICLE,
+    }
+    assert registry.registered_types == frozenset(registered)
     for job_type in JobType:
-        if job_type is JobType.CRAWL_SOURCES:
+        if job_type in registered:
             assert registry.get(job_type) is not None
         else:
             assert registry.get(job_type) is None
@@ -63,7 +74,7 @@ def test_create_default_registry_registers_only_crawl_sources() -> None:
 async def test_create_default_registry_crawl_sources_handler_is_a_noop() -> None:
     """`crawl_sources` は Issue #9 が実装するまでのプレースホルダ（no-op）である。"""
     # Arrange
-    registry = create_default_registry()
+    registry = create_default_registry(Settings(_env_file=None))
     handler = registry.get(JobType.CRAWL_SOURCES)
     assert handler is not None
     context = JobContext(
