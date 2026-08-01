@@ -104,8 +104,15 @@ class JobWorker:
         3〜4 は全タスクぶんを並行して行う。1件ずつ順番に待つと、同時に猶予を
         超えたタスクの数だけ `worker_cancel_await_timeout_seconds` が積み上がり、
         シャットダウンが `worker_concurrency` に比例して伸びるため。
+
+        1件の release が失敗しても、残りの release・取り残しタスクの退避・
+        `reclaim_stale` は必ず実行する。停止処理は「どれか1つが転んだら全部やめる」
+        より「できるところまでやって、失敗はログに残す」ほうが被害が小さい。
         """
         self._stop_event.set()
+        # 前回の stop() 以降に終わったタスクを落とす。参照を持ち続ける必要が
+        # あるのは、まだ動いているものだけ。
+        self._abandoned_tasks = [task for task in self._abandoned_tasks if not task.done()]
 
         if self._tasks:
             done, pending = await asyncio.wait(
@@ -113,30 +120,49 @@ class JobWorker:
             )
             self._log_task_exceptions(done)
 
+            # 対象ジョブはキャンセル前に控える。キャンセルされたタスク自身が
+            # `finally` で `_current_jobs` から自分を消すため、キャンセル後に
+            # 引くと release すべきジョブを見失いうる。
             overdue = [
-                (worker_index, task)
+                (worker_index, task, self._current_jobs.get(worker_index))
                 for worker_index, task in enumerate(self._tasks)
                 if task in pending
             ]
-            for _worker_index, task in overdue:
+            for _worker_index, task, _job_id in overdue:
                 task.cancel()
-            await asyncio.gather(
-                *(self._cancel_and_release(worker_index, task) for worker_index, task in overdue)
+            results = await asyncio.gather(
+                *(
+                    self._cancel_and_release(worker_index, task, job_id)
+                    for worker_index, task, job_id in overdue
+                ),
+                return_exceptions=True,
             )
+            for (worker_index, _task, job_id), result in zip(overdue, results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "worker.release_on_shutdown_failed worker_index=%d job_id=%s error=%s",
+                        worker_index,
+                        job_id,
+                        result,
+                        exc_info=result,
+                    )
 
             # 待ち切れなかったタスクは、キャンセルを無視して生き続けている可能性が
             # ある。参照を捨てるとイベントループ上で実行中のまま GC の対象になり、
             # どこで終わったのかも追えなくなるため、プロセスが終わるまで保持する。
-            self._abandoned_tasks.extend(task for _index, task in overdue if not task.done())
+            self._abandoned_tasks.extend(
+                task for _index, task, _job_id in overdue if not task.done()
+            )
             self._tasks = []
             self._current_jobs = {}
 
         reclaimed = await asyncio.to_thread(self._reclaim_stale_sync)
         logger.info("worker.reclaimed_stale_on_shutdown count=%d", reclaimed)
 
-    async def _cancel_and_release(self, worker_index: int, task: asyncio.Task[None]) -> None:
+    async def _cancel_and_release(
+        self, worker_index: int, task: asyncio.Task[None], job_id: uuid.UUID | None
+    ) -> None:
         """キャンセル済みタスクの終了を待ち、対象ジョブを pending へ戻す。"""
-        job_id = self._current_jobs.get(worker_index)
         await self._await_cancelled_task(task, worker_index=worker_index, job_id=job_id)
         if job_id is not None:
             await self._release_job(job_id)
@@ -316,7 +342,10 @@ class JobWorker:
         job_id = claimed.context.job_id
 
         def _operation(session: Session) -> None:
-            job = session.get(Job, job_id)
+            # 行ロックを取ってから所有権を判定する。ロックなしに読むと、判定と更新の
+            # 間に別セッションの release がコミットされ、古い started_at を見た
+            # まま無条件で上書きしてしまう。
+            job = session.get(Job, job_id, with_for_update=True)
             if job is None:
                 logger.warning("job.missing_on_complete job_id=%s", job_id)
                 return
@@ -338,7 +367,10 @@ class JobWorker:
         job_id = claimed.context.job_id
 
         def _operation(session: Session) -> None:
-            job = session.get(Job, job_id)
+            # 行ロックを取ってから所有権を判定する。ロックなしに読むと、判定と更新の
+            # 間に別セッションの release がコミットされ、古い started_at を見た
+            # まま無条件で上書きしてしまう。
+            job = session.get(Job, job_id, with_for_update=True)
             if job is None:
                 logger.warning("job.missing_on_fail job_id=%s", job_id)
                 return
@@ -369,7 +401,10 @@ class JobWorker:
 
     def _release_job_sync(self, job_id: uuid.UUID) -> bool:
         def _operation(session: Session) -> bool:
-            job = session.get(Job, job_id)
+            # 行ロックを取ってから所有権を判定する。ロックなしに読むと、判定と更新の
+            # 間に別セッションの release がコミットされ、古い started_at を見た
+            # まま無条件で上書きしてしまう。
+            job = session.get(Job, job_id, with_for_update=True)
             if job is None:
                 logger.warning("job.missing_on_release job_id=%s", job_id)
                 return False
