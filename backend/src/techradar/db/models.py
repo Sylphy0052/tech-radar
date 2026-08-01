@@ -313,8 +313,17 @@ class ArticleRegistration(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # 状態が進むたびに書き換える。server_default だけでは INSERT 時の値が残り続け、
+    # 登録がどこまで進んだかを時刻から追えない。
+    #
+    # 更新時刻に now() ではなく statement_timestamp() を使うのは、now() が
+    # トランザクション開始時刻を返すため。1つのトランザクションで複数回状態を
+    # 進めても同じ値になってしまい、「最後に動いたのはいつか」を表さない。
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.statement_timestamp(),
     )
 
     __table_args__ = (
