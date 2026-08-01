@@ -36,6 +36,10 @@ export function CrawlRunPanel() {
 
   async function handleClick(): Promise<void> {
     setStartError(null);
+    // 進行中の巡回があると backend は同じ job_id を返す。id が変わらないと
+    // ポーリングは再開されないため、押し直しのたびに一度切っておく
+    // （前回の進捗取得が失敗して止まっている場合に押しても復帰しなくなる）。
+    setJobId(null);
     setIsStarting(true);
     try {
       const result = await startCrawlRun();

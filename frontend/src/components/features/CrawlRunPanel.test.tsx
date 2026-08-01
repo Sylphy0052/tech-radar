@@ -159,6 +159,34 @@ describe("CrawlRunPanel", () => {
     expect(screen.getByRole("button", { name: "巡回を実行" })).not.toBeDisabled();
   });
 
+  it("resumes polling when the button is pressed again after the progress failed", async () => {
+    // Arrange — 進捗取得が失敗し続けた後、再度押した以降は成功するようになる。
+    let getCallCount = 0;
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        // 進行中の巡回があるため、押し直しても同じ job_id が返る。
+        return jsonResponse({ job_id: jobId, status: "searching" }, 200);
+      }
+      getCallCount += 1;
+      if (getCallCount <= DEFAULT_MAX_CONSECUTIVE_ERRORS) {
+        return jsonResponse({ detail: "ジョブが見つかりません" }, 404);
+      }
+      return jsonResponse(makeJob("searching"), 200);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<CrawlRunPanel />);
+    clickRunButton();
+    await flush();
+    await flush(DEFAULT_POLLING_INTERVAL_MS * DEFAULT_MAX_CONSECUTIVE_ERRORS);
+
+    // Act — 同じ job_id が返る状況でも押し直しでポーリングが再開すること
+    clickRunButton();
+    await flush();
+
+    // Assert
+    expect(screen.getByText("状態: 巡回実行中")).toBeInTheDocument();
+  });
+
   it("shows an error message when starting the crawl fails with a 5xx response", async () => {
     // Arrange
     const fetchMock = vi.fn().mockResolvedValue(new Response("boom", { status: 500 }));
