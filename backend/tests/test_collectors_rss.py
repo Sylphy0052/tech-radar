@@ -1,0 +1,260 @@
+"""`RssCollector` の巡回・パース挙動を検証する。"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+
+from techradar.collectors import rss as rss_module
+from techradar.collectors.config import FeedEntryConfig
+from techradar.collectors.rss import RssCollector
+from techradar.config import Settings
+from techradar.fetcher.errors import FetchError
+from techradar.fetcher.http import FEED_CONTENT_TYPES, FetchedResource
+
+RSS2_FEED = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+<title>Test Feed</title>
+<link>https://example.com/</link>
+<description>desc</description>
+<item>
+<title>Sample Article</title>
+<link>https://example.com/articles/1</link>
+<pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate>
+</item>
+<item>
+<title>No Link Article</title>
+<pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate>
+</item>
+<item>
+<title></title>
+<link>https://example.com/articles/3</link>
+<pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate>
+</item>
+<item>
+<title>No Date Article</title>
+<link>https://example.com/articles/4</link>
+</item>
+</channel>
+</rss>
+"""
+
+ATOM_FEED = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Test Atom Feed</title>
+<link href="https://example.com/"/>
+<updated>2024-01-01T00:00:00Z</updated>
+<entry>
+<title>Atom Article</title>
+<link href="https://example.com/articles/2"/>
+<updated>2024-01-02T00:00:00Z</updated>
+<id>urn:uuid:1</id>
+</entry>
+</feed>
+"""
+
+
+def _feed_entry(
+    name: str = "Example Feed", url: str = "https://example.com/feed.xml"
+) -> FeedEntryConfig:
+    return FeedEntryConfig(name=name, url=url)
+
+
+def _resource(text: str, *, content_type: str = "application/rss+xml") -> FetchedResource:
+    return FetchedResource(
+        final_url="https://example.com/feed.xml",
+        body=text.encode("utf-8"),
+        text=text,
+        content_type=content_type,
+        status_code=200,
+    )
+
+
+@pytest.fixture
+def settings() -> Settings:
+    return Settings(_env_file=None)
+
+
+class _FakeFetchResource:
+    """テストごとに URL→応答の対応を積み上げるための小さなヘルパー。"""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.responses: dict[str, object] = {}
+
+    def set_response(self, url: str, resource: FetchedResource) -> None:
+        self.responses[url] = resource
+
+    def set_error(self, url: str, error: Exception) -> None:
+        self.responses[url] = error
+
+    def __call__(
+        self, url: str, *, allowed_content_types: tuple[str, ...], settings: Settings | None = None
+    ) -> FetchedResource:
+        self.calls.append({"url": url, "allowed_content_types": allowed_content_types})
+        result = self.responses[url]
+        if isinstance(result, Exception):
+            raise result
+        assert isinstance(result, FetchedResource)
+        return result
+
+
+@pytest.fixture
+def fake_fetch_resource(monkeypatch: pytest.MonkeyPatch) -> _FakeFetchResource:
+    """`fetch_resource` をスタブに差し替え、呼び出し引数を記録する。"""
+    fake = _FakeFetchResource()
+    monkeypatch.setattr(rss_module, "fetch_resource", fake)
+    return fake
+
+
+class TestCollectFromRss2Feed:
+    def test_returns_a_candidate_with_url_title_and_published_at(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert
+        matched = [c for c in candidates if c.url == "https://example.com/articles/1"]
+        assert len(matched) == 1
+        candidate = matched[0]
+        assert candidate.title == "Sample Article"
+        assert candidate.collector_name == "rss"
+        assert candidate.source_hint == feed.name
+        assert candidate.published_at == datetime(2024, 1, 1, tzinfo=UTC)
+
+    def test_published_at_is_timezone_aware_utc(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert
+        matched = next(c for c in candidates if c.url == "https://example.com/articles/1")
+        assert matched.published_at is not None
+        assert matched.published_at.tzinfo is UTC
+
+    def test_skips_entries_without_a_link(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert — "No Link Article" は link が無いため除外される
+        assert "No Link Article" not in [c.title for c in candidates]
+
+    def test_skips_entries_with_an_empty_title(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert — タイトル空の記事（articles/3）は候補に含まれない
+        assert "https://example.com/articles/3" not in [c.url for c in candidates]
+
+    def test_entry_without_published_or_updated_has_none_published_at(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert — 日付が取れないだけでは除外しない（後段の鮮度フィルタに任せる）
+        matched = next(c for c in candidates if c.url == "https://example.com/articles/4")
+        assert matched.published_at is None
+
+
+class TestCollectFromAtomFeed:
+    def test_returns_a_candidate_using_updated_as_published_at(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(
+            feed.url, _resource(ATOM_FEED, content_type="application/atom+xml")
+        )
+        collector = RssCollector([feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        assert candidate.url == "https://example.com/articles/2"
+        assert candidate.title == "Atom Article"
+        assert candidate.published_at == datetime(2024, 1, 2, tzinfo=UTC)
+
+
+class TestCollectResilience:
+    def test_continues_when_one_feed_fetch_fails(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange — 1本目は取得失敗、2本目は成功
+        broken_feed = _feed_entry(name="Broken Feed", url="https://example.com/broken.xml")
+        healthy_feed = _feed_entry(name="Healthy Feed", url="https://example.com/healthy.xml")
+        fake_fetch_resource.set_error(broken_feed.url, FetchError("取得に失敗しました"))
+        fake_fetch_resource.set_response(healthy_feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([broken_feed, healthy_feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert — 失敗したフィードを無視して、成功したフィードの候補は返る
+        assert any(c.url == "https://example.com/articles/1" for c in candidates)
+
+    def test_returns_empty_list_when_all_feeds_fail(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_error(feed.url, FetchError("取得に失敗しました"))
+        collector = RssCollector([feed], settings)
+
+        # Act / Assert
+        assert collector.collect() == ()
+
+
+class TestFetchResourceUsage:
+    def test_calls_fetch_resource_with_feed_content_types(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange — SSRF ガード経路（fetch_resource）を必ず通ることを担保する
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        collector.collect()
+
+        # Assert
+        assert len(fake_fetch_resource.calls) == 1
+        call = fake_fetch_resource.calls[0]
+        assert call["url"] == feed.url
+        assert call["allowed_content_types"] == FEED_CONTENT_TYPES

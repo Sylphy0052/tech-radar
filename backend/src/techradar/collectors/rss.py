@@ -1,0 +1,128 @@
+"""RSS/Atom フィードの巡回コレクター（`PROJECT_SPEC.md` §12）。
+
+`config/feeds.yaml` の `rss` セクションに列挙された公式フィードを巡回し、
+エントリを `CandidateArticle` へ変換する。`jp_media` セクションの巡回も実体は
+同じ RSS/Atom パース処理のため、`techradar.collectors.jp_media.JpMediaCollector`
+はこのモジュールの `RssCollector` を継承して再利用する（パース処理を複製
+しない）。
+"""
+
+from __future__ import annotations
+
+import calendar
+import logging
+import time
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import Any
+
+import feedparser
+
+from techradar.collectors.base import CandidateArticle
+from techradar.collectors.config import FeedEntryConfig
+from techradar.config import Settings
+from techradar.fetcher.errors import FetchError
+from techradar.fetcher.http import FEED_CONTENT_TYPES, fetch_resource
+
+logger = logging.getLogger(__name__)
+
+
+def _to_utc_datetime(value: time.struct_time | None) -> datetime | None:
+    """feedparser の `time.struct_time`（UTC 前提）を tz 付き `datetime` へ変換する。
+
+    `published_parsed` / `updated_parsed` はどちらも feedparser が UTC で
+    正規化した `time.struct_time`。ローカルタイムゾーンとして解釈する
+    `time.mktime` ではなく、UTC 前提で epoch 秒へ変換する `calendar.timegm`
+    を使う。
+    """
+    if value is None:
+        return None
+    return datetime.fromtimestamp(calendar.timegm(value), tz=UTC)
+
+
+class RssCollector:
+    """公式 RSS/Atom フィードを巡回するコレクター。"""
+
+    name: str = "rss"
+
+    def __init__(self, feeds: Sequence[FeedEntryConfig], settings: Settings) -> None:
+        self._feeds = tuple(feeds)
+        self._settings = settings
+
+    def collect(self) -> Sequence[CandidateArticle]:
+        """設定された全フィードを巡回し、候補記事をまとめて返す。
+
+        1 フィードの取得・パース失敗は警告ログに残してスキップし、他の
+        フィードの収集は続ける。全フィードが失敗しても空リストを返してよい
+        （呼び出し側の他コレクターを巻き込まないよう、ここでは
+        `CollectorError` を送出しない。あくまでこのコレクター自体は
+        「続行できる」ため）。
+        """
+        candidates: list[CandidateArticle] = []
+        for feed in self._feeds:
+            candidates.extend(self._collect_feed(feed))
+        return tuple(candidates)
+
+    def _collect_feed(self, feed: FeedEntryConfig) -> list[CandidateArticle]:
+        """1 フィード分を取得・パースし、候補記事のリストを返す（失敗時は空）。"""
+        try:
+            # feedparser.parse() へ URL を直接渡すと feedparser 自身が名前解決・
+            # HTTP 取得を行ってしまい、`techradar.fetcher.http` の SSRF ガード
+            # （DNS ピンニング・リダイレクト毎の検証・レスポンスサイズ上限）を
+            # 素通りする。必ず `fetch_resource` 経由で安全に取得済みのテキスト
+            # だけを `feedparser.parse()` に渡す。
+            resource = fetch_resource(
+                feed.url,
+                allowed_content_types=FEED_CONTENT_TYPES,
+                settings=self._settings,
+            )
+        except FetchError as exc:
+            logger.warning("フィードの取得に失敗しました: %s (%s)", feed.name, exc)
+            return []
+
+        parsed = feedparser.parse(resource.text)
+        entries = parsed.entries
+        if parsed.bozo and not entries:
+            # パース自体が壊れていてエントリが 1 件も取れていない場合のみ
+            # このフィードを諦める。1 件でも取れていれば bozo は警告に留める
+            # （フィード側の軽微なマークアップ崩れで全滅させない）。
+            logger.warning(
+                "フィードのパースに失敗しました: %s (%s)",
+                feed.name,
+                parsed.get("bozo_exception"),
+            )
+            return []
+        if parsed.bozo:
+            logger.warning(
+                "フィードの一部パースでエラーがありました（取得できた分のみ採用）: %s (%s)",
+                feed.name,
+                parsed.get("bozo_exception"),
+            )
+
+        return [
+            candidate
+            for entry in entries
+            if (candidate := self._to_candidate(entry, feed)) is not None
+        ]
+
+    def _to_candidate(self, entry: Any, feed: FeedEntryConfig) -> CandidateArticle | None:
+        """1 エントリを `CandidateArticle` へ変換する。作れない場合は None。"""
+        url = entry.get("link")
+        if not url:
+            # link の無いエントリは候補記事として登録できないためスキップする。
+            return None
+        title = (entry.get("title") or "").strip()
+        if not title:
+            # タイトル無しでは候補として扱えないためスキップする。
+            return None
+
+        published_at = _to_utc_datetime(
+            entry.get("published_parsed") or entry.get("updated_parsed")
+        )
+        return CandidateArticle(
+            url=url,
+            title=title,
+            published_at=published_at,
+            collector_name=self.name,
+            source_hint=feed.name,
+        )

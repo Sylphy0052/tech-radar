@@ -1,0 +1,61 @@
+# 候補記事コレクターの巡回設定（PROJECT_SPEC.md §12）
+#
+# 一次情報（公式 RSS/Atom、GitHub Releases、arXiv）を軸に、Web検索だけに
+# 依存せず固定巡回する対象をこの設定ファイルで管理する。実在確認済みの URL のみ
+# 記載する（推測での追加は禁止。追加時は必ず疎通確認してから記載すること）。
+#
+# 設定の仕様:
+#   freshness_days           : 直近何日以内の記事を候補に残すか
+#   max_candidates_per_run   : 1 回の巡回で enqueue する候補の上限（コスト暴走の安全弁）
+#   rss                      : 公式 RSS / Atom
+#   jp_media                 : 国内技術メディア
+#   github_repositories      : GitHub Releases を追う対象（owner/repo）
+#   arxiv_categories         : arXiv の対象カテゴリ
+#   hacker_news_top_items    : Hacker News から拾う上位件数
+
+freshness_days: 7
+max_candidates_per_run: 200
+
+rss:
+  - name: Kubernetes Blog
+    url: https://kubernetes.io/feed.xml
+  - name: Go Blog
+    url: https://go.dev/blog/feed.atom
+  - name: Rust Blog
+    url: https://blog.rust-lang.org/feed.xml
+  - name: Python Insider
+    url: https://blog.python.org/feeds/posts/default
+  - name: PostgreSQL News
+    url: https://www.postgresql.org/news.rss
+  - name: Docker Blog
+    url: https://www.docker.com/feed/
+  - name: AWS News Blog
+    url: https://aws.amazon.com/blogs/aws/feed/
+  - name: Cloudflare Blog
+    url: https://blog.cloudflare.com/rss/
+  - name: Mozilla Hacks
+    url: https://hacks.mozilla.org/feed/
+  - name: GitHub Blog
+    url: https://github.blog/feed/
+
+jp_media:
+  - name: Zenn Trending
+    url: https://zenn.dev/feed
+  - name: Qiita Popular
+    url: https://qiita.com/popular-items/feed
+  - name: はてなブックマーク テクノロジー
+    url: https://b.hatena.ne.jp/hotentry/it.rss
+
+github_repositories:
+  - kubernetes/kubernetes
+  - golang/go
+  - rust-lang/rust
+  - moby/moby
+  - hashicorp/terraform
+
+arxiv_categories:
+  - cs.SE
+  - cs.DC
+  - cs.AI
+
+hacker_news_top_items: 50
