@@ -1,7 +1,11 @@
 """重複判定の設定ファイル読み込み（`PROJECT_SPEC.md` §17, §24, §25）。
 
 閾値・減点・コスト管理のパラメータをコードに埋め込まず `config/dedup.yaml` で
-管理する。読み込み時に Pydantic で検証し、壊れた設定のまま起動しないようにする。
+管理する。読み込み時に Pydantic で検証し、壊れた設定を検出する。
+
+`get_dedup_config()` は `lru_cache` 付きの遅延読み込みのため、この検証が
+実際に走るのはプロセス起動時ではなく、重複排除処理が初めて呼ばれたタイミング
+である（起動時ヘルスチェックとしての導入はこの MR のスコープ外）。
 """
 
 from __future__ import annotations
@@ -14,7 +18,12 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from techradar.db.enums import ContentType
-from techradar.dedup.rules import DuplicatePenalties, DuplicateThresholds, UniqueValueSettings
+from techradar.dedup.rules import (
+    DedupLimits,
+    DuplicatePenalties,
+    DuplicateThresholds,
+    UniqueValueSettings,
+)
 
 # backend/src/techradar/dedup/config.py から 3 階層上が backend/
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
@@ -22,6 +31,12 @@ DEFAULT_CONFIG_PATH = BACKEND_ROOT / "config" / "dedup.yaml"
 
 # 独自価値判定で 1 クラスタあたりに残す候補数の下限。0 以下だと LLM に何も問えない。
 MIN_CANDIDATES_PER_CLUSTER = 1
+
+# 実行 1 回あたりの対象記事数の下限。0 以下だと何も処理できない。
+MIN_ARTICLES_PER_RUN = 1
+
+# 実行 1 回あたりの LLM 呼び出し回数の下限。0 以下だと独自価値判定を一切行えない。
+MIN_LLM_CALLS_PER_RUN = 1
 
 
 class DedupConfigError(Exception):
@@ -60,6 +75,15 @@ class UniqueValueConfig(BaseModel):
     max_candidates_per_cluster: int = Field(ge=MIN_CANDIDATES_PER_CLUSTER)
 
 
+class LimitsConfig(BaseModel):
+    """1 回の実行の処理量に掛ける安全弁（コスト管理、`PROJECT_SPEC.md` §24）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_articles_per_run: int = Field(ge=MIN_ARTICLES_PER_RUN)
+    max_llm_calls_per_run: int = Field(ge=MIN_LLM_CALLS_PER_RUN)
+
+
 class DedupConfig(BaseModel):
     """`config/dedup.yaml` 全体。"""
 
@@ -68,6 +92,7 @@ class DedupConfig(BaseModel):
     thresholds: ThresholdsConfig
     penalties: PenaltiesConfig
     unique_value: UniqueValueConfig
+    limits: LimitsConfig
 
     def to_thresholds(self) -> DuplicateThresholds:
         """判定に使う閾値へ変換する。"""
@@ -93,6 +118,13 @@ class DedupConfig(BaseModel):
             min_technical_quality=self.unique_value.min_technical_quality,
             max_authority_gap=self.unique_value.max_authority_gap,
             max_candidates_per_cluster=self.unique_value.max_candidates_per_cluster,
+        )
+
+    def to_limits(self) -> DedupLimits:
+        """安全弁の設定へ変換する。"""
+        return DedupLimits(
+            max_articles_per_run=self.limits.max_articles_per_run,
+            max_llm_calls_per_run=self.limits.max_llm_calls_per_run,
         )
 
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -25,6 +26,7 @@ from techradar.dedup.judge import judge_unique_value
 from techradar.dedup.rules import (
     ArticleCluster,
     ArticleSignature,
+    DedupLimits,
     DuplicateMatch,
     DuplicatePenalties,
     MatchMethod,
@@ -55,6 +57,17 @@ _METHOD_CONFIDENCE_RANK: dict[MatchMethod, int] = {
     MatchMethod.EMBEDDING: 4,
 }
 
+# ログ行を偽装しうる制御文字。改行・復帰・タブを含む C0 制御文字と DEL を
+# 落とす。`dedup/judge.py` の `_CONTROL_CHARACTERS` は LLM が生成する複数行の
+# 判定理由を保持するため改行を残すが、ここではログ 1 行の完全性を守ることが
+# 目的のため改行・復帰も対象にする。
+_LOG_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+
+# ログへ出す外部由来の値の長さ上限。`articles.source_type` / `content_type` は
+# DB 上は自由文字列のため、長大な値や改行を含む値が紛れてもログ行を偽装したり
+# ログを肥大化させたりしないよう制限する。
+MAX_LOGGED_VALUE_LENGTH = 100
+
 
 @dataclass(frozen=True)
 class DeduplicationResult:
@@ -63,10 +76,27 @@ class DeduplicationResult:
     processed_articles: int
     cluster_count: int
     duplicate_count: int
+    # LLM を実際に呼んだ回数。
     llm_call_count: int
+    # 独自価値判定のキャッシュを再利用し、LLM 呼び出しを省いた件数。
+    llm_cache_hit_count: int
+    # `DedupLimits.max_llm_calls_per_run` に到達し、以降の候補を判定せず
+    # 安全側（重複）として扱った実行だったかどうか。
+    llm_call_limit_reached: bool
 
 
-def _parse_source_type(value: str | None) -> SourceType:
+def _sanitize_for_log(value: str) -> str:
+    """ログへ出す外部由来の値から制御文字を除き、長さを制限する。
+
+    `articles.source_type` / `content_type` は DB 上は自由文字列のため、
+    改行文字が紛れるとログ行を偽装されるおそれがある。制御文字を除去した
+    うえで長さも制限する。
+    """
+    cleaned = _LOG_CONTROL_CHARACTERS.sub("", value)
+    return cleaned[:MAX_LOGGED_VALUE_LENGTH]
+
+
+def _parse_source_type(value: str | None, *, article_id: uuid.UUID) -> SourceType:
     """DB の text 列を `SourceType` へ変換する。
 
     `source_type` は列挙外の値を弾かない text 列で保持している
@@ -79,12 +109,14 @@ def _parse_source_type(value: str | None) -> SourceType:
         return SourceType(value)
     except ValueError:
         logger.warning(
-            "重複判定に使えない source_type です。UNKNOWN へ読み替えます: value=%s", value
+            "重複判定に使えない source_type です。UNKNOWN へ読み替えます: article_id=%s value=%s",
+            article_id,
+            _sanitize_for_log(value),
         )
         return SourceType.UNKNOWN
 
 
-def _parse_content_type(value: str | None) -> ContentType | None:
+def _parse_content_type(value: str | None, *, article_id: uuid.UUID) -> ContentType | None:
     """DB の text 列を `ContentType` へ変換する。
 
     未解析でまだ値が入っていない記事は None（既定値）のままにする。
@@ -97,7 +129,11 @@ def _parse_content_type(value: str | None) -> ContentType | None:
     try:
         return ContentType(value)
     except ValueError:
-        logger.warning("重複判定に使えない content_type です。None へ読み替えます: value=%s", value)
+        logger.warning(
+            "重複判定に使えない content_type です。None へ読み替えます: article_id=%s value=%s",
+            article_id,
+            _sanitize_for_log(value),
+        )
         return None
 
 
@@ -111,14 +147,16 @@ def _to_signature(article: Article) -> ArticleSignature:
         body_hash=article.body_hash,
         embedding=tuple(article.embedding) if article.embedding is not None else None,
         source_authority=article.source_authority,
-        source_type=_parse_source_type(article.source_type),
-        content_type=_parse_content_type(article.content_type),
+        source_type=_parse_source_type(article.source_type, article_id=article.id),
+        content_type=_parse_content_type(article.content_type, article_id=article.id),
         technical_quality=article.technical_quality,
         published_at=article.published_at,
     )
 
 
-def _target_articles(session: Session, *, since: datetime) -> Sequence[Article]:
+def _target_articles(
+    session: Session, *, since: datetime, limits: DedupLimits
+) -> Sequence[Article]:
     """重複判定の対象記事を絞り込む。
 
     `cluster_articles` は総当たり O(n^2) のため、全記事を渡すと記事数の増加に
@@ -131,10 +169,55 @@ def _target_articles(session: Session, *, since: datetime) -> Sequence[Article]:
     できなかった記事（まとめ・転載系サイトに多い）は `published_at` が
     NULL になる。まさに重複判定したい記事が対象から丸ごと漏れてしまうため、
     NULL の場合は `fetched_at`（NOT NULL）で代替する。
+
+    期間を絞ってもなお `limits.max_articles_per_run` を超える場合は、収集元が
+    短期間に大量の記事を入れてきたケースを想定した安全弁として、決定的な順序
+    （記事 ID 昇順）で上限まで切り捨てる。黙って切ると気付けないため、
+    切り捨てた件数を warning ログに残す。記事 ID 昇順にするのは、
+    クラスタリング自体の入力順を決定的にするため（`unique_value_candidates`
+    の二次キーと同じく、SQL が保証しない行順に結果を依存させない）。
     """
     published_or_fetched_at = func.coalesce(Article.published_at, Article.fetched_at)
-    stmt = select(Article).where(Article.is_dead.is_(False), published_or_fetched_at >= since)
-    return session.scalars(stmt).all()
+    filters = (Article.is_dead.is_(False), published_or_fetched_at >= since)
+
+    total = session.scalar(select(func.count()).select_from(Article).where(*filters)) or 0
+
+    stmt = select(Article).where(*filters).order_by(Article.id).limit(limits.max_articles_per_run)
+    articles = session.scalars(stmt).all()
+
+    if total > limits.max_articles_per_run:
+        truncated_count = total - limits.max_articles_per_run
+        logger.warning(
+            "重複判定の対象記事数が上限を超えたため切り捨てました: "
+            "total=%s limit=%s truncated_count=%s",
+            total,
+            limits.max_articles_per_run,
+            truncated_count,
+        )
+    return articles
+
+
+def _needs_unique_value_judgment(article: Article) -> bool:
+    """独自価値判定を LLM へ問い直す必要があるかを判定する。
+
+    `unique_value_judged_body_hash` が現在の `body_hash` と一致していれば、
+    前回の判定結果（`has_unique_value`）をそのまま使い回せる
+    （`analysis/service.py` の `needs_analysis` と同じキャッシュの考え方）。
+
+    `body_hash` が None の記事は特別扱いする。`unique_value_judged_body_hash`
+    は判定時点の `body_hash` をそのまま保存するだけなので、body_hash が None の
+    記事を一度判定すると `unique_value_judged_body_hash` も None のまま保存
+    される。その結果「一度も判定していない」のか「判定済みで本文も変わって
+    いない」のかを、この 2 列だけでは区別できない
+    （`needs_analysis` は `summary_ja` の有無でこの 2 つを区別しているが、
+    本 MR では列を増やさない設計にしたため同じ手段が使えない）。
+    区別できない以上、キャッシュを信頼すると「一度も判定していない記事を
+    独自価値なしとみなす」誤りが起こりうるため、安全側に倒して
+    body_hash が無い記事は常に判定し直す。
+    """
+    if article.body_hash is None:
+        return True
+    return article.unique_value_judged_body_hash != article.body_hash
 
 
 def _best_match_for(member_id: uuid.UUID, cluster: ArticleCluster) -> DuplicateMatch:
@@ -170,20 +253,30 @@ def deduplicate_articles(
     冪等に動く。クラスタ内の全記事について `duplicate_of_article_id` /
     `duplicate_penalty` を毎回明示的に設定し直すため、再実行しても前回の
     判定が残らない。
+
+    ただし冪等なのは「同一の対象記事集合」に対してのみである。ルックバック窓の
+    外へ代表記事が出ると、窓内に残った非代表記事が単独クラスタとなり自身が
+    代表へ戻る（カレンダー時間で窓がスライドする運用では成り立たない）。
+    ただし推薦自体が 7 日フィルター（`PROJECT_SPEC.md` §15）を持ち窓外の記事は
+    表示対象にならないため、窓内で見える記事の中から代表を選び直すのは
+    意図した挙動である。
     """
     resolved_since = since or (datetime.now(UTC) - timedelta(days=lookback_days))
     config = get_dedup_config()
     thresholds = config.to_thresholds()
     penalties = config.to_penalties()
     unique_value_settings = config.to_unique_value_settings()
+    limits = config.to_limits()
 
-    articles = _target_articles(session, since=resolved_since)
+    articles = _target_articles(session, since=resolved_since, limits=limits)
     articles_by_id = {article.id: article for article in articles}
     signatures = tuple(_to_signature(article) for article in articles)
     clusters = cluster_articles(signatures, thresholds)
 
     duplicate_count = 0
     llm_call_count = 0
+    llm_cache_hit_count = 0
+    llm_call_limit_reached = False
 
     for cluster in clusters:
         representative = select_representative(cluster)
@@ -193,16 +286,33 @@ def deduplicate_articles(
         unique_ids: set[uuid.UUID] = set()
         for candidate in candidates:
             candidate_article = articles_by_id[candidate.id]
-            has_unique_value = judge_unique_value(
-                provider,
-                title=candidate_article.title,
-                body=candidate_article.body or "",
-                job_id=job_id,
-                session=session,
-                article_id=candidate_article.id,
-                sleep=sleep,
-            )
-            llm_call_count += 1
+
+            if not _needs_unique_value_judgment(candidate_article):
+                # 前回判定時から本文が変わっていないため、判定結果を使い回す
+                # （§24 コスト管理: 同一記事の再解析を避ける）。
+                llm_cache_hit_count += 1
+                has_unique_value = candidate_article.has_unique_value
+            elif llm_call_count >= limits.max_llm_calls_per_run:
+                # 呼び出し上限に達した以降は判定せず安全側（重複）として扱う。
+                # `PROJECT_SPEC.md` §17 の原則（公式記事を優先する）と同じ理由で、
+                # 判定できない記事は独自価値なしへ倒す。判定していないため
+                # キャッシュ列は更新しない（次回実行で改めて判定を試みる）。
+                llm_call_limit_reached = True
+                has_unique_value = False
+            else:
+                has_unique_value = judge_unique_value(
+                    provider,
+                    title=candidate_article.title,
+                    body=candidate_article.body or "",
+                    job_id=job_id,
+                    session=session,
+                    article_id=candidate_article.id,
+                    sleep=sleep,
+                )
+                llm_call_count += 1
+                candidate_article.unique_value_judged_body_hash = candidate_article.body_hash
+                candidate_article.has_unique_value = has_unique_value
+
             if has_unique_value:
                 unique_ids.add(candidate.id)
 
@@ -229,12 +339,21 @@ def deduplicate_articles(
             match_by_member_id=match_by_member_id,
         )
 
+    if llm_call_limit_reached:
+        logger.warning(
+            "重複判定の LLM 呼び出し上限に到達したため、残りの候補は安全側"
+            "（重複）として扱いました: limit=%s",
+            limits.max_llm_calls_per_run,
+        )
+
     session.flush()
     return DeduplicationResult(
         processed_articles=len(articles),
         cluster_count=len(clusters),
         duplicate_count=duplicate_count,
         llm_call_count=llm_call_count,
+        llm_cache_hit_count=llm_cache_hit_count,
+        llm_call_limit_reached=llm_call_limit_reached,
     )
 
 
@@ -282,7 +401,10 @@ def _log_cluster_decision(
     無いため記録しない。
 
     ログ書き込みの失敗で本処理を止めないよう SAVEPOINT に閉じ込める
-    （`llm.retry._record` と同じ方針）。
+    （`llm.retry._record` と同じ方針）。ログの書き込みが失敗しても、
+    `_apply_cluster` が既にセッションへ加えた `duplicate_of_article_id` /
+    `duplicate_penalty` の変更は SAVEPOINT の外側にあるため失われず、
+    `deduplicate_articles` 末尾の `session.flush()` でそのまま反映される。
     """
     if len(cluster.members) <= 1:
         return

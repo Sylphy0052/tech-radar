@@ -94,6 +94,12 @@ class Article(Base):
     )
     # 重複と判定された記事の推薦スコアを下げるための減点。代表記事は 0。
     duplicate_penalty: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    # 独自価値判定 (LLM) を行った時点の body_hash。本文が更新されたら
+    # 判定し直すために使う（analyzed_body_hash / embedding_body_hash と同じ役割）。
+    unique_value_judged_body_hash: Mapped[str | None] = mapped_column(String(64))
+    # 直近の独自価値判定結果。本文が変わっていなければこの値を使い回し、
+    # 同じ記事へ再実行のたびに LLM を呼ばないようにする。
+    has_unique_value: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     __table_args__ = (
         # 7 日フィルターと新着順の取得で使う。

@@ -9,15 +9,46 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy.orm import Session
 
 from techradar.db import Article
 from techradar.db.enums import ContentType, SourceType
-from techradar.dedup.config import get_dedup_config
-from techradar.dedup.service import _to_signature, deduplicate_articles
+from techradar.dedup import service as dedup_service
+from techradar.dedup.config import LimitsConfig, get_dedup_config
+from techradar.dedup.rules import ArticleCluster, ArticleSignature
+from techradar.dedup.service import (
+    MAX_LOGGED_VALUE_LENGTH,
+    _best_match_for,
+    _needs_unique_value_judgment,
+    _sanitize_for_log,
+    _to_signature,
+    deduplicate_articles,
+)
 from techradar.llm import FakeLLMProvider
 
 DUMMY_LLM_RESPONSE = [{"has_unique_value": False, "reason": "公式発表の要約に過ぎない"}]
+
+
+def capture_warnings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """`dedup.service.logger.warning` の呼び出し内容を記録する。
+
+    `migrations/env.py` は alembic 標準の `fileConfig` を既定
+    （`disable_existing_loggers=True`）で呼ぶ。これは呼び出し時点で
+    存在する（かつ ini に明示されていない）ロガーを disabled にする仕様のため、
+    DB を使うテストが 1 件でも先に実行されると、モジュール import 時に
+    生成済みの `techradar.dedup.service` のロガーがプロセス内でずっと
+    disabled になり、`caplog` では以降検知できなくなる。ロガーの
+    `warning` メソッドを直接差し替えて disabled の影響を受けずに呼び出し
+    内容を拾う。
+    """
+    messages: list[str] = []
+
+    def _warning(message: str, *args: object, **kwargs: object) -> None:
+        messages.append(message % args if args else message)
+
+    monkeypatch.setattr(dedup_service.logger, "warning", _warning)
+    return messages
 
 
 def no_sleep(_seconds: float) -> None:
@@ -440,3 +471,374 @@ class TestArticleToSignatureConversion:
         # Assert
         assert signature.embedding == (0.1, 0.2, 0.3)
         assert isinstance(signature.embedding, tuple)
+
+    def test_source_type_warning_includes_the_article_id_and_a_sanitized_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Arrange — 改行混入によるログ行偽装を試みる不正値
+        article = Article(
+            id=uuid.uuid4(),
+            canonical_url="https://example.com/d",
+            original_url="https://example.com/d",
+            title="タイトル",
+            source_domain="example.com",
+            source_authority=0.5,
+            source_type="not-a-real-type\n[FAKE] injected line",
+            technical_quality=0.5,
+        )
+        messages = capture_warnings(monkeypatch)
+
+        # Act
+        _to_signature(article)
+
+        # Assert
+        assert len(messages) == 1
+        assert str(article.id) in messages[0]
+        assert "\n" not in messages[0]
+
+    def test_content_type_warning_includes_the_article_id_and_a_sanitized_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Arrange
+        article = Article(
+            id=uuid.uuid4(),
+            canonical_url="https://example.com/e",
+            original_url="https://example.com/e",
+            title="タイトル",
+            source_domain="example.com",
+            source_authority=0.5,
+            content_type="not-a-real-content-type\n[FAKE] injected line",
+            technical_quality=0.5,
+        )
+        messages = capture_warnings(monkeypatch)
+
+        # Act
+        _to_signature(article)
+
+        # Assert
+        assert len(messages) == 1
+        assert str(article.id) in messages[0]
+        assert "\n" not in messages[0]
+
+
+class TestSanitizeForLog:
+    """ログへ出す外部由来の値のサニタイズ（制御文字除去・長さ上限）。"""
+
+    def test_removes_control_characters(self):
+        # Arrange / Act / Assert
+        assert _sanitize_for_log("bad\nvalue\x00here") == "badvaluehere"
+
+    def test_truncates_to_the_maximum_length(self):
+        # Arrange
+        long_value = "a" * (MAX_LOGGED_VALUE_LENGTH + 50)
+
+        # Act
+        result = _sanitize_for_log(long_value)
+
+        # Assert
+        assert len(result) == MAX_LOGGED_VALUE_LENGTH
+
+
+def _make_minimal_signature(article_id: uuid.UUID) -> ArticleSignature:
+    """`_best_match_for` の検証だけに使う最小限の `ArticleSignature`。"""
+    return ArticleSignature(
+        id=article_id,
+        canonical_url="https://example.com/a",
+        original_url="https://example.com/a",
+        title="タイトル",
+        body_hash=None,
+        embedding=None,
+        source_authority=0.5,
+        source_type=SourceType.UNKNOWN,
+        content_type=None,
+        technical_quality=0.5,
+        published_at=None,
+    )
+
+
+class TestBestMatchFor:
+    def test_raises_a_value_error_when_the_cluster_has_no_match_for_the_member(self):
+        # Arrange — 不変条件違反: 2 件以上のクラスタなのに対象記事が関わる
+        # 一致情報が matches に無い状態
+        member_id = uuid.uuid4()
+        other_id = uuid.uuid4()
+        member = _make_minimal_signature(member_id)
+        other = _make_minimal_signature(other_id)
+        cluster = ArticleCluster(members=(member, other), matches=())
+
+        # Act / Assert
+        with pytest.raises(ValueError, match=str(member_id)):
+            _best_match_for(member_id, cluster)
+
+
+class TestNeedsUniqueValueJudgment:
+    def test_returns_true_when_never_judged(self, db_session: Session):
+        # Arrange
+        article = make_article(db_session, body_hash="hash-a")
+
+        # Act / Assert
+        assert _needs_unique_value_judgment(article) is True
+
+    def test_returns_false_when_the_judged_hash_matches_the_current_body_hash(
+        self, db_session: Session
+    ):
+        # Arrange
+        article = make_article(db_session, body_hash="hash-a")
+        article.unique_value_judged_body_hash = "hash-a"
+        article.has_unique_value = True
+
+        # Act / Assert
+        assert _needs_unique_value_judgment(article) is False
+
+    def test_returns_true_when_the_body_hash_changed_since_the_last_judgment(
+        self, db_session: Session
+    ):
+        # Arrange
+        article = make_article(db_session, body_hash="hash-b")
+        article.unique_value_judged_body_hash = "hash-a"
+
+        # Act / Assert
+        assert _needs_unique_value_judgment(article) is True
+
+    def test_returns_true_when_the_body_hash_is_none_even_if_previously_judged(
+        self, db_session: Session
+    ):
+        # Arrange — body_hash が None の記事は「一度も判定していない」のか
+        # 「判定済みで変更なし」なのかを区別できないため、常に判定し直す
+        article = make_article(db_session, body_hash=None)
+        article.unique_value_judged_body_hash = None
+        article.has_unique_value = True
+
+        # Act / Assert
+        assert _needs_unique_value_judgment(article) is True
+
+
+class TestExcludesDeadArticles:
+    def test_excludes_a_dead_article_from_deduplication_targets(self, db_session: Session):
+        # Arrange — `_target_articles` の is_dead 絞り込みを検証する
+        shared_body_hash = "identical-content-hash-dead"
+        official = make_article(
+            db_session, title="記事A", source_authority=0.9, body_hash=shared_body_hash
+        )
+        dead_mirror = make_article(
+            db_session,
+            title="記事B",
+            source_authority=0.3,
+            body_hash=shared_body_hash,
+            is_dead=True,
+        )
+        provider = FakeLLMProvider(DUMMY_LLM_RESPONSE)
+
+        # Act
+        result = deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert — is_dead の記事は対象から外れ、比較すらされない
+        assert result.processed_articles == 1
+        assert official.duplicate_of_article_id is None
+        assert dead_mirror.duplicate_of_article_id is None
+
+
+class TestLogClusterDecisionFailureDoesNotAbortDeduplication:
+    def test_completes_deduplication_when_the_operation_log_write_fails(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Arrange — 存在しない job_id を渡し、operation_logs.job_id の外部キー
+        # 制約違反で `_log_cluster_decision` の書き込みを失敗させる
+        # （`_log_cluster_decision` の except SQLAlchemyError 分岐を確認する）
+        shared_body_hash = "identical-content-hash-log-failure"
+        official = make_article(
+            db_session, title="記事A", source_authority=0.9, body_hash=shared_body_hash
+        )
+        mirror = make_article(
+            db_session, title="記事B", source_authority=0.3, body_hash=shared_body_hash
+        )
+        provider = FakeLLMProvider(DUMMY_LLM_RESPONSE)
+        bogus_job_id = uuid.uuid4()
+        messages = capture_warnings(monkeypatch)
+
+        # Act
+        result = deduplicate_articles(db_session, provider, job_id=bogus_job_id, sleep=no_sleep)
+
+        # Assert — ログ書き込みが失敗しても重複判定自体は完走し DB へ反映される
+        assert any("operation_logs" in message for message in messages)
+        assert official.duplicate_of_article_id is None
+        assert mirror.duplicate_of_article_id == official.id
+        assert result.duplicate_count == 1
+
+
+class TestUniqueValueJudgmentCaching:
+    """項目1: LLM 判定結果のキャッシュ。"""
+
+    def test_does_not_call_the_llm_again_on_an_unchanged_article(self, db_session: Session):
+        # Arrange — 受入基準: 同じ入力で 2 回実行しても LLM 呼び出し回数が増えない
+        make_article(
+            db_session,
+            title="新製品について解説する記事",
+            canonical_url="https://official.example/cache-post",
+            source_authority=0.9,
+            body="公式発表の内容をそのまま紹介する記事。",
+            body_hash="official-hash-cache-1",
+        )
+        analysis = make_article(
+            db_session,
+            title="新製品について解説する記事",
+            canonical_url="https://blogger.example/cache-analysis",
+            source_authority=0.65,
+            content_type=ContentType.IMPLEMENTATION,
+            technical_quality=0.85,
+            body="実際に触って独自に計測したベンチマーク結果とコードを掲載する記事。",
+            body_hash="analysis-hash-cache-1",
+        )
+        provider = FakeLLMProvider(
+            [{"has_unique_value": True, "reason": "独自のベンチマーク結果とコードがある"}]
+        )
+
+        # Act
+        first = deduplicate_articles(db_session, provider, sleep=no_sleep)
+        second = deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert
+        assert first.llm_call_count == 1
+        assert second.llm_call_count == 0
+        assert second.llm_cache_hit_count == 1
+        assert len(provider.calls) == 1
+        assert analysis.duplicate_of_article_id is None
+
+    def test_calls_the_llm_again_when_the_body_hash_changes_between_runs(self, db_session: Session):
+        # Arrange — 本文が更新された記事は再判定される
+        make_article(
+            db_session,
+            title="新製品について解説する記事",
+            canonical_url="https://official.example/cache-post-2",
+            source_authority=0.9,
+            body="公式発表の内容をそのまま紹介する記事。",
+            body_hash="official-hash-cache-2",
+        )
+        analysis = make_article(
+            db_session,
+            title="新製品について解説する記事",
+            canonical_url="https://blogger.example/cache-analysis-2",
+            source_authority=0.65,
+            content_type=ContentType.IMPLEMENTATION,
+            technical_quality=0.85,
+            body="最初のバージョンの本文。",
+            body_hash="analysis-hash-cache-2-v1",
+        )
+        provider = FakeLLMProvider([{"has_unique_value": True, "reason": "初回の判定理由"}])
+
+        # Act — 1 回目実行後に本文が更新された想定
+        first = deduplicate_articles(db_session, provider, sleep=no_sleep)
+        analysis.body = "更新後の本文。新しい実測値を追加した。"
+        analysis.body_hash = "analysis-hash-cache-2-v2"
+        db_session.flush()
+        second = deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert
+        assert first.llm_call_count == 1
+        assert second.llm_call_count == 1
+        assert second.llm_cache_hit_count == 0
+        assert len(provider.calls) == 2
+
+    def test_always_rejudges_when_the_body_hash_is_none(self, db_session: Session):
+        # Arrange — body_hash が無い記事はキャッシュを信頼せず常に判定し直す
+        make_article(
+            db_session,
+            title="新製品について解説する記事",
+            canonical_url="https://official.example/cache-post-3",
+            source_authority=0.9,
+            body="公式発表の内容をそのまま紹介する記事。",
+            body_hash="official-hash-cache-3",
+        )
+        make_article(
+            db_session,
+            title="新製品について解説する記事",
+            canonical_url="https://blogger.example/cache-analysis-3",
+            source_authority=0.65,
+            content_type=ContentType.IMPLEMENTATION,
+            technical_quality=0.85,
+            body="本文ハッシュが取れなかった記事。",
+            body_hash=None,
+        )
+        provider = FakeLLMProvider([{"has_unique_value": True, "reason": "判定理由"}])
+
+        # Act
+        first = deduplicate_articles(db_session, provider, sleep=no_sleep)
+        second = deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert — 本文は変わっていないが、body_hash が無いため毎回判定される
+        assert first.llm_call_count == 1
+        assert second.llm_call_count == 1
+        assert second.llm_cache_hit_count == 0
+
+
+class TestRunLimits:
+    """項目4: 1 回の実行の処理量に掛ける安全弁。"""
+
+    def test_truncates_the_target_articles_when_the_run_limit_is_exceeded(
+        self,
+        db_session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        # Arrange
+        base_config = get_dedup_config()
+        limited_config = base_config.model_copy(
+            update={
+                "limits": LimitsConfig(
+                    max_articles_per_run=1,
+                    max_llm_calls_per_run=base_config.limits.max_llm_calls_per_run,
+                )
+            }
+        )
+        monkeypatch.setattr("techradar.dedup.service.get_dedup_config", lambda: limited_config)
+        make_article(db_session, title="記事A")
+        make_article(db_session, title="記事B")
+        provider = FakeLLMProvider(DUMMY_LLM_RESPONSE)
+        messages = capture_warnings(monkeypatch)
+
+        # Act
+        result = deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert
+        assert result.processed_articles == 1
+        assert any("truncated_count=1" in message for message in messages)
+
+    def test_stops_calling_the_llm_once_the_run_limit_is_reached(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Arrange
+        base_config = get_dedup_config()
+        limited_config = base_config.model_copy(
+            update={
+                "limits": LimitsConfig(
+                    max_articles_per_run=base_config.limits.max_articles_per_run,
+                    max_llm_calls_per_run=1,
+                )
+            }
+        )
+        monkeypatch.setattr("techradar.dedup.service.get_dedup_config", lambda: limited_config)
+        shared_body_hash = "shared-hash-for-run-limit"
+        official = make_article(
+            db_session, title="公式発表記事", source_authority=0.9, body_hash=shared_body_hash
+        )
+        candidates = [
+            make_article(
+                db_session,
+                title=f"解説記事{index}",
+                source_authority=0.65,
+                content_type=ContentType.IMPLEMENTATION,
+                technical_quality=quality,
+                body_hash=shared_body_hash,
+            )
+            for index, quality in enumerate((0.95, 0.85), start=1)
+        ]
+        provider = FakeLLMProvider(DUMMY_LLM_RESPONSE)
+
+        # Act
+        result = deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert
+        assert result.llm_call_count == 1
+        assert result.llm_call_limit_reached is True
+        assert len(provider.calls) == 1
+        # 上限到達後に判定されなかった候補は安全側（重複）として扱われる
+        assert candidates[-1].duplicate_of_article_id == official.id

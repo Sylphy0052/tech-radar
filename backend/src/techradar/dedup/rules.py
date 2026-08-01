@@ -29,6 +29,13 @@ _NO_PUBLISHED_AT_SORT_KEY = float("inf")
 # 0.30000000000000004 になり、閾値ちょうど 0.30 の記事が意図せず弾かれてしまう。
 _FLOAT_TOLERANCE = 1e-9
 
+# タイトル比較に使う文字数の上限。`articles.title` は外部フィード由来の Text 列で
+# 長さ制限が無く、編集距離（`_levenshtein_distance`）は O(n*m) のため、極端に長い
+# タイトルが混ざると 1 回の実行コストが跳ね上がる。`judge.py` の
+# MAX_JUDGE_TITLE_CHARACTERS と同じ考え方（LLM 入力側は既に上限があるが、
+# 判定側には無かった）。
+MAX_COMPARISON_TITLE_CHARACTERS = 300
+
 
 @dataclass(frozen=True)
 class ArticleSignature:
@@ -107,13 +114,34 @@ class UniqueValueSettings:
     max_candidates_per_cluster: int
 
 
+@dataclass(frozen=True)
+class DedupLimits:
+    """1 回の実行の処理量に掛ける安全弁（コスト管理、`PROJECT_SPEC.md` §24）。
+
+    収集元が短期間に大量の記事を入れても、実行コストが際限なく増えないように
+    する。値は運用しながら調整するため `config/dedup.yaml` に置く。
+    """
+
+    # 1 回の実行で処理する記事数の上限。`cluster_articles` が O(n^2) のため、
+    # 超過分は決定的な順序で切り捨てる。
+    max_articles_per_run: int
+    # 1 回の実行で LLM（独自価値判定）を呼ぶ総数の上限。到達した以降の候補は
+    # 判定せず安全側（重複）として扱う。
+    max_llm_calls_per_run: int
+
+
 def normalize_title(title: str) -> str:
     """タイトルの表記ゆれを吸収する。
 
     Unicode NFKC 正規化で全角・半角の違いを消し、大文字・小文字と記号・空白の
     有無で判定が変わらないよう英数字・かな漢字だけを残す。
+
+    正規化の前に `MAX_COMPARISON_TITLE_CHARACTERS` で切り詰める。編集距離の
+    計算コストを抑えるための上限であり、独自価値判定と同じ発想で「冒頭で
+    主題は読み取れる」という前提に立つ。
     """
-    normalized = unicodedata.normalize("NFKC", title).casefold()
+    truncated = title[:MAX_COMPARISON_TITLE_CHARACTERS]
+    normalized = unicodedata.normalize("NFKC", truncated).casefold()
     return "".join(char for char in normalized if char.isalnum())
 
 
@@ -334,6 +362,13 @@ def unique_value_candidates(
     クラスタ全件を LLM に投げるとコストが線形に増える。代表以外で
     「解説・実装記事らしく」「一定の技術品質があり」「代表と authority が
     近い」ものだけを、技術品質の高い順に上限件数まで残す。
+
+    ここでの絞り込み条件（content_type 限定・technical_quality 下限・
+    authority 差の上限）は `PROJECT_SPEC.md` §17 が定めたものではなく、§24 の
+    コスト管理のために本実装が独自に置いたトレードオフである。上流の
+    content_type 分類が誤っている記事や、authority の低い情報源にある本物の
+    独自検証は LLM に問われないまま重複として畳まれうる。値は
+    `config/dedup.yaml` で調整できる。
     """
     candidates = [
         member
@@ -344,5 +379,9 @@ def unique_value_candidates(
         and (representative.source_authority - member.source_authority)
         <= settings.max_authority_gap + _FLOAT_TOLERANCE
     ]
-    ordered = sorted(candidates, key=lambda member: member.technical_quality, reverse=True)
+    # 同点の候補が上限を跨ぐと、二次キーが無い安定ソートでは結果が入力順
+    # （SQL が保証しない行順）に依存してしまう。id の文字列順を決定的な
+    # 二次キーにし、どの候補が LLM 判定に回るかを実行ごとに変えない
+    # （`_representative_sort_key` と同じ考え方）。
+    ordered = sorted(candidates, key=lambda member: (-member.technical_quality, str(member.id)))
     return tuple(ordered[: settings.max_candidates_per_cluster])

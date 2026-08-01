@@ -12,6 +12,7 @@ import pytest
 
 from techradar.db.enums import ContentType, SourceType
 from techradar.dedup.rules import (
+    MAX_COMPARISON_TITLE_CHARACTERS,
     ArticleCluster,
     ArticleSignature,
     DuplicateMatch,
@@ -94,6 +95,16 @@ class TestNormalizeTitle:
     def test_returns_empty_string_for_a_title_made_only_of_symbols(self):
         # Arrange / Act / Assert
         assert normalize_title("・・・！？") == ""
+
+    def test_truncates_titles_longer_than_the_comparison_limit(self):
+        # Arrange — 上限文字数より後ろの違いは比較に影響しない
+        shared_prefix = "あ" * MAX_COMPARISON_TITLE_CHARACTERS
+        left = shared_prefix + "この先の違いは無視されるはずその1"
+        right = shared_prefix + "この先の違いは無視されるはずその2"
+
+        # Act / Assert
+        assert normalize_title(left) == normalize_title(right)
+        assert len(normalize_title(left)) <= MAX_COMPARISON_TITLE_CHARACTERS
 
 
 class TestLevenshteinDistance:
@@ -555,3 +566,36 @@ class TestUniqueValueCandidates:
 
         # Assert
         assert candidates == (best, middle)
+
+    def test_selects_the_same_candidates_regardless_of_input_order_when_quality_ties(self):
+        # Arrange — 受入基準（冪等性）: technical_quality が同点の候補が上限を
+        # 跨ぐ場合、`_target_articles` の行順（SQL が保証しない）に依存せず、
+        # id の文字列順という決定的な二次キーで毎回同じ候補が選ばれる
+        representative = make_signature(source_authority=0.9)
+        tied_settings = UniqueValueSettings(
+            content_types=(ContentType.IMPLEMENTATION,),
+            min_technical_quality=0.0,
+            max_authority_gap=1.0,
+            max_candidates_per_cluster=2,
+        )
+        tied_candidates = [
+            make_signature(
+                content_type=ContentType.IMPLEMENTATION,
+                technical_quality=0.80,
+                source_authority=0.8,
+            )
+            for _ in range(4)
+        ]
+        cluster_in_order = ArticleCluster(members=(representative, *tied_candidates), matches=())
+        cluster_reversed = ArticleCluster(
+            members=(representative, *reversed(tied_candidates)), matches=()
+        )
+
+        # Act
+        result_in_order = unique_value_candidates(cluster_in_order, representative, tied_settings)
+        result_reversed = unique_value_candidates(cluster_reversed, representative, tied_settings)
+
+        # Assert
+        assert result_in_order == result_reversed
+        expected_ids = tuple(sorted((c.id for c in tied_candidates), key=str)[:2])
+        assert tuple(candidate.id for candidate in result_in_order) == expected_ids

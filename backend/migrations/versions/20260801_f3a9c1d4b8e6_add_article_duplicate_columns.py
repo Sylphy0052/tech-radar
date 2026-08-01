@@ -25,6 +25,12 @@ def upgrade() -> None:
     代表記事への自己参照 (duplicate_of_article_id) と重複減点 (duplicate_penalty) を
     追加する。代表記事は duplicate_of_article_id IS NULL であり、クラスタは同じ
     代表 ID でグループ化する。
+
+    あわせて独自価値判定 (LLM) 結果のキャッシュ列を追加する。
+    unique_value_judged_body_hash は判定時点の body_hash、has_unique_value は
+    直近の判定結果。本文が変わっていなければ判定を使い回し、同じ記事へ
+    再実行のたびに LLM を呼ばないようにする（analyzed_body_hash /
+    embedding_body_hash と同じ役割）。
     """
     op.add_column(
         "articles",
@@ -33,6 +39,14 @@ def upgrade() -> None:
     op.add_column(
         "articles",
         sa.Column("duplicate_penalty", sa.Float(), nullable=False, server_default="0"),
+    )
+    op.add_column(
+        "articles",
+        sa.Column("unique_value_judged_body_hash", sa.String(length=64), nullable=True),
+    )
+    op.add_column(
+        "articles",
+        sa.Column("has_unique_value", sa.Boolean(), nullable=False, server_default="false"),
     )
     op.create_foreign_key(
         op.f("fk_articles_duplicate_of_article_id_articles"),
@@ -52,5 +66,7 @@ def downgrade() -> None:
     op.drop_constraint(
         op.f("fk_articles_duplicate_of_article_id_articles"), "articles", type_="foreignkey"
     )
+    op.drop_column("articles", "has_unique_value")
+    op.drop_column("articles", "unique_value_judged_body_hash")
     op.drop_column("articles", "duplicate_penalty")
     op.drop_column("articles", "duplicate_of_article_id")
