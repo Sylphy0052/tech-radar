@@ -1,7 +1,7 @@
 """add job available at
 
 Revision ID: 776773dd4fc3
-Revises: 2686658bb2d2
+Revises: f3a9c1d4b8e6
 Create Date: 2026-08-01 18:01:09.316518
 
 """
@@ -14,7 +14,10 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "776773dd4fc3"
-down_revision: Union[str, Sequence[str], None] = "2686658bb2d2"
+# 当初は 2686658bb2d2 を親としていたが、同じ親から生えた f3a9c1d4b8e6 (Issue #10) が
+# 先にマージされ head が2つに分岐したため、後発のこちらを直列につなぎ直した。
+# 両者は別テーブル (articles / jobs) を触るため順序を入れ替えても内容は衝突しない。
+down_revision: Union[str, Sequence[str], None] = "f3a9c1d4b8e6"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
