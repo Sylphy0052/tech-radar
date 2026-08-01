@@ -294,12 +294,19 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # このジョブを実行してよくなる時刻。リトライの指数バックオフはこの列を将来へ
+    # 進めて表現する。待機をワーカーのメモリに置くと、プロセス再起動で待機が失われ、
+    # 他のワーカーが即座に拾ってしまう。
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
-        # ワーカーが次のジョブを引くときの検索条件。
-        Index("ix_jobs_status_created_at", "status", "created_at"),
+        # ワーカーが次のジョブを引くときの検索条件
+        # (status = 'pending' かつ available_at <= now() を available_at 順に取る)。
+        Index("ix_jobs_status_available_at", "status", "available_at"),
     )
 
 

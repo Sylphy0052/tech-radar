@@ -75,6 +75,22 @@ class Settings(BaseSettings):
     recommendation_max_age_days: int = Field(default=7, gt=0)
     log_retention_days: int = Field(default=90, gt=0)
     worker_concurrency: int = Field(default=2, gt=0)
+    # False ならジョブワーカーを起動しない。テストのたびに実ワーカーが DB を
+    # ポーリングすると、テストが不安定になりテスト用 DB のトランザクションとも
+    # 干渉するため、テスト側の既定は無効にする（`tests/conftest.py` を参照）。
+    worker_enabled: bool = True
+    # pending なジョブが無いときにワーカーが再試行までに待つ秒数。
+    worker_poll_interval_seconds: float = Field(default=1.0, gt=0)
+    # シャットダウン時に実行中ジョブの完了を待つ上限秒数。超過分はキャンセルして pending へ戻す。
+    worker_shutdown_grace_seconds: float = Field(default=10.0, ge=0)
+    # task.cancel() 後、キャンセル完了を待つ上限秒数。ハンドラが CancelledError を
+    # 握り潰す実装だと際限なくブロックしうるため安全弁として設ける。超過した場合、
+    # 該当ジョブの DB 状態は reclaim_stale（起動時・シャットダウン時）に委ねる。
+    worker_cancel_await_timeout_seconds: float = Field(default=5.0, gt=0)
+    # 3 回目の失敗で failed にする。無限リトライで詰まったジョブを残さないため。
+    job_max_attempts: int = Field(default=3, ge=1)
+    # ジョブ再試行の指数バックオフの基準秒数（n 回目の待機は base * 2^(n-1)）。
+    job_retry_backoff_seconds: float = Field(default=5.0, gt=0)
 
     @field_validator("brave_search_api_key", "github_token", mode="before")
     @classmethod
