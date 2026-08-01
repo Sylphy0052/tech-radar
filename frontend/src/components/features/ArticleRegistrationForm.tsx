@@ -53,6 +53,9 @@ export function ArticleRegistrationForm() {
 
     setValidationError(null);
     setSubmitError(null);
+    // 同じ URL を登録し直すと backend は既存の登録をそのまま返す。id が
+    // 変わらないとポーリングは再開されないため、送信のたびに一度切っておく。
+    setRegistrationId(null);
     setIsSubmitting(true);
     try {
       const result = await registerArticle(url.trim());
