@@ -14,6 +14,8 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime
 from typing import TypeVar
 
 from sqlalchemy.orm import Session
@@ -29,6 +31,18 @@ from techradar.jobs.registry import JobContext, JobHandlerRegistry
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class _ClaimedJob:
+    """claim したジョブと、その所有権を表すトークン。
+
+    `claimed_at` はハンドラには渡さない。ハンドラが知る必要のない、ワーカーと
+    キュー層の間だけの取り決めのため、`JobContext` とは分けて持つ。
+    """
+
+    context: JobContext
+    claimed_at: datetime
 
 
 class JobWorker:
@@ -49,6 +63,9 @@ class JobWorker:
         # worker_index -> 現在処理中のジョブ id。stop() が猶予超過タスクを
         # キャンセルしたあとに、どのジョブを release すべきか判定するために使う。
         self._current_jobs: dict[int, uuid.UUID] = {}
+        # キャンセルを無視して生き残ったタスク。参照を保持しないと実行途中で
+        # GC されうるため、プロセスが終わるまで手放さない。
+        self._abandoned_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
         """ワーカーコルーチンを起動する。
@@ -83,6 +100,10 @@ class JobWorker:
         5. 最後に `reclaim_stale` を実行する。claim 直後にキャンセルされて
            `_current_jobs` に登録される前にコルーチンが死んだジョブは、この worker
            からは追跡できない（実行中 status のまま宙に浮く）ため、まとめて回収する。
+
+        3〜4 は全タスクぶんを並行して行う。1件ずつ順番に待つと、同時に猶予を
+        超えたタスクの数だけ `worker_cancel_await_timeout_seconds` が積み上がり、
+        シャットダウンが `worker_concurrency` に比例して伸びるため。
         """
         self._stop_event.set()
 
@@ -92,20 +113,33 @@ class JobWorker:
             )
             self._log_task_exceptions(done)
 
-            for worker_index, task in enumerate(self._tasks):
-                if task not in pending:
-                    continue
-                job_id = self._current_jobs.get(worker_index)
+            overdue = [
+                (worker_index, task)
+                for worker_index, task in enumerate(self._tasks)
+                if task in pending
+            ]
+            for _worker_index, task in overdue:
                 task.cancel()
-                await self._await_cancelled_task(task, worker_index=worker_index, job_id=job_id)
-                if job_id is not None:
-                    await self._release_job(job_id)
+            await asyncio.gather(
+                *(self._cancel_and_release(worker_index, task) for worker_index, task in overdue)
+            )
 
+            # 待ち切れなかったタスクは、キャンセルを無視して生き続けている可能性が
+            # ある。参照を捨てるとイベントループ上で実行中のまま GC の対象になり、
+            # どこで終わったのかも追えなくなるため、プロセスが終わるまで保持する。
+            self._abandoned_tasks.extend(task for _index, task in overdue if not task.done())
             self._tasks = []
             self._current_jobs = {}
 
         reclaimed = await asyncio.to_thread(self._reclaim_stale_sync)
         logger.info("worker.reclaimed_stale_on_shutdown count=%d", reclaimed)
+
+    async def _cancel_and_release(self, worker_index: int, task: asyncio.Task[None]) -> None:
+        """キャンセル済みタスクの終了を待ち、対象ジョブを pending へ戻す。"""
+        job_id = self._current_jobs.get(worker_index)
+        await self._await_cancelled_task(task, worker_index=worker_index, job_id=job_id)
+        if job_id is not None:
+            await self._release_job(job_id)
 
     def _log_task_exceptions(self, done_tasks: set[asyncio.Task[None]]) -> None:
         """猶予内に終了したタスクのうち、例外で終わったものをログに残す。
@@ -160,14 +194,14 @@ class JobWorker:
         logger.info("worker.loop_started worker_index=%d", worker_index)
         while not self._stop_event.is_set():
             try:
-                context = await asyncio.to_thread(self._claim_job_sync)
-                if context is None:
+                claimed = await asyncio.to_thread(self._claim_job_sync)
+                if claimed is None:
                     await self._wait_for_poll_interval_or_stop()
                     continue
 
-                self._current_jobs[worker_index] = context.job_id
+                self._current_jobs[worker_index] = claimed.context.job_id
                 try:
-                    await self._process_job(context)
+                    await self._process_job(claimed)
                 finally:
                     self._current_jobs.pop(worker_index, None)
             except asyncio.CancelledError:
@@ -186,8 +220,9 @@ class JobWorker:
                 timeout=self._settings.worker_poll_interval_seconds,
             )
 
-    async def _process_job(self, context: JobContext) -> None:
+    async def _process_job(self, claimed: _ClaimedJob) -> None:
         """1件のジョブをハンドラへ渡し、結果に応じて完了・失敗を記録する。"""
+        context = claimed.context
         handler = self._registry.get(context.job_type)
         start = time.monotonic()
 
@@ -199,7 +234,11 @@ class JobWorker:
                 context.job_type.value,
             )
             await asyncio.to_thread(
-                self._fail_job_sync, context.job_id, error, _elapsed_ms(start), retryable=False
+                self._fail_job_sync,
+                claimed,
+                error,
+                _elapsed_ms(start),
+                retryable=False,
             )
             return
 
@@ -221,12 +260,12 @@ class JobWorker:
                 "job.failed job_id=%s job_type=%s", context.job_id, context.job_type.value
             )
             await asyncio.to_thread(
-                self._fail_job_sync, context.job_id, str(exc), duration_ms, retryable=True
+                self._fail_job_sync, claimed, str(exc), duration_ms, retryable=True
             )
             return
 
         duration_ms = _elapsed_ms(start)
-        await asyncio.to_thread(self._complete_job_sync, context.job_id, duration_ms)
+        await asyncio.to_thread(self._complete_job_sync, claimed, duration_ms)
         logger.info(
             "job.completed job_id=%s job_type=%s duration_ms=%d",
             context.job_id,
@@ -256,27 +295,37 @@ class JobWorker:
     def _reclaim_stale_sync(self) -> int:
         return self._with_session(queue.reclaim_stale)
 
-    def _claim_job_sync(self) -> JobContext | None:
-        def _operation(session: Session) -> JobContext | None:
+    def _claim_job_sync(self) -> _ClaimedJob | None:
+        def _operation(session: Session) -> _ClaimedJob | None:
             job = queue.claim_next(session)
             if job is None:
                 return None
-            return JobContext(
-                job_id=job.id,
-                job_type=JobType(job.type),
-                payload=dict(job.payload),
-                attempts=job.attempts,
+            return _ClaimedJob(
+                context=JobContext(
+                    job_id=job.id,
+                    job_type=JobType(job.type),
+                    payload=dict(job.payload),
+                    attempts=job.attempts,
+                ),
+                claimed_at=queue.ownership_token(job),
             )
 
         return self._with_session(_operation)
 
-    def _complete_job_sync(self, job_id: uuid.UUID, duration_ms: int) -> None:
+    def _complete_job_sync(self, claimed: _ClaimedJob, duration_ms: int) -> None:
+        job_id = claimed.context.job_id
+
         def _operation(session: Session) -> None:
             job = session.get(Job, job_id)
             if job is None:
                 logger.warning("job.missing_on_complete job_id=%s", job_id)
                 return
-            queue.complete(session, job)
+            if not queue.complete(session, job, claimed_at=claimed.claimed_at):
+                # 猶予超過でキャンセルされた後も生き残っていたスレッドが、
+                # release 済み（あるいは再 claim 済み）のジョブを書きにきた。
+                # 完了ログも残さない。このワーカーの処理結果は既に無効なため。
+                logger.warning("job.complete_skipped_not_owner job_id=%s", job_id)
+                return
             record_job_event(
                 session, job=job, status=JobStatus.COMPLETED.value, duration_ms=duration_ms
             )
@@ -284,21 +333,27 @@ class JobWorker:
         self._with_session(_operation)
 
     def _fail_job_sync(
-        self, job_id: uuid.UUID, error: str, duration_ms: int, *, retryable: bool
+        self, claimed: _ClaimedJob, error: str, duration_ms: int, *, retryable: bool
     ) -> None:
+        job_id = claimed.context.job_id
+
         def _operation(session: Session) -> None:
             job = session.get(Job, job_id)
             if job is None:
                 logger.warning("job.missing_on_fail job_id=%s", job_id)
                 return
-            queue.fail(
+            written = queue.fail(
                 session,
                 job,
                 error,
                 max_attempts=self._settings.job_max_attempts,
                 backoff_seconds=self._settings.job_retry_backoff_seconds,
                 retryable=retryable,
+                claimed_at=claimed.claimed_at,
             )
+            if not written:
+                logger.warning("job.fail_skipped_not_owner job_id=%s", job_id)
+                return
             # `queue.fail` はリトライ可能なら pending へ戻すため、log の status には
             # 更新後の実際の状態を入れる。常に failed と書くと、ログだけを見たときに
             # 再実行待ちのジョブが恒久的な失敗と区別できなくなる。
