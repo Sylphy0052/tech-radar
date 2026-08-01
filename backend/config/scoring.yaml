@@ -1,0 +1,114 @@
+# 推薦スコアの設定（PROJECT_SPEC.md §14, §15）
+#
+# 重み・減点・フィード構成比をコードに埋め込まず、この設定ファイルで管理する。
+# 運用しながら調整するため、値の変更にコード修正とデプロイを伴わせない。
+#
+# 各セクションの仕様:
+#   weights        : recommendation_score を構成する各項目の重み。合計は 1.0
+#   penalties      : 候補の状態に応じた固定減点
+#   authority_gate : source_authority の寄与に掛けるゲート（関心一致度が低い
+#                    公式記事を上位表示しないための補正）
+#   freshness      : 新しさによる減衰の設定
+#   interest       : 関心一致度（interest_similarity）の計算設定
+#   source_match   : 情報源と記事主題の一致度（source_article_match）の計算設定
+#   novelty        : 新規性（novelty）の計算設定
+#   feed_composition: Discover フィードの構成比の目安。合計は 1.0
+#   limits         : ランキング処理の安全弁とページングの既定値
+
+weights:
+  # 関心プロファイルとの一致を最も重視する（PROJECT_SPEC.md §14 の式）
+  interest_similarity: 0.35
+  # 一次情報を強く優先する（PROJECT_SPEC.md §6.1, §10）が、authority_gate で
+  # 「公式であることだけで上位表示しない」補正を掛ける
+  source_authority: 0.30
+  # 情報源と記事主題の一致は補助的な signal のため小さめ
+  source_article_match: 0.10
+  # 「原則として公開から7日以内」（§6.1）を汲みつつ、関心一致度ほどは重視しない
+  freshness: 0.10
+  # 記事単体の技術的な質。他の signal と並ぶ重みに留める
+  technical_quality: 0.10
+  # 新規テーマ探索（§15）のための小さな後押し
+  novelty: 0.05
+
+penalties:
+  # 主経路は候補取得の時点（recommendation/service.py の load_candidates）で
+  # Bad 済み記事そのものを除外することであり、この減点はそこをすり抜けた場合
+  # に備える純粋関数側の防御的な多重防御（本番では通常到達しない）。到達した
+  # 場合に備え、最大寄与（重み合計 1.0）に匹敵する満額減点にしておく
+  bad: 1.0
+  # 既読記事の再表示は抑制するが完全排除はしない（§6.1）ため、
+  # 他項目の寄与で挽回できる程度の減点に留める
+  read: 0.3
+
+authority_gate:
+  # weights.interest_similarity の重み（0.35）と対称に、関心一致度がここを
+  # 下回ると「公式であることだけで上位表示しない」補正が掛かり始める
+  min_interest_similarity: 0.35
+  # 関心一致度が 0 の場合でも authority の寄与を完全にゼロにはしない
+  # （権威ある情報源というシグナル自体は無価値ではないため）
+  min_factor: 0.2
+
+freshness:
+  # フィード条件「原則として公開から7日以内」（§6.1）と揃える。候補の絞り込み
+  # （recommendation/service.py の load_candidates が since を求める基準）と
+  # freshness スコアの減衰基準（compute_freshness）の単一の真実源。
+  # 旧 Settings.recommendation_max_age_days（環境変数 RECOMMENDATION_MAX_AGE_DAYS）
+  # はここと二重管理になっていたため、Issue #11 自己レビューで廃止しこちらへ一本化した
+  max_age_days: 7
+
+interest:
+  # 関心記事全体ではなく直近で最も近い数件との類似度を見ることで、
+  # 幅広い関心の中の 1 テーマにしか合致しない記事も拾えるようにする
+  top_k: 3
+  # 関心プロファイル構築対象の記事数上限（recommendation/service.py が使う）。
+  # ユーザーの関心記事が増え続けても、実行のたびに全件を読み込んで計算コストが
+  # 際限なく増えないための安全弁。新しい順に打ち切る
+  max_profile_articles: 200
+
+source_match:
+  # 完全一致ほどの確信度は無いが無視もできない部分一致（エンティティ名が
+  # トピック文字列に含まれる、またはその逆）に使うスコア
+  partial_match_score: 0.5
+
+novelty:
+  # topics が空で新規性を判定できない記事を、新規でも既知でもない中間値として扱う
+  default_when_no_topics: 0.5
+
+feed_composition:
+  # Discover フィードの構成比の目安（PROJECT_SPEC.md §15）
+  strong_interest: 0.55
+  primary_source: 0.25
+  exploration: 0.15
+  diversity: 0.05
+  # weights.interest_similarity 側の authority_gate 閾値（0.35）とは別物。
+  # 「強い関心一致」枠は一致度の中央よりやや高い水準で切り、フィードの主力枠に
+  # ふさわしい候補だけを入れる
+  strong_interest_min_similarity: 0.5
+  # novelty は topics 未知率（0〜1）。半分より多くが未知テーマの記事を
+  # 「新規テーマ探索」枠の対象にする
+  exploration_min_novelty: 0.6
+
+limits:
+  # 1 回の実行で採点する候補数の上限。dedup.yaml の max_articles_per_run と
+  # 同じ発想で、収集元が短期間に大量の記事を入れても実行コストが際限なく
+  # 増えないための安全弁
+  max_candidates_per_run: 500
+  # フィード 1 ページあたりの既定表示件数。カード形式フィード（§6.1）が
+  # 1 画面で読みやすい分量に合わせる
+  default_page_size: 20
+  # クライアントが 1 回に要求できる最大件数。過大なレスポンスによる
+  # レイテンシ・負荷増加を防ぐ
+  max_page_size: 100
+  # Discover フィード 1 回の実行で recommendations へ保存する件数
+  # （recommendation/service.py の generate_recommendations が使う）。
+  # default_page_size を複数ページ分先読みし、ページング要求のたびに
+  # 推薦を作り直さずに済むようにする
+  feed_run_size: 100
+  # 記事起点推薦 1 回の実行で保存する件数。Discover ほど多くの候補を
+  # 必要としない用途（「この記事に近い記事」）のため少なめにする
+  article_based_run_size: 20
+  # cursor 無しで GET /api/feed を呼んだとき、直近の DISCOVER run をこの秒数
+  # 以内なら新規生成せず再利用する（api/recommendations.py の get_feed）。
+  # 0 は「常に新規生成する」（無効化）を意味する。古い run の削除ジョブと
+  # API のレート制限自体は別スコープ（Issue #28）
+  feed_run_reuse_seconds: 600

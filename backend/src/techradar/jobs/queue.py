@@ -64,12 +64,55 @@ def claim_next(session: Session, *, now: datetime | None = None) -> Job | None:
     return job
 
 
-def complete(session: Session, job: Job) -> None:
-    """ジョブを完了状態にする。"""
+def ownership_token(job: Job) -> datetime:
+    """claim 済みジョブから所有権トークン（claim 時刻）を取り出す。
+
+    `claim_next` は必ず `started_at` を設定するため、claim を経たジョブであれば
+    None にはならない。None なら claim せずに完了・失敗を書こうとしており、
+    呼び出し側の使い方が誤っている。所有権の判定を素通りさせないよう、
+    ここで早期に失敗させる。
+    """
+    if job.started_at is None:
+        message = "claim されていないジョブには所有権トークンがありません"
+        raise ValueError(message)
+    return job.started_at
+
+
+def still_owns_job(job: Job, claimed_at: datetime) -> bool:
+    """claim したときの所有権がまだ有効かを判定する。
+
+    `claim_next` は `started_at` に claim 時刻を書き込む。`release` はこれを
+    `None` に戻し、別のワーカーが再 claim すれば別の時刻に変わる。よって
+    claim 時に控えた値との一致は「あのとき自分が取ったジョブのままか」を表す。
+
+    status だけを見る判定では足りない。release されたジョブが別ワーカーに
+    再 claim されると status は再び実行中へ戻るため、取り残された処理の
+    書き込みが通ってしまう。
+    """
+    return job.started_at == claimed_at
+
+
+def complete(session: Session, job: Job, *, claimed_at: datetime) -> bool:
+    """ジョブを完了状態にする。
+
+    claim したときの所有権が残っている場合のみ書き込む。ワーカーの `stop()` は
+    猶予を超えたタスクをキャンセルして `release` するが、`asyncio.to_thread` が
+    起こしたスレッド自体はキャンセルできず、後から完了を書きにくる。無条件に
+    上書きすると、pending へ戻した（あるいは別ワーカーが再 claim した）ジョブを
+    完了で踏みつぶし、二重実行と結果の取りこぼしを招く。
+
+    Returns:
+        実際に completed へ更新した場合は `True`。所有権を失っていて何もしな
+        かった場合は `False`（呼び出し側がログへ反映できるようにするため）。
+    """
+    if not still_owns_job(job, claimed_at):
+        return False
+
     job.status = JobStatus.COMPLETED.value
     job.finished_at = datetime.now(UTC)
     job.last_error = None
     session.flush()
+    return True
 
 
 def fail(
@@ -80,13 +123,25 @@ def fail(
     max_attempts: int,
     backoff_seconds: float,
     retryable: bool = True,
-) -> None:
+    claimed_at: datetime,
+) -> bool:
     """ジョブの失敗を記録し、リトライ可否に応じて状態を更新する。
 
     attempts は失敗のたびに増やす（claim 時ではなく）。プロセスが強制終了
     された場合、claim 時に増やしていると再起動後の `reclaim_stale` だけで
     リトライ回数を無駄に消費してしまうため。
+
+    `complete` と同じく、claim したときの所有権が残っている場合のみ書き込む。
+    中断されたジョブに後から失敗を記録すると、利用者都合の中断がリトライ回数を
+    消費してしまう。
+
+    Returns:
+        実際に更新した場合は `True`。所有権を失っていて何もしなかった場合は
+        `False`。
     """
+    if not still_owns_job(job, claimed_at):
+        return False
+
     job.attempts += 1
     job.last_error = error[:MAX_LAST_ERROR_LENGTH]
 
@@ -94,7 +149,7 @@ def fail(
         job.status = JobStatus.FAILED.value
         job.finished_at = datetime.now(UTC)
         session.flush()
-        return
+        return True
 
     # まだリトライできる場合は pending に戻し、指数バックオフで
     # 再実行可能になる時刻を先に延ばす。
@@ -104,6 +159,7 @@ def fail(
     delay_seconds = backoff_seconds * (2 ** (job.attempts - 1))
     job.available_at = datetime.now(UTC) + timedelta(seconds=delay_seconds)
     session.flush()
+    return True
 
 
 def release(session: Session, job: Job) -> bool:

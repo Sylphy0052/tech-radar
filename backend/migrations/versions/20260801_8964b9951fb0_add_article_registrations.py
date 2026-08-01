@@ -1,7 +1,7 @@
 """add article registrations
 
 Revision ID: 8964b9951fb0
-Revises: 776773dd4fc3
+Revises: 53718c4e5f6d
 Create Date: 2026-08-01 20:56:58.409202
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "8964b9951fb0"
-down_revision: Union[str, Sequence[str], None] = "776773dd4fc3"
+down_revision: Union[str, Sequence[str], None] = "53718c4e5f6d"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
