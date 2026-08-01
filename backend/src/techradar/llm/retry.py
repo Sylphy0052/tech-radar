@@ -35,6 +35,7 @@ def complete_json_with_retry(
     operation: str,
     session: Session | None = None,
     article_id: uuid.UUID | None = None,
+    job_id: uuid.UUID | None = None,
     settings: Settings | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> LLMCompletion:
@@ -66,6 +67,7 @@ def complete_json_with_retry(
                 operation=operation,
                 status="failed",
                 article_id=article_id,
+                job_id=job_id,
                 error_reason=exc.reason,
                 details={"attempts": attempt + 1, "message": str(exc), "retryable": False},
             )
@@ -81,6 +83,7 @@ def complete_json_with_retry(
                 operation=operation,
                 status="completed",
                 article_id=article_id,
+                job_id=job_id,
                 model=completion.usage.model,
                 input_tokens=completion.usage.input_tokens,
                 output_tokens=completion.usage.output_tokens,
@@ -99,6 +102,7 @@ def complete_json_with_retry(
         operation=operation,
         status="failed",
         article_id=article_id,
+        job_id=job_id,
         duration_ms=duration_ms,
         error_reason=last_error.reason,
         details={"attempts": attempts, "message": str(last_error), "retryable": True},
@@ -112,6 +116,7 @@ def _record(
     operation: str,
     status: str,
     article_id: uuid.UUID | None = None,
+    job_id: uuid.UUID | None = None,
     model: str | None = None,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
@@ -123,24 +128,30 @@ def _record(
 
     session が無い場合は何もしない。書き込みに失敗しても例外を伝播させず
     警告ログに留める。ログの失敗で本処理の結果や例外をすり替えないため。
+
+    書き込みは SAVEPOINT の中で行う。単に例外を握りつぶすと、失敗した
+    flush によって外側のトランザクションが壊れたまま処理が続き、
+    以降の更新が黙って捨てられる（後続の commit が `PendingRollbackError`
+    になる）。SAVEPOINT なら失敗をこの範囲に閉じ込められる。
     """
     if session is None:
         return
     try:
-        session.add(
-            OperationLog(
-                operation=operation,
-                status=status,
-                article_id=article_id,
-                model=model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                duration_ms=duration_ms,
-                error_reason=error_reason,
-                details=details or {},
+        with session.begin_nested():
+            session.add(
+                OperationLog(
+                    operation=operation,
+                    status=status,
+                    article_id=article_id,
+                    job_id=job_id,
+                    model=model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    duration_ms=duration_ms,
+                    error_reason=error_reason,
+                    details=details or {},
+                )
             )
-        )
-        session.flush()
     except SQLAlchemyError:
         # ログの書き込み失敗で本処理の結果や例外をすり替えない。
         logger.warning(
