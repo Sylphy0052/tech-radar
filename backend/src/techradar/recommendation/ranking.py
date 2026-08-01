@@ -80,8 +80,10 @@ class ScoreWeights:
 class ScorePenalties:
     """候補の状態に応じた固定減点。"""
 
-    # Bad 済みの候補への減点。フィードからの除外はサービス層の責務で、
-    # ここでは減点のみを行う。
+    # Bad 済みの候補への減点。主経路は `recommendation/service.py` の
+    # `load_candidates` が候補取得の時点で Bad 済み記事そのものを除外することで、
+    # `CandidateSignature.is_bad` は本番では常に False（＝この減点は通常到達しない）。
+    # ここでの減点は、それをすり抜けた場合に備える純粋関数側の防御的な多重防御。
     bad: float
     # 既読記事の再表示を抑制するための減点（`PROJECT_SPEC.md` §6.1）。
     read: float
@@ -411,6 +413,8 @@ def score_candidate(
     technical_quality_contribution = technical_quality * weights.technical_quality
     novelty_contribution = novelty * weights.novelty
 
+    # is_bad は主経路（load_candidates の除外）では常に False。ここでの減点は
+    # 防御的な多重防御であり、本番では通常発火しない（ScorePenalties.bad 参照）。
     bad_penalty = settings.penalties.bad if candidate.is_bad else 0.0
     duplicate_penalty = candidate.duplicate_penalty
     read_penalty = settings.penalties.read if candidate.is_read else 0.0

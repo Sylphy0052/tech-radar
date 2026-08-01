@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from techradar.recommendation.composition import (
     ComposedFeed,
     FeedSlot,
+    _slot_quotas,
     compose_feed,
     compose_feed_with_stats,
 )
@@ -470,3 +472,73 @@ class TestSlotStatsConsistency:
         for slot_stats in result.stats.slots:
             assert slot_stats.backfilled <= slot_stats.selected
             assert slot_stats.selected <= slot_stats.quota
+
+
+class TestSlotQuotasRounding:
+    """`_slot_quotas` の丸め調整ロジックを直接検証する。
+
+    既定比率（0.55/0.25/0.15/0.05）は page_size=20 だとぴったり合うため、
+    ここでは意図的に丸め誤差が出る page_size・比率を選んで検証する。
+    """
+
+    def test_sums_to_page_size_when_rounding_undershoots(self):
+        # Arrange — 既定比率で page_size=2 だと round() の合計が 1（strong のみ）に
+        # とどまり page_size に届かないため、比率が最大の枠へ 1 件加算される
+        # Act
+        quotas = _slot_quotas(2, SETTINGS)
+
+        # Assert
+        assert quotas == {
+            FeedSlot.STRONG_INTEREST: 2,
+            FeedSlot.PRIMARY_SOURCE: 0,
+            FeedSlot.EXPLORATION: 0,
+            FeedSlot.DIVERSITY: 0,
+        }
+        assert sum(quotas.values()) == 2
+
+    def test_sums_to_page_size_when_page_size_is_smaller_than_the_number_of_slots(self):
+        # Arrange — 受入基準: page_size が小さく丸めで 0 になる枠がある場合でも
+        # 合計は必ず page_size に一致する
+        # Act
+        quotas = _slot_quotas(1, SETTINGS)
+
+        # Assert
+        assert sum(quotas.values()) == 1
+        assert quotas[FeedSlot.STRONG_INTEREST] == 1
+        assert quotas[FeedSlot.PRIMARY_SOURCE] == 0
+        assert quotas[FeedSlot.EXPLORATION] == 0
+        assert quotas[FeedSlot.DIVERSITY] == 0
+
+    def test_sums_to_page_size_when_rounding_overshoots(self):
+        # Arrange — 比率を 0.15/0.15/0.35/0.35 にすると page_size=10 で
+        # round() の合計が 12（2+2+4+4）になり超過するため、比率が大きい枠から
+        # 順に 1 件ずつ減らして 10 に一致させる調整が必要になる
+        overshoot_composition = FeedComposition(
+            strong_interest=0.15,
+            primary_source=0.15,
+            exploration=0.35,
+            diversity=0.35,
+            strong_interest_min_similarity=0.5,
+            exploration_min_novelty=0.6,
+        )
+        overshoot_settings = replace(SETTINGS, feed_composition=overshoot_composition)
+
+        # Act
+        quotas = _slot_quotas(10, overshoot_settings)
+
+        # Assert
+        assert quotas == {
+            FeedSlot.STRONG_INTEREST: 2,
+            FeedSlot.PRIMARY_SOURCE: 2,
+            FeedSlot.EXPLORATION: 3,
+            FeedSlot.DIVERSITY: 3,
+        }
+        assert sum(quotas.values()) == 10
+
+    def test_is_deterministic_for_the_same_input(self):
+        # Arrange / Act — 受入基準: 同じ入力なら同じ結果（丸め調整も決定的）
+        first = _slot_quotas(7, SETTINGS)
+        second = _slot_quotas(7, SETTINGS)
+
+        # Assert
+        assert first == second
