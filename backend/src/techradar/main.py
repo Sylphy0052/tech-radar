@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from techradar import __version__
+from techradar.api.articles import router as articles_router
 from techradar.api.crawl import router as crawl_router
 from techradar.api.jobs import router as jobs_router
 from techradar.api.recommendations import router as recommendations_router
@@ -56,7 +57,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     worker: JobWorker | None = None
     if settings.worker_enabled:
-        registry = create_default_registry()
+        registry = create_default_registry(settings)
         worker = JobWorker(settings=settings, registry=registry)
         await worker.start()
     app.state.job_worker = worker
@@ -96,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(sources_router)
     app.include_router(jobs_router)
     app.include_router(crawl_router)
+    app.include_router(articles_router)
     app.include_router(recommendations_router)
 
     @app.get("/api/health", response_model=HealthResponse)
