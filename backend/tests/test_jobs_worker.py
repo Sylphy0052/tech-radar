@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from techradar.config import Settings
 from techradar.db.enums import JobStatus, JobType
 from techradar.db.models import Job, OperationLog
+from techradar.jobs import worker as worker_module
 from techradar.jobs.queue import claim_next, enqueue
 from techradar.jobs.registry import JobContext, JobHandlerRegistry
 from techradar.jobs.worker import JobWorker
@@ -49,6 +51,7 @@ def _fast_settings(**overrides: Any) -> Settings:
         "worker_concurrency": 1,
         "worker_poll_interval_seconds": 0.02,
         "worker_shutdown_grace_seconds": 0.1,
+        "worker_cancel_await_timeout_seconds": 0.5,
         "job_max_attempts": 3,
         "job_retry_backoff_seconds": 0.01,
     }
@@ -333,3 +336,161 @@ async def test_worker_records_operation_logs_for_completed_and_failed_jobs(
     assert failed_log is not None
     assert failed_log.status == JobStatus.FAILED.value
     assert failed_log.error_reason == "boom"
+
+
+async def test_stop_reclaims_a_running_job_that_the_worker_never_tracked(
+    worker_session_factory: sessionmaker[Session],
+) -> None:
+    """CRITICAL: claim 直後にキャンセルされ worker が追跡できなかったジョブも回収されること。
+
+    再現が難しい「claim 完走直後、_current_jobs へ登録される前にコルーチンが死ぬ」
+    ケースの代わりに、既に実行中 status のジョブを worker の外側から直接仕込む
+    （= worker からは存在を知りようがない、という点で同じ状況を作る）。
+    """
+    # Arrange
+    registry = JobHandlerRegistry()
+    settings = _fast_settings()
+    worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
+    await worker.start()
+
+    with worker_session_factory() as session:
+        job = enqueue(session, JobType.FETCH_ARTICLE)
+        claim_next(session)
+        job_id = job.id
+        session.commit()
+
+    # Act
+    await worker.stop()
+
+    # Assert
+    with worker_session_factory() as session:
+        reclaimed_job = session.get(Job, job_id)
+        assert reclaimed_job is not None
+        assert reclaimed_job.status == JobStatus.PENDING.value
+        assert reclaimed_job.started_at is None
+
+
+class _FlakySessionFactory:
+    """一定回数だけ例外を投げたあと、実際のセッションファクトリへ委譲するスタブ。
+
+    DB 接続断のような一時的な障害を模す。`armed` が True になるまでは常に本物へ
+    委譲する（`worker.start()` の `reclaim_stale` 呼び出しを失敗させないため）。
+    """
+
+    def __init__(self, real_factory: Callable[[], Session]) -> None:
+        self._real_factory = real_factory
+        self.armed = False
+        self.remaining_failures = 0
+
+    def __call__(self) -> Session:
+        if self.armed and self.remaining_failures > 0:
+            self.remaining_failures -= 1
+            message = "db connection lost"
+            raise RuntimeError(message)
+        return self._real_factory()
+
+
+async def test_worker_loop_continues_after_transient_session_factory_errors(
+    worker_session_factory: sessionmaker[Session],
+) -> None:
+    """CRITICAL: DB 接続断などの想定外の例外でワーカーが1本死なないこと。"""
+    # Arrange
+    handled = asyncio.Event()
+
+    async def handler(context: JobContext) -> None:
+        handled.set()
+
+    registry = JobHandlerRegistry()
+    registry.register(JobType.FETCH_ARTICLE, handler)
+    settings = _fast_settings()
+    flaky_factory = _FlakySessionFactory(worker_session_factory)
+    worker = JobWorker(settings=settings, registry=registry, session_factory=flaky_factory)
+
+    # Act: start() の reclaim_stale はまだ arm していないので成功する
+    await worker.start()
+    flaky_factory.armed = True
+    flaky_factory.remaining_failures = 3
+    job_id = _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
+    try:
+        # 例外のたびに poll interval だけ待って継続するため、猶予を持たせて待つ
+        await asyncio.wait_for(handled.wait(), timeout=2.0)
+        job = await _wait_for_job_status(worker_session_factory, job_id, JobStatus.COMPLETED)
+    finally:
+        await worker.stop()
+
+    # Assert: 例外を吸収しつつ最終的にジョブを処理できている
+    assert job.status == JobStatus.COMPLETED.value
+    assert flaky_factory.remaining_failures == 0
+
+
+async def test_stop_does_not_hang_when_a_handler_swallows_cancelled_error(
+    worker_session_factory: sessionmaker[Session],
+) -> None:
+    """MEDIUM: ハンドラが CancelledError を握り潰しても stop() がタイムアウトで戻ること。"""
+    # Arrange: キャンセルを繰り返し握り潰したあと、自発的に終わるハンドラ
+    started = asyncio.Event()
+
+    async def handler(context: JobContext) -> None:
+        started.set()
+        for _ in range(5):
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(0.05)
+
+    registry = JobHandlerRegistry()
+    registry.register(JobType.FETCH_ARTICLE, handler)
+    settings = _fast_settings(
+        worker_shutdown_grace_seconds=0.05, worker_cancel_await_timeout_seconds=0.1
+    )
+    _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
+    worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
+    await worker.start()
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    # Act: stop() 自体が無期限にブロックせず戻ってくること
+    await asyncio.wait_for(worker.stop(), timeout=2.0)
+
+    # ハンドラのバックグラウンド継続分（最大 0.25 秒）が完全に終わるのを待ち、
+    # テスト終了後まで残留タスクが生き残らないようにする。
+    await asyncio.sleep(0.3)
+
+
+async def test_stop_logs_exceptions_from_tasks_that_finish_within_the_grace_period(
+    worker_session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MEDIUM: 猶予内に例外で終わったタスクがあれば stop() がログに記録すること。
+
+    `caplog` ではなく `techradar.jobs.worker.logger.error` を直接差し替えて検証する。
+    `migrated_engine`（セッションスコープ）経由で alembic の `env.py` が呼ぶ
+    `logging.config.fileConfig`（既定で `disable_existing_loggers=True`）により、
+    このモジュールの logger インスタンスがセッション内で disabled になりうるため、
+    `caplog` が記録を拾えないことがある。ロガーの有効/無効に依存しない検証にする。
+    """
+    # Arrange
+    error_calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        worker_module.logger, "error", lambda *args, **_kwargs: error_calls.append(args)
+    )
+    registry = JobHandlerRegistry()
+    settings = _fast_settings(worker_shutdown_grace_seconds=1.0)
+    worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
+    await worker.start()
+
+    async def _boom() -> None:
+        message = "worker loop exploded"
+        raise RuntimeError(message)
+
+    broken_task = asyncio.create_task(_boom())
+    worker._tasks = [*worker._tasks, broken_task]
+
+    # Act
+    await worker.stop()
+
+    # Assert
+    assert any(
+        call[0] == "worker.loop_task_raised_during_shutdown error=%s" for call in error_calls
+    )
+    assert any(
+        isinstance(call[1], RuntimeError) and str(call[1]) == "worker loop exploded"
+        for call in error_calls
+    )

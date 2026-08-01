@@ -3,7 +3,7 @@
 キュー操作（`techradar.jobs.queue`）とハンドラ登録（`techradar.jobs.registry`）を
 組み合わせて、実際にジョブを処理するループを提供する。DB 操作は同期 SQLAlchemy
 のため、イベントループを塞がないよう必ず `asyncio.to_thread` 経由で呼び出す。
-FastAPI への組み込み自体（`main.py` の変更）は後続タスクの担当。
+FastAPI への組み込み（起動・停止）は `techradar.main` の lifespan が担う。
 """
 
 from __future__ import annotations
@@ -71,44 +71,111 @@ class JobWorker:
 
         1. 停止フラグを立て、新規の claim を止める。
         2. 実行中のジョブが `worker_shutdown_grace_seconds` 以内に終わるのを待つ。
-        3. 猶予を超えたタスクはキャンセルし、対象ジョブを `release` で pending へ
-           戻す（利用者都合の中断のため attempts は増やさない）。
+           この間に例外で終わったタスクがあればログに残す（`CancelledError` は
+           シャットダウン起因であり得るため除く）。
+        3. 猶予を超えたタスクはキャンセルし、`worker_cancel_await_timeout_seconds`
+           を上限に終了を待つ。ハンドラが `CancelledError` を握り潰す実装だと
+           無期限にブロックしうるため、ここでも待ち時間に上限を設ける。
+        4. キャンセルできたタスクの対象ジョブは `release` で pending へ戻す
+           （利用者都合の中断のため attempts は増やさない）。ただし `release` は
+           実行中 status のときだけ巻き戻す条件付き更新のため、猶予内にスレッド側で
+           先に completed / failed へ進んでいた場合は何もしない。
+        5. 最後に `reclaim_stale` を実行する。claim 直後にキャンセルされて
+           `_current_jobs` に登録される前にコルーチンが死んだジョブは、この worker
+           からは追跡できない（実行中 status のまま宙に浮く）ため、まとめて回収する。
         """
         self._stop_event.set()
-        if not self._tasks:
-            return
 
-        _done, pending = await asyncio.wait(
-            self._tasks, timeout=self._settings.worker_shutdown_grace_seconds
-        )
-        for worker_index, task in enumerate(self._tasks):
-            if task not in pending:
+        if self._tasks:
+            done, pending = await asyncio.wait(
+                self._tasks, timeout=self._settings.worker_shutdown_grace_seconds
+            )
+            self._log_task_exceptions(done)
+
+            for worker_index, task in enumerate(self._tasks):
+                if task not in pending:
+                    continue
+                job_id = self._current_jobs.get(worker_index)
+                task.cancel()
+                await self._await_cancelled_task(task, worker_index=worker_index, job_id=job_id)
+                if job_id is not None:
+                    await self._release_job(job_id)
+
+            self._tasks = []
+            self._current_jobs = {}
+
+        reclaimed = await asyncio.to_thread(self._reclaim_stale_sync)
+        logger.info("worker.reclaimed_stale_on_shutdown count=%d", reclaimed)
+
+    def _log_task_exceptions(self, done_tasks: set[asyncio.Task[None]]) -> None:
+        """猶予内に終了したタスクのうち、例外で終わったものをログに残す。
+
+        `asyncio.wait` は `done` 側のタスクの成否を判定しないため、ここで明示的に
+        確認しない限り、ワーカーが例外で死んでいても気付けない。
+        """
+        for task in done_tasks:
+            if task.cancelled():
                 continue
-            job_id = self._current_jobs.get(worker_index)
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-            if job_id is not None:
-                await asyncio.to_thread(self._release_job_sync, job_id)
-                logger.info("worker.released_on_shutdown job_id=%s", job_id)
+            exc = task.exception()
+            if exc is None:
+                continue
+            logger.error("worker.loop_task_raised_during_shutdown error=%s", exc, exc_info=exc)
 
-        self._tasks = []
-        self._current_jobs = {}
+    async def _await_cancelled_task(
+        self, task: asyncio.Task[None], *, worker_index: int, job_id: uuid.UUID | None
+    ) -> None:
+        """`task.cancel()` 後の終了を、ハードタイムアウト付きで待つ。
+
+        `await task` を直接使うと、ハンドラが `CancelledError` を握り潰して
+        処理を続ける実装の場合に無期限へブロックする（`asyncio.wait_for` も
+        対象タスク自身が完了しない限り同様に待ち続けるため使えない）。
+        `asyncio.wait` はタイムアウトで必ず戻るため、ここではこちらを使う。
+        """
+        _done, still_pending = await asyncio.wait(
+            [task], timeout=self._settings.worker_cancel_await_timeout_seconds
+        )
+        if task in still_pending:
+            logger.error(
+                "worker.cancel_await_timed_out worker_index=%d job_id=%s", worker_index, job_id
+            )
+
+    async def _release_job(self, job_id: uuid.UUID) -> None:
+        """猶予超過でキャンセルしたジョブを release し、結果をログに残す。"""
+        released = await asyncio.to_thread(self._release_job_sync, job_id)
+        if released:
+            logger.info("worker.released_on_shutdown job_id=%s", job_id)
+        else:
+            logger.info("worker.release_skipped_already_finished job_id=%s", job_id)
 
     async def _run_worker_loop(self, worker_index: int) -> None:
-        """1本のワーカーコルーチンのループ本体。"""
+        """1本のワーカーコルーチンのループ本体。
+
+        `_claim_job_sync` / `_complete_job_sync` / `_fail_job_sync` は DB 接続断
+        などで想定外の例外を投げうる。ここで捕まえずコルーチンの外へ伝播させると
+        ワーカーが1本死んで戻らず、`reclaim_stale` は起動時にしか走らないため
+        プロセスを再起動するまで concurrency が恒久的に減ったままになる。
+        `asyncio.CancelledError` はシャットダウンの経路のため素通しし、それ以外の
+        `Exception` はログに残してループを継続する。
+        """
         logger.info("worker.loop_started worker_index=%d", worker_index)
         while not self._stop_event.is_set():
-            context = await asyncio.to_thread(self._claim_job_sync)
-            if context is None:
-                await self._wait_for_poll_interval_or_stop()
-                continue
-
-            self._current_jobs[worker_index] = context.job_id
             try:
-                await self._process_job(context)
-            finally:
-                self._current_jobs.pop(worker_index, None)
+                context = await asyncio.to_thread(self._claim_job_sync)
+                if context is None:
+                    await self._wait_for_poll_interval_or_stop()
+                    continue
+
+                self._current_jobs[worker_index] = context.job_id
+                try:
+                    await self._process_job(context)
+                finally:
+                    self._current_jobs.pop(worker_index, None)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # 暴走ループを避けるため、poll interval だけ待ってから次の周回へ進む。
+                logger.exception("worker.loop_iteration_failed worker_index=%d", worker_index)
+                await self._wait_for_poll_interval_or_stop()
         logger.info("worker.loop_stopped worker_index=%d", worker_index)
 
     async def _wait_for_poll_interval_or_stop(self) -> None:
@@ -245,15 +312,15 @@ class JobWorker:
 
         self._with_session(_operation)
 
-    def _release_job_sync(self, job_id: uuid.UUID) -> None:
-        def _operation(session: Session) -> None:
+    def _release_job_sync(self, job_id: uuid.UUID) -> bool:
+        def _operation(session: Session) -> bool:
             job = session.get(Job, job_id)
             if job is None:
                 logger.warning("job.missing_on_release job_id=%s", job_id)
-                return
-            queue.release(session, job)
+                return False
+            return queue.release(session, job)
 
-        self._with_session(_operation)
+        return self._with_session(_operation)
 
 
 def _elapsed_ms(start: float) -> int:

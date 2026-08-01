@@ -1,8 +1,8 @@
 """ジョブキューの操作（`PROJECT_SPEC.md` §6）。
 
 常駐スケジューラは置かない設計のため、ここではキューに対する登録・取得・完了・
-失敗・中断復旧という「操作」のみを関数として提供する。ワーカーのループや
-プロセス管理は後続タスク（T3）の責務であり、ここには含めない。
+失敗・中断復旧という「操作」のみを関数として提供する。ワーカーのループは
+`techradar.jobs.worker` が担う。
 
 すべて同期 SQLAlchemy Session を引数に取り、コミットは呼び出し側に委ねる
 （`flush` までで止める）。トランザクション境界の決定はキュー操作自体の責務
@@ -106,15 +106,30 @@ def fail(
     session.flush()
 
 
-def release(session: Session, job: Job) -> None:
+def release(session: Session, job: Job) -> bool:
     """シャットダウンなど利用者都合の中断でジョブを pending へ巻き戻す。
+
+    実行中 status のときだけ pending に戻す条件付き更新にする。ワーカーの
+    `stop()` は「猶予超過タスクをキャンセルして release する」処理を別スレッドの
+    同期処理として呼ぶが、ハンドラが猶予境界ぎりぎりで終わり `complete` がスレッド内
+    で先に走り切ることがある。無条件に pending へ上書きすると、completed になった
+    直後のジョブを release が pending で踏みつぶし、二重実行を招くため、既に
+    completed / failed / pending であれば何もしない。
 
     失敗ではないため attempts は増やさない。available_at も変更しない
     （中断は待機時間をリセットする理由にならないため）。
+
+    Returns:
+        実際に pending へ巻き戻した場合は `True`。対象外で何もしなかった場合は
+        `False`（呼び出し側がログへ反映できるようにするため）。
     """
+    if job.status not in {running_status.value for running_status in RUNNING_STATUSES}:
+        return False
+
     job.status = JobStatus.PENDING.value
     job.started_at = None
     session.flush()
+    return True
 
 
 def reclaim_stale(session: Session) -> int:

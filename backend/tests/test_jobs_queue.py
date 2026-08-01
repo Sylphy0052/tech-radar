@@ -229,13 +229,55 @@ def test_release_returns_the_job_to_pending_without_incrementing_attempts(
     available_before_release = job.available_at
 
     # Act
-    release(db_session, job)
+    rolled_back = release(db_session, job)
 
     # Assert
+    assert rolled_back is True
     assert job.status == JobStatus.PENDING.value
     assert job.started_at is None
     assert job.attempts == 0
     assert job.available_at == available_before_release
+
+
+def test_release_does_not_overwrite_a_job_that_already_completed(db_session: Session) -> None:
+    """CRITICAL: release がスレッド側で先に completed へ進んだジョブを上書きしないこと。"""
+    # Arrange
+    job = enqueue(db_session, JobType.FETCH_ARTICLE)
+    claim_next(db_session)
+    complete(db_session, job)
+
+    # Act
+    rolled_back = release(db_session, job)
+
+    # Assert: pending へ巻き戻さず、completed のまま
+    assert rolled_back is False
+    assert job.status == JobStatus.COMPLETED.value
+
+
+def test_release_does_not_overwrite_a_job_that_already_failed(db_session: Session) -> None:
+    # Arrange
+    job = enqueue(db_session, JobType.FETCH_ARTICLE)
+    claim_next(db_session)
+    fail(db_session, job, "boom", max_attempts=1, backoff_seconds=1.0, retryable=False)
+
+    # Act
+    rolled_back = release(db_session, job)
+
+    # Assert
+    assert rolled_back is False
+    assert job.status == JobStatus.FAILED.value
+
+
+def test_release_is_a_no_op_for_a_job_that_is_already_pending(db_session: Session) -> None:
+    # Arrange: claim せずそのまま pending のジョブに release を呼ぶ
+    job = enqueue(db_session, JobType.FETCH_ARTICLE)
+
+    # Act
+    rolled_back = release(db_session, job)
+
+    # Assert
+    assert rolled_back is False
+    assert job.status == JobStatus.PENDING.value
 
 
 def test_reclaim_stale_returns_running_jobs_to_pending_and_reports_the_count(
@@ -327,6 +369,22 @@ def test_record_job_event_ignores_an_invalid_article_id_without_raising(
 
     # Assert
     assert log.article_id is None
+
+
+def test_record_job_event_truncates_a_long_error_reason(db_session: Session) -> None:
+    """error_reason も last_error と同じ上限で切り詰め、一貫させること。"""
+    # Arrange
+    job = enqueue(db_session, JobType.FETCH_ARTICLE)
+    long_error = "e" * (MAX_LAST_ERROR_LENGTH + 500)
+
+    # Act
+    log = record_job_event(
+        db_session, job=job, status=JobStatus.FAILED.value, error_reason=long_error
+    )
+
+    # Assert
+    assert log.error_reason is not None
+    assert len(log.error_reason) == MAX_LAST_ERROR_LENGTH
 
 
 def test_running_status_for_maps_every_job_type_to_a_running_status() -> None:

@@ -14,6 +14,7 @@ from techradar.api.deps import get_session
 from techradar.config import Settings
 from techradar.db.enums import JobType
 from techradar.db.models import Job
+from techradar.jobs.queue import claim_next, complete
 from techradar.main import create_app
 
 
@@ -72,7 +73,7 @@ class TestCreateCrawlRun:
         # Assert
         assert response.status_code == 422
 
-    def test_does_not_persist_when_source_domain_is_omitted(
+    def test_enqueues_with_an_empty_payload_when_source_domain_is_omitted(
         self, client: TestClient, db_session: Session
     ) -> None:
         # Arrange / Act
@@ -84,10 +85,84 @@ class TestCreateCrawlRun:
         assert job is not None
         assert job.payload == {}
 
-    def test_only_matching_jobs_are_created(self, client: TestClient, db_session: Session) -> None:
+    def test_creates_exactly_one_job_per_request(
+        self, client: TestClient, db_session: Session
+    ) -> None:
         # Arrange / Act
         client.post("/api/crawl/runs")
 
         # Assert
         jobs = db_session.scalars(select(Job).where(Job.type == JobType.CRAWL_SOURCES.value)).all()
         assert len(jobs) == 1
+
+    def test_returns_the_existing_job_when_a_pending_crawl_job_already_exists(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """MEDIUM: 連打しても検索 API / LLM 呼び出しが積み上がらないよう重複起動を防ぐ。"""
+        # Arrange
+        first_response = client.post("/api/crawl/runs")
+        first_job_id = first_response.json()["job_id"]
+
+        # Act
+        second_response = client.post("/api/crawl/runs")
+
+        # Assert
+        assert second_response.status_code == 200
+        assert second_response.json()["job_id"] == first_job_id
+        jobs = db_session.scalars(select(Job).where(Job.type == JobType.CRAWL_SOURCES.value)).all()
+        assert len(jobs) == 1
+
+    def test_returns_the_existing_job_when_a_running_crawl_job_already_exists(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange: pending -> 実行中 status(searching) に遷移させる
+        first_response = client.post("/api/crawl/runs")
+        first_job_id = first_response.json()["job_id"]
+        claim_next(db_session)
+
+        # Act
+        second_response = client.post("/api/crawl/runs")
+
+        # Assert
+        assert second_response.status_code == 200
+        assert second_response.json()["job_id"] == first_job_id
+
+    def test_creates_a_new_job_when_the_previous_crawl_job_already_finished(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange: 先行ジョブを completed にしてから再度起動する
+        first_response = client.post("/api/crawl/runs")
+        first_job_id = uuid.UUID(first_response.json()["job_id"])
+        job = db_session.get(Job, first_job_id)
+        assert job is not None
+        claim_next(db_session)
+        complete(db_session, job)
+
+        # Act
+        second_response = client.post("/api/crawl/runs")
+
+        # Assert
+        assert second_response.status_code == 201
+        assert second_response.json()["job_id"] != str(first_job_id)
+        jobs = db_session.scalars(select(Job).where(Job.type == JobType.CRAWL_SOURCES.value)).all()
+        assert len(jobs) == 2
+
+    @pytest.mark.parametrize(
+        "invalid_domain",
+        [
+            "not a domain",
+            "169.254.169.254/latest",
+            "",
+            "-example.com",
+            "example.com-",
+        ],
+    )
+    def test_rejects_a_source_domain_with_an_invalid_format(
+        self, client: TestClient, invalid_domain: str
+    ) -> None:
+        """LOW: ドメインとして妥当な文字種・構造でなければ 422 になること。"""
+        # Act
+        response = client.post("/api/crawl/runs", json={"source_domain": invalid_domain})
+
+        # Assert
+        assert response.status_code == 422

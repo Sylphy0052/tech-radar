@@ -28,7 +28,12 @@ TEST_DATABASE_NAME = "techradar_test"
 # トランザクション（`db_session` のロールバック方式）とも干渉するため。
 # `Settings(worker_enabled=True, ...)` のように明示指定したテストは
 # 初期化引数が環境変数より優先されるため、この既定を上書きできる。
-os.environ.setdefault("WORKER_ENABLED", "false")
+#
+# `setdefault` ではなく代入で必ず上書きする。リポジトリルートの `run.sh` は
+# `set -a; source .env; set +a` で `.env` の `WORKER_ENABLED=true` をシェルへ
+# export するため、`./run.sh` を実行したのと同じシェルで `pytest` を叩くと
+# シェル側の環境変数が既に設定済みになり、`setdefault` は無効化に失敗する。
+os.environ["WORKER_ENABLED"] = "false"
 
 # テスト用 DB の作り直しは破壊的なため、接続先をローカルと CI のサービスコンテナに限定する。
 # "postgres" は GitLab CI の service alias。

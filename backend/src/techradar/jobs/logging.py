@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from techradar.db.models import Job, OperationLog
+from techradar.jobs.queue import MAX_LAST_ERROR_LENGTH
 
 
 def record_job_event(
@@ -25,6 +26,10 @@ def record_job_event(
     記事単位でログを絞り込めるようにするため。UUID として解釈できない値は
     無視する（ジョブ種別によっては article_id を持たない payload もあり、
     ログ記録自体を失敗させる理由にはならないため）。
+
+    `error_reason` は `jobs.last_error` と同じ `MAX_LAST_ERROR_LENGTH` で
+    切り詰める。同じ例外メッセージ由来の値が片方だけ無制限に伸びると、
+    上限を設けた意図（テーブル肥大化の防止）が一貫しなくなるため。
     """
     log = OperationLog(
         operation=job.type,
@@ -32,7 +37,7 @@ def record_job_event(
         job_id=job.id,
         article_id=_extract_article_id(job.payload),
         duration_ms=duration_ms,
-        error_reason=error_reason,
+        error_reason=error_reason[:MAX_LAST_ERROR_LENGTH] if error_reason is not None else None,
         details=details or {},
     )
     session.add(log)
