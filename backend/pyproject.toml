@@ -12,6 +12,11 @@ dependencies = [
     "alembic>=1.14",
     "psycopg[binary]>=3.2",
     "pgvector>=0.4",
+    "httpx>=0.28",
+    "trafilatura>=2.0",
+    "beautifulsoup4>=4.13",
+    "lxml>=5.3",
+    "nh3>=0.2",
 ]
 
 [project.optional-dependencies]
