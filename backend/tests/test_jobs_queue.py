@@ -278,6 +278,19 @@ def test_release_returns_the_job_to_pending_without_incrementing_attempts(
     assert job.available_at == available_before_release
 
 
+def test_ownership_token_rejects_a_job_that_was_never_claimed(db_session: Session) -> None:
+    """claim を経ていないジョブからトークンを取ろうとしたら失敗させること。
+
+    `started_at` が None のまま所有権判定へ進むと、ガードを素通りしてしまう。
+    """
+    # Arrange
+    job = enqueue(db_session, JobType.FETCH_ARTICLE)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="claim されていない"):
+        ownership_token(job)
+
+
 def test_complete_does_nothing_when_the_job_was_released_after_the_claim(
     db_session: Session,
 ) -> None:
