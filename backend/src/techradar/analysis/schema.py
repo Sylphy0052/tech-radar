@@ -6,6 +6,8 @@ LLM の応答をこのスキーマで検証する。想定外の形なら失敗�
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field, field_validator
 
 from techradar.db.enums import ContentType, Difficulty
@@ -13,6 +15,16 @@ from techradar.db.enums import ContentType, Difficulty
 MAX_TOPICS = 8
 MAX_TECHNOLOGIES = 8
 MAX_SUMMARY_LENGTH = 400
+MAX_LABEL_LENGTH = 80
+MAX_TITLE_LENGTH = 300
+
+# 表示や保存で扱いにくい制御文字。LLM 出力に紛れることがあるため落とす。
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _clean(value: str) -> str:
+    """制御文字を除いて前後の空白を落とす。"""
+    return _CONTROL_CHARACTERS.sub("", value).strip()
 
 
 class ArticleAnalysis(BaseModel):
@@ -24,14 +36,23 @@ class ArticleAnalysis(BaseModel):
     translated_title: str | None = Field(
         default=None,
         description="日本語タイトル。原文が日本語なら null。",
+        max_length=MAX_TITLE_LENGTH,
     )
     summary_ja: str = Field(
         description="日本語の要約。原文の言語を問わず日本語で書く。",
         min_length=1,
         max_length=MAX_SUMMARY_LENGTH,
     )
-    domain: str = Field(description="大分類。例: Generative AI, Web Frontend", min_length=1)
-    category: str = Field(description="中分類。例: Agentic Engineering", min_length=1)
+    domain: str = Field(
+        description="大分類。例: Generative AI, Web Frontend",
+        min_length=1,
+        max_length=MAX_LABEL_LENGTH,
+    )
+    category: str = Field(
+        description="中分類。例: Agentic Engineering",
+        min_length=1,
+        max_length=MAX_LABEL_LENGTH,
+    )
     topics: list[str] = Field(
         default_factory=list,
         description="記事の主題。例: MCP, Context Engineering",
@@ -50,15 +71,21 @@ class ArticleAnalysis(BaseModel):
         le=1.0,
     )
 
+    @field_validator("summary_ja", "domain", "category", mode="after")
+    @classmethod
+    def _clean_text(cls, value: str) -> str:
+        """制御文字を落とす。"""
+        return _clean(value)
+
     @field_validator("topics", "technologies", mode="after")
     @classmethod
     def _strip_and_drop_empty(cls, values: list[str]) -> list[str]:
-        """空文字と重複を除く。LLM が空要素を混ぜることがある。"""
+        """空文字・重複・長すぎる要素を除く。LLM が混ぜることがある。"""
         seen: list[str] = []
         for value in values:
-            stripped = value.strip()
-            if stripped and stripped not in seen:
-                seen.append(stripped)
+            cleaned = _clean(value)[:MAX_LABEL_LENGTH]
+            if cleaned and cleaned not in seen:
+                seen.append(cleaned)
         return seen
 
     @field_validator("translated_title", mode="after")
@@ -67,5 +94,4 @@ class ArticleAnalysis(BaseModel):
         """空文字は「訳が不要」と同じ意味なので None に寄せる。"""
         if value is None:
             return None
-        stripped = value.strip()
-        return stripped or None
+        return _clean(value) or None

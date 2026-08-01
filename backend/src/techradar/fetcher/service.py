@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from techradar.config import Settings
 from techradar.db import Article
+from techradar.db.enums import JobStatus
 from techradar.fetcher.extract import ExtractedArticle, extract_article
 from techradar.fetcher.http import fetch_page
 from techradar.fetcher.url import normalize_url
@@ -79,6 +80,8 @@ def ingest_article(
         original_url=url,
         title=extracted.title,
         source_domain="",
+        # 解析待ちであることを明示する。NULL だと未解析か不明かを区別できない。
+        analysis_status=JobStatus.PENDING,
     )
     _apply_extraction(article, extracted, url)
     session.add(article)

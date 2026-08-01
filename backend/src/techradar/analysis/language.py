@@ -3,8 +3,10 @@
 LLM を使わず軽量ライブラリで判定する。言語判定のためだけに LLM を呼ぶのは
 コストに見合わない（`PROJECT_SPEC.md` §24 コスト管理）。
 
-`<html lang>` が信頼できる場合はそれを優先する。テンプレートの初期値が
-そのまま残っているサイトもあるため、本文からの推定と食い違う場合は推定を採る。
+**本文からの推定を優先する。** `<html lang>` はテンプレートの初期値が
+そのまま残っているサイトが多く、宣言を信じると英語記事を日本語と誤認して
+日本語タイトルが作られない、といった実害が出る。
+推定できなかった場合にのみ宣言値を使う。
 """
 
 from __future__ import annotations
@@ -17,16 +19,25 @@ DETECTION_SAMPLE_LENGTH = 2000
 # これ未満のテキストは判定が安定しないため、宣言値があればそれを使う。
 MIN_DETECTION_LENGTH = 40
 
-# 多くのサイトが未設定のまま残す値。宣言として信用しない。
-UNRELIABLE_DECLARED_LANGUAGES = frozenset({"", "en-us", "en-gb", "x-default", "und"})
+# 言語コードとして採用しない値。`x-default` の先頭要素は `x` になってしまい、
+# そのまま保存すると意味のないコードが残る。
+INVALID_LANGUAGE_CODES = frozenset({"x", "und", "zxx", "mul", "qaa"})
 
 
 def normalize_language_tag(tag: str | None) -> str | None:
-    """`ja-JP` や `EN_US` のような表記を主要部分だけに正規化する。"""
+    """`ja-JP` や `EN_US` のような表記を主要部分だけに正規化する。
+
+    言語コードとして意味を成さない値は None にする。
+    """
     if not tag:
         return None
     primary = tag.strip().lower().replace("_", "-").split("-")[0]
-    return primary or None
+    if not primary or primary in INVALID_LANGUAGE_CODES:
+        return None
+    # ISO 639-1 / 639-2 は 2〜3 文字。それ以外は表記ゆれとみなし採用しない。
+    if not primary.isalpha() or not (2 <= len(primary) <= 3):
+        return None
+    return primary
 
 
 def detect_language(text: str) -> str | None:
@@ -41,14 +52,14 @@ def detect_language(text: str) -> str | None:
 def resolve_language(*, declared: str | None, body: str) -> str | None:
     """宣言値と本文推定から原文言語を決める。
 
-    宣言値が信頼できる形（`ja` など具体的な指定）ならそれを使う。
-    テンプレート初期値にありがちな値は信用せず、本文から推定する。
-    どちらも得られなければ None を返し、判断を後段に委ねる。
+    **本文から推定できたならそれを採る。** 宣言値は推定できなかったときの
+    フォールバックとしてのみ使う。
+
+    宣言を優先すると、`<html lang="en">` のままの日本語記事や、逆に
+    `lang="ja"` のままの英語記事を取り違える。言語は `translated_title` を
+    作るかどうかの判断に直結するため、実際の本文を根拠にする。
     """
-    normalized_declared = normalize_language_tag(declared)
     detected = detect_language(body)
-
-    if declared and declared.strip().lower() in UNRELIABLE_DECLARED_LANGUAGES:
-        return detected or normalized_declared
-
-    return normalized_declared or detected
+    if detected is not None:
+        return detected
+    return normalize_language_tag(declared)
