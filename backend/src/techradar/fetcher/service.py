@@ -18,6 +18,8 @@ from techradar.db.enums import JobStatus
 from techradar.fetcher.extract import ExtractedArticle, extract_article
 from techradar.fetcher.http import fetch_page
 from techradar.fetcher.url import normalize_url
+from techradar.sources.config import RegistryConfig, get_registry_config
+from techradar.sources.service import classify_with_registry
 
 
 @dataclass(frozen=True)
@@ -50,16 +52,36 @@ def _apply_extraction(article: Article, extracted: ExtractedArticle, original_ur
     article.source_domain = urlsplit(extracted.canonical_url).hostname or ""
 
 
+def _apply_source_classification(
+    session: Session,
+    article: Article,
+    registry_config: RegistryConfig,
+) -> None:
+    """情報源の種別と authority を記事へ反映する（`PROJECT_SPEC.md` §10, §11）。
+
+    ここで埋めないと `source_authority` が既定値のままになり、推薦時に
+    一次情報を優先できない。
+    """
+    classification = classify_with_registry(session, article.canonical_url, registry_config)
+    article.source_type = classification.source_type.value
+    article.source_authority = classification.authority_score
+    article.is_primary_source = classification.is_primary_source
+
+
 def ingest_article(
     session: Session,
     url: str,
     *,
     settings: Settings | None = None,
+    registry_config: RegistryConfig | None = None,
 ) -> IngestResult:
     """URL から記事を取得して保存する。
 
     既に同じ正規化 URL の記事があれば取得せず既存を返す。
     ネットワークアクセスと LLM 呼び出しを繰り返さないため。
+
+    Args:
+        registry_config: 情報源レジストリの設定。省略時は同梱設定を使う。
     """
     existing = find_existing_article(session, url)
     if existing is not None:
@@ -84,6 +106,7 @@ def ingest_article(
         analysis_status=JobStatus.PENDING,
     )
     _apply_extraction(article, extracted, url)
+    _apply_source_classification(session, article, registry_config or get_registry_config())
     session.add(article)
     session.flush()
     return IngestResult(article=article, was_fetched=True)
