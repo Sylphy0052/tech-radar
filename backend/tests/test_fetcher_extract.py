@@ -202,22 +202,20 @@ class TestStripSiteSuffix:
 
 class TestTitleSelection:
     def test_prefers_og_title_over_document_title(self):
-        # Arrange — og:title が最も記事名に近い
+        # Arrange — og:title と <title> を別の文字列にし、og:title が使われることを確かめる。
+        # 同じ値にすると og:title を読まなくてもテストが通ってしまう
         html = article_html(
-            extra_head=(
-                '<meta property="og:title" content="MCP サーバー実装ガイド" />'
-                '<meta property="og:site_name" content="Example Blog" />'
-            )
+            extra_head='<meta property="og:title" content="OGP に書かれた記事名" />'
         ).replace(
             "<title>MCP サーバー実装ガイド</title>",
-            "<title>MCP サーバー実装ガイド | Example Blog</title>",
+            "<title>ドキュメントタイトル</title>",
         )
 
         # Act
         extracted = extract_article(html, "https://example.com/posts/1")
 
         # Assert
-        assert extracted.title == "MCP サーバー実装ガイド"
+        assert extracted.title == "OGP に書かれた記事名"
 
     def test_strips_site_name_from_document_title(self):
         # Arrange — og:title が無く <title> にサイト名が付く一般的なケース

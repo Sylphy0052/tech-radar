@@ -44,10 +44,14 @@ def is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         or ip.is_multicast
         or ip.is_reserved
         or ip.is_unspecified
+        # IPv6 サイトローカル (fec0::/10)。RFC 3879 で非推奨だが古い社内網では現役で、
+        # `is_private` では判定されない。
+        or getattr(ip, "is_site_local", False)
     ):
         return True
 
-    # IPv4 射影 IPv6 (::ffff:10.0.0.1) は上の判定をすり抜けるため展開して再判定する。
+    # IPv4 射影 IPv6 (::ffff:10.0.0.1) の展開。現行の CPython では上の `is_private` が
+    # 既に True を返すため通常は到達しないが、判定が変わっても防御が抜けないよう残す。
     mapped = getattr(ip, "ipv4_mapped", None)
     if mapped is not None and is_blocked_ip(mapped):
         return True
@@ -88,7 +92,14 @@ def validate_url(url: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address
         message = "ホスト名がありません"
         raise UnsafeUrlError(message)
 
-    port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
+    try:
+        explicit_port = parts.port
+    except ValueError as exc:
+        # 範囲外のポート番号。未処理のまま伝播させず、拒否として扱う。
+        message = f"ポート番号が不正です: {url}"
+        raise UnsafeUrlError(message) from exc
+
+    port = explicit_port or (443 if parts.scheme.lower() == "https" else 80)
     addresses = resolve_host(host, port)
     if not addresses:
         message = f"ホスト名を解決できません: {host}"
