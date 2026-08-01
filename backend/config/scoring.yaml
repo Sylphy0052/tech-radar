@@ -54,6 +54,10 @@ interest:
   # 関心記事全体ではなく直近で最も近い数件との類似度を見ることで、
   # 幅広い関心の中の 1 テーマにしか合致しない記事も拾えるようにする
   top_k: 3
+  # 関心プロファイル構築対象の記事数上限（recommendation/service.py が使う）。
+  # ユーザーの関心記事が増え続けても、実行のたびに全件を読み込んで計算コストが
+  # 際限なく増えないための安全弁。新しい順に打ち切る
+  max_profile_articles: 200
 
 source_match:
   # 完全一致ほどの確信度は無いが無視もできない部分一致（エンティティ名が
@@ -89,3 +93,11 @@ limits:
   # クライアントが 1 回に要求できる最大件数。過大なレスポンスによる
   # レイテンシ・負荷増加を防ぐ
   max_page_size: 100
+  # Discover フィード 1 回の実行で recommendations へ保存する件数
+  # （recommendation/service.py の generate_recommendations が使う）。
+  # default_page_size を複数ページ分先読みし、ページング要求のたびに
+  # 推薦を作り直さずに済むようにする
+  feed_run_size: 100
+  # 記事起点推薦 1 回の実行で保存する件数。Discover ほど多くの候補を
+  # 必要としない用途（「この記事に近い記事」）のため少なめにする
+  article_based_run_size: 20

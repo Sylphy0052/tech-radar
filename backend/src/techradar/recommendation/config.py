@@ -47,6 +47,9 @@ MIN_PAGE_SIZE = 1
 # 1 回の実行で採点する候補数の下限。0 以下だと何も処理できない。
 MIN_CANDIDATES_PER_RUN = 1
 
+# 関心プロファイル構築対象の記事数の下限。0 以下だと関心を表現できない。
+MIN_PROFILE_ARTICLES = 1
+
 
 class ScoringConfigError(Exception):
     """設定ファイルを読み込めなかった場合のエラー。"""
@@ -97,6 +100,10 @@ class InterestConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     top_k: int = Field(ge=MIN_INTEREST_TOP_K)
+    # 関心プロファイル構築対象の記事数上限（`recommendation/service.py` が使う）。
+    # ランキングの純粋関数（`ScoringSettings`）には関係しないため `InterestSettings`
+    # へは変換しない。
+    max_profile_articles: int = Field(ge=MIN_PROFILE_ARTICLES)
 
 
 class SourceMatchConfig(BaseModel):
@@ -136,6 +143,11 @@ class LimitsConfig(BaseModel):
     max_candidates_per_run: int = Field(ge=MIN_CANDIDATES_PER_RUN)
     default_page_size: int = Field(ge=MIN_PAGE_SIZE)
     max_page_size: int = Field(ge=MIN_PAGE_SIZE)
+    # Discover フィード 1 回の実行で保存する件数（`recommendation/service.py` が使う）。
+    # `RankingLimits` には含めない。採点・構成比の純粋関数はページングと無関係のため。
+    feed_run_size: int = Field(ge=MIN_PAGE_SIZE)
+    # 記事起点推薦 1 回の実行で保存する件数。
+    article_based_run_size: int = Field(ge=MIN_PAGE_SIZE)
 
     @model_validator(mode="after")
     def _validate_default_within_max(self) -> LimitsConfig:
