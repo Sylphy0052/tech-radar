@@ -45,6 +45,12 @@ class Settings(BaseSettings):
 
     # ---- Embedding (ローカル実行) ----
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
+    # HuggingFace のリビジョン。既定ブランチが差し替えられても影響を受けないよう固定する。
+    # 空ならリビジョンを固定しない（開発時のみ）。
+    embedding_model_revision: str | None = None
+    # トークナイズ前に本文を切る文字数。max_seq_length はトークナイズ後に効くため、
+    # 巨大な本文をそのまま渡すとトークナイズ自体で CPU とメモリを消費する。
+    embedding_max_input_characters: int = Field(default=40000, gt=0)
     embedding_dimensions: int = Field(default=1024, gt=0)
     embedding_max_length: int = Field(default=8192, gt=0)
     embedding_device: EmbeddingDevice = "auto"
