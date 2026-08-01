@@ -18,7 +18,7 @@ from techradar.db.models import UserArticle
 from techradar.fetcher.service import ingest_article
 from techradar.jobs.handlers._shared import (
     load_registration,
-    record_registration_failure,
+    record_registration_failure_safely,
     run_job_in_thread,
     start_registration_step,
 )
@@ -62,9 +62,9 @@ def process_fetch_article(session: Session, context: JobContext, settings: Setti
         # 表示と実処理の段階が食い違う。
         session.flush()
     except Exception as exc:
-        record_registration_failure(
+        record_registration_failure_safely(
             session,
-            registration,
+            registration_id,
             classify_fetch_error(exc),
             context=context,
             settings=settings,

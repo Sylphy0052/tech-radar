@@ -18,7 +18,7 @@ from techradar.db.enums import JobType
 from techradar.db.models import Article
 from techradar.jobs.handlers._shared import (
     load_registration,
-    record_registration_failure,
+    record_registration_failure_safely,
     run_job_in_thread,
     start_registration_step,
 )
@@ -65,9 +65,9 @@ def process_analyze_article(
         registration.job_id = next_job.id
         session.flush()
     except Exception as exc:
-        record_registration_failure(
+        record_registration_failure_safely(
             session,
-            registration,
+            registration_id,
             classify_analysis_error(exc),
             context=context,
             settings=settings,
