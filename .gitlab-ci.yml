@@ -39,6 +39,21 @@ backend:ty-check:
 backend:pytest:
   extends: .backend
   stage: test
+  # 結合テストは pgvector 入りの PostgreSQL を必要とする。
+  services:
+    - name: pgvector/pgvector:pg17
+      alias: postgres
+  variables:
+    # このジョブ内のサービスコンテナだけで完結する使い捨ての資格情報。
+    # 外部からは到達できず、実運用の DB とは無関係。
+    # 実運用の資格情報を使う必要が生じた場合は、ここに書かず
+    # GitLab の CI/CD Variables (masked) へ移すこと。
+    POSTGRES_USER: techradar
+    POSTGRES_PASSWORD: techradar
+    POSTGRES_DB: techradar
+    POSTGRES_HOST: postgres
+    # 値の二重管理を避けるため上の変数から組み立てる。ホスト名は service alias。
+    DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}"
   script:
     - uv run pytest --junitxml=pytest.xml --cov-report=xml
   coverage: '/^TOTAL.*\s+(\d+(?:\.\d+)?%)$/'
