@@ -31,6 +31,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -307,6 +308,16 @@ class Job(Base):
         # ワーカーが次のジョブを引くときの検索条件
         # (status = 'pending' かつ available_at <= now() を available_at 順に取る)。
         Index("ix_jobs_status_available_at", "status", "available_at"),
+        # 巡回ジョブの重複起動を DB 側で1件に制限する (Issue #26)。API 側の事前確認だけでは
+        # 確認と INSERT の間に別リクエストが割り込む TOCTOU レースを塞げないため、
+        # 一意制約を最終的な防衛線に置く。crawl_sources が取りうる実行中 status は
+        # searching だけなので、pending と合わせた2つを「まだ終わっていない」とみなす。
+        Index(
+            "ux_jobs_active_crawl_sources",
+            "type",
+            unique=True,
+            postgresql_where=text("type = 'crawl_sources' AND status IN ('pending', 'searching')"),
+        ),
     )
 
 
