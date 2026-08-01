@@ -14,6 +14,7 @@ from techradar.db import (
     EMBEDDING_DIMENSIONS,
     Article,
     ArticleFeedback,
+    ArticleRegistration,
     Job,
     OperationLog,
     Recommendation,
@@ -249,6 +250,134 @@ class TestUserArticle:
             select(UserArticle).where(UserArticle.article_id == article.id)
         ).all()
         assert len(rows) == 2
+
+
+class TestArticleRegistration:
+    def test_defaults_status_to_pending(self, db_session: Session):
+        # Arrange / Act
+        registration = ArticleRegistration(
+            user_id=uuid.uuid4(),
+            url="https://example.com/article?utm_source=x",
+            normalized_url="https://example.com/article",
+        )
+        db_session.add(registration)
+        db_session.flush()
+        db_session.expire(registration)
+
+        # Assert
+        assert registration.status == JobStatus.PENDING
+        assert registration.article_id is None
+        assert registration.job_id is None
+        assert registration.error_reason is None
+        assert registration.created_at is not None
+        assert registration.updated_at is not None
+
+    def test_rejects_duplicate_normalized_url_for_the_same_user(self, db_session: Session):
+        # Arrange
+        user_id = uuid.uuid4()
+        db_session.add(
+            ArticleRegistration(
+                user_id=user_id,
+                url="https://example.com/article",
+                normalized_url="https://example.com/article",
+            )
+        )
+        db_session.flush()
+
+        # Act / Assert — 同じ URL の再登録で fetch ジョブを積み増さないための一意制約
+        db_session.add(
+            ArticleRegistration(
+                user_id=user_id,
+                url="https://example.com/article?utm_source=y",
+                normalized_url="https://example.com/article",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db_session.flush()
+
+    def test_allows_different_users_to_register_the_same_normalized_url(self, db_session: Session):
+        # Arrange — 将来のマルチユーザー化を妨げないことの確認
+        # Act
+        for _ in range(2):
+            db_session.add(
+                ArticleRegistration(
+                    user_id=uuid.uuid4(),
+                    url="https://example.com/article",
+                    normalized_url="https://example.com/article",
+                )
+            )
+        db_session.flush()
+
+        # Assert
+        rows = db_session.scalars(
+            select(ArticleRegistration).where(
+                ArticleRegistration.normalized_url == "https://example.com/article"
+            )
+        ).all()
+        assert len(rows) == 2
+
+    def test_clears_article_reference_when_the_article_is_deleted(self, db_session: Session):
+        # Arrange
+        article = make_article()
+        db_session.add(article)
+        db_session.flush()
+        registration = ArticleRegistration(
+            user_id=uuid.uuid4(),
+            url="https://example.com/article",
+            normalized_url="https://example.com/article",
+            article_id=article.id,
+            status=JobStatus.COMPLETED,
+        )
+        db_session.add(registration)
+        db_session.flush()
+
+        # Act — 取得済み記事が別の理由で削除されても、登録履歴自体は残す
+        db_session.delete(article)
+        db_session.flush()
+        db_session.expire(registration)
+
+        # Assert
+        assert registration.article_id is None
+
+    def test_clears_job_reference_when_the_job_is_deleted(self, db_session: Session):
+        # Arrange
+        job = Job(type=JobType.FETCH_ARTICLE, payload={})
+        db_session.add(job)
+        db_session.flush()
+        registration = ArticleRegistration(
+            user_id=uuid.uuid4(),
+            url="https://example.com/article",
+            normalized_url="https://example.com/article",
+            job_id=job.id,
+        )
+        db_session.add(registration)
+        db_session.flush()
+
+        # Act
+        db_session.delete(job)
+        db_session.flush()
+        db_session.expire(registration)
+
+        # Assert
+        assert registration.job_id is None
+
+    def test_stores_a_classified_error_reason_without_the_raw_exception_message(
+        self, db_session: Session
+    ):
+        # Arrange / Act — 例外メッセージそのものではなく分類済みの理由のみを保持する
+        registration = ArticleRegistration(
+            user_id=uuid.uuid4(),
+            url="https://example.com/article",
+            normalized_url="https://example.com/article",
+            status=JobStatus.FAILED,
+            error_reason="fetch_timeout",
+        )
+        db_session.add(registration)
+        db_session.flush()
+        db_session.expire(registration)
+
+        # Assert
+        assert registration.error_reason == "fetch_timeout"
 
 
 class TestArticleFeedback:

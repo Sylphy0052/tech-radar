@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from techradar import __version__
+from techradar.api.articles import router as articles_router
 from techradar.api.crawl import router as crawl_router
 from techradar.api.jobs import router as jobs_router
 from techradar.api.sources import router as sources_router
@@ -95,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(sources_router)
     app.include_router(jobs_router)
     app.include_router(crawl_router)
+    app.include_router(articles_router)
 
     @app.get("/api/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
