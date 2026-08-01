@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     embedding_device: EmbeddingDevice = "auto"
     embedding_batch_size: int = Field(default=8, gt=0)
 
+    # ---- 記事取得 (SSRF 対策の各種上限。PROJECT_SPEC.md §21) ----
+    fetch_max_redirects: int = Field(default=5, ge=0)
+    fetch_max_response_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
+    fetch_connect_timeout_seconds: float = Field(default=10.0, gt=0)
+    fetch_read_timeout_seconds: float = Field(default=20.0, gt=0)
+    fetch_user_agent: str = "TechRadar/0.1 (+https://gitlab.heroz.co.jp/kfuruhashi/techradar)"
+
     # ---- 記事収集 ----
     # 未設定なら Brave Search コレクターは実行時に skip される
     brave_search_api_key: str | None = None
