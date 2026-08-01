@@ -499,6 +499,34 @@ class TestJobAndLog:
         assert job.attempts == 0
         assert job.payload == {"trigger": "manual"}
 
+    def test_defaults_available_at_to_now(self, db_session: Session):
+        # Arrange / Act
+        job = Job(type=JobType.CRAWL_SOURCES, payload={})
+        db_session.add(job)
+        db_session.flush()
+        db_session.expire(job)
+
+        # Assert — 既定では即時実行可能。リトライ時のみ将来時刻へ後ろ倒しする。
+        assert job.available_at is not None
+        assert job.available_at <= datetime.now(UTC)
+
+    def test_defers_retry_by_moving_available_at_forward(self, db_session: Session):
+        # Arrange
+        job = Job(type=JobType.FETCH_ARTICLE, payload={"url": "https://example.com"})
+        db_session.add(job)
+        db_session.flush()
+        deferred_until = datetime.now(UTC) + timedelta(seconds=30)
+
+        # Act
+        job.available_at = deferred_until
+        db_session.flush()
+
+        # Assert — マップ漏れを検出するため、DB に保存された値を直接読む。
+        stored = db_session.execute(
+            text("SELECT available_at FROM jobs WHERE id = :id"), {"id": job.id}
+        ).scalar_one()
+        assert stored == deferred_until
+
     def test_records_failure_reason_and_attempts(self, db_session: Session):
         # Arrange
         job = Job(type=JobType.FETCH_ARTICLE, payload={"url": "https://example.com"})
