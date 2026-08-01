@@ -103,6 +103,7 @@ def test_claim_next_returns_the_enqueued_job(db_session: Session) -> None:
         (JobType.EMBED_ARTICLE, JobStatus.ANALYZING),
         (JobType.CRAWL_SOURCES, JobStatus.SEARCHING),
         (JobType.GENERATE_FEED, JobStatus.SEARCHING),
+        (JobType.DEDUPLICATE_ARTICLES, JobStatus.SEARCHING),
     ],
 )
 def test_claim_next_sets_the_running_status_for_the_job_type(
