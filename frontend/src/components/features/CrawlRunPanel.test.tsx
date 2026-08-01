@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CrawlRunPanel } from "@/components/features/CrawlRunPanel";
-import { DEFAULT_POLLING_INTERVAL_MS } from "@/hooks/usePolling";
+import { DEFAULT_MAX_CONSECUTIVE_ERRORS, DEFAULT_POLLING_INTERVAL_MS } from "@/hooks/usePolling";
 
 async function flush(ms = 0): Promise<void> {
   await act(async () => {
@@ -111,6 +111,52 @@ describe("CrawlRunPanel", () => {
 
     // Assert
     expect(screen.getByText("状態: 巡回実行中")).toBeInTheDocument();
+  });
+
+  it("recovers when the first progress request fails before the job becomes visible", async () => {
+    // Arrange — 起動直後の 1 回だけ 404 が返り、その後は通常どおり進捗が返る。
+    let getCallCount = 0;
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return jsonResponse({ job_id: jobId, status: "pending" }, 201);
+      }
+      getCallCount += 1;
+      if (getCallCount === 1) {
+        return jsonResponse({ detail: "ジョブが見つかりません" }, 404);
+      }
+      return jsonResponse(makeJob("searching"), 200);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<CrawlRunPanel />);
+
+    // Act
+    clickRunButton();
+    await flush();
+    await flush(DEFAULT_POLLING_INTERVAL_MS);
+
+    // Assert
+    expect(screen.getByText("状態: 巡回実行中")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("re-enables the button when polling the progress ultimately fails", async () => {
+    // Arrange — 進捗取得が回復せず失敗し続ける。
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return jsonResponse({ job_id: jobId, status: "pending" }, 201);
+      }
+      return jsonResponse({ detail: "ジョブが見つかりません" }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<CrawlRunPanel />);
+
+    // Act
+    clickRunButton();
+    await flush();
+    await flush(DEFAULT_POLLING_INTERVAL_MS * DEFAULT_MAX_CONSECUTIVE_ERRORS);
+
+    // Assert — 進捗が追えなくなった以上、押し直せる状態へ戻す。
+    expect(screen.getByRole("button", { name: "巡回を実行" })).not.toBeDisabled();
   });
 
   it("shows an error message when starting the crawl fails with a 5xx response", async () => {

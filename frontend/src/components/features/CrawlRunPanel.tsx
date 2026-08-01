@@ -26,7 +26,12 @@ export function CrawlRunPanel() {
 
   const polling = usePolling(jobId, getJob, { isTerminal: isJobTerminal });
 
-  const isJobRunning = jobId !== null && !(polling.data !== null && isJobTerminal(polling.data));
+  // 進捗が追えなくなった場合もボタンを押し直せる状態へ戻す。押せないままにすると、
+  // 実際にはジョブが終わっていても画面を再読込するまで巡回を再実行できない。
+  const isJobRunning =
+    jobId !== null &&
+    polling.error === null &&
+    !(polling.data !== null && isJobTerminal(polling.data));
   const isButtonDisabled = isStarting || isJobRunning;
 
   async function handleClick(): Promise<void> {

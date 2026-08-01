@@ -1,7 +1,11 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_POLLING_INTERVAL_MS, usePolling } from "@/hooks/usePolling";
+import {
+  DEFAULT_MAX_CONSECUTIVE_ERRORS,
+  DEFAULT_POLLING_INTERVAL_MS,
+  usePolling,
+} from "@/hooks/usePolling";
 
 interface Item {
   status: string;
@@ -100,18 +104,73 @@ describe("usePolling", () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
-  it("surfaces a fetch error without throwing", async () => {
+  it("keeps polling after a transient failure instead of giving up", async () => {
+    // Arrange — 起動直後の 404 のように、しばらくすると解消する失敗を1回だけ返す
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("not found"))
+      .mockResolvedValueOnce({ status: "pending" } satisfies Item);
+
+    // Act
+    const { result } = renderHook(() => usePolling<Item>("abc", fetchFn, { isTerminal }));
+    await advanceTimersAndFlush(0);
+    const afterFirstFailure = { ...result.current };
+    await advanceTimersAndFlush(DEFAULT_POLLING_INTERVAL_MS);
+
+    // Assert — 1回の失敗ではエラーを確定させず、回復したら結果を返す
+    expect(afterFirstFailure.error).toBeNull();
+    expect(result.current.data).toEqual({ status: "pending" });
+    expect(result.current.error).toBeNull();
+  });
+
+  it("surfaces a fetch error once the failures no longer look transient", async () => {
     // Arrange
     const fetchFn = vi.fn().mockRejectedValue(new Error("network down"));
 
     // Act
     const { result } = renderHook(() => usePolling<Item>("abc", fetchFn, { isTerminal }));
     await advanceTimersAndFlush(0);
+    await advanceTimersAndFlush(DEFAULT_POLLING_INTERVAL_MS * DEFAULT_MAX_CONSECUTIVE_ERRORS);
 
     // Assert
+    expect(fetchFn).toHaveBeenCalledTimes(DEFAULT_MAX_CONSECUTIVE_ERRORS);
     expect(result.current.error).toBeInstanceOf(Error);
     expect(result.current.data).toBeNull();
     expect(result.current.isLoading).toBe(false);
+  });
+
+  it("stops retrying once the failure is surfaced", async () => {
+    // Arrange
+    const fetchFn = vi.fn().mockRejectedValue(new Error("network down"));
+
+    // Act
+    renderHook(() => usePolling<Item>("abc", fetchFn, { isTerminal }));
+    await advanceTimersAndFlush(0);
+    await advanceTimersAndFlush(DEFAULT_POLLING_INTERVAL_MS * (DEFAULT_MAX_CONSECUTIVE_ERRORS + 5));
+
+    // Assert
+    expect(fetchFn).toHaveBeenCalledTimes(DEFAULT_MAX_CONSECUTIVE_ERRORS);
+  });
+
+  it("forgets earlier failures once a fetch succeeds", async () => {
+    // Arrange — 失敗を挟みながらも成功が入るうちはエラーを確定させない
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("not found"))
+      .mockRejectedValueOnce(new Error("not found"))
+      .mockResolvedValueOnce({ status: "pending" } satisfies Item)
+      .mockRejectedValueOnce(new Error("not found"))
+      .mockRejectedValueOnce(new Error("not found"))
+      .mockResolvedValueOnce({ status: "done" } satisfies Item);
+
+    // Act
+    const { result } = renderHook(() => usePolling<Item>("abc", fetchFn, { isTerminal }));
+    await advanceTimersAndFlush(0);
+    await advanceTimersAndFlush(DEFAULT_POLLING_INTERVAL_MS * 5);
+
+    // Assert
+    expect(result.current.data).toEqual({ status: "done" });
+    expect(result.current.error).toBeNull();
   });
 
   it("restarts polling from scratch when the id changes", async () => {

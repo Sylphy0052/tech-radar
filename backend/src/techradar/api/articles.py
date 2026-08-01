@@ -154,7 +154,12 @@ def create_article_registration(
         {"registration_id": str(registration.id), "url": payload.url},
     )
     registration.job_id = job.id
-    session.flush()
+    # 応答を返す前にコミットする。リクエスト単位のセッションは依存の後処理で
+    # コミットされるが、後処理が走るのはレスポンス送信より後になる。UI は応答直後に
+    # `GET /api/articles/registrations/{id}` でポーリングを始めるため、ここで
+    # コミットしておかないと登録直後の状態取得が 404 になる。また、fetch_article を
+    # 拾うワーカーにとってもジョブが見えるようになるのが応答後になる。
+    session.commit()
     return registration
 
 
