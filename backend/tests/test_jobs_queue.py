@@ -19,6 +19,7 @@ from techradar.jobs.queue import (
     complete,
     enqueue,
     fail,
+    ownership_token,
     reclaim_stale,
     release,
 )
@@ -160,7 +161,14 @@ def test_fail_reschedules_with_exponential_backoff_until_max_attempts_then_fails
     before_first_failure = datetime.now(UTC)
 
     # Act: 1回目の失敗
-    fail(db_session, job, "timeout", max_attempts=3, backoff_seconds=5.0)
+    fail(
+        db_session,
+        job,
+        "timeout",
+        max_attempts=3,
+        backoff_seconds=5.0,
+        claimed_at=ownership_token(job),
+    )
 
     # Assert: pending に戻り、約5秒後に再試行可能
     assert job.status == JobStatus.PENDING.value
@@ -174,7 +182,14 @@ def test_fail_reschedules_with_exponential_backoff_until_max_attempts_then_fails
     # Act: 2回目の失敗
     claim_next(db_session, now=job.available_at)
     before_second_failure = datetime.now(UTC)
-    fail(db_session, job, "timeout again", max_attempts=3, backoff_seconds=5.0)
+    fail(
+        db_session,
+        job,
+        "timeout again",
+        max_attempts=3,
+        backoff_seconds=5.0,
+        claimed_at=ownership_token(job),
+    )
 
     # Assert: 約10秒後に再試行可能（指数バックオフ）
     assert job.status == JobStatus.PENDING.value
@@ -184,7 +199,14 @@ def test_fail_reschedules_with_exponential_backoff_until_max_attempts_then_fails
 
     # Act: 3回目の失敗
     claim_next(db_session, now=job.available_at)
-    fail(db_session, job, "final failure", max_attempts=3, backoff_seconds=5.0)
+    fail(
+        db_session,
+        job,
+        "final failure",
+        max_attempts=3,
+        backoff_seconds=5.0,
+        claimed_at=ownership_token(job),
+    )
 
     # Assert: 上限到達で failed
     assert job.status == JobStatus.FAILED.value
@@ -199,7 +221,15 @@ def test_fail_marks_the_job_failed_immediately_when_not_retryable(db_session: Se
     claim_next(db_session)
 
     # Act
-    fail(db_session, job, "invalid payload", max_attempts=3, backoff_seconds=5.0, retryable=False)
+    fail(
+        db_session,
+        job,
+        "invalid payload",
+        max_attempts=3,
+        backoff_seconds=5.0,
+        retryable=False,
+        claimed_at=ownership_token(job),
+    )
 
     # Assert: 試行回数を残したまま即 failed
     assert job.status == JobStatus.FAILED.value
@@ -214,7 +244,15 @@ def test_fail_truncates_a_last_error_that_exceeds_the_limit(db_session: Session)
     long_error = "e" * (MAX_LAST_ERROR_LENGTH + 500)
 
     # Act
-    fail(db_session, job, long_error, max_attempts=1, backoff_seconds=1.0, retryable=False)
+    fail(
+        db_session,
+        job,
+        long_error,
+        max_attempts=1,
+        backoff_seconds=1.0,
+        retryable=False,
+        claimed_at=ownership_token(job),
+    )
 
     # Assert
     assert job.last_error is not None
@@ -240,12 +278,98 @@ def test_release_returns_the_job_to_pending_without_incrementing_attempts(
     assert job.available_at == available_before_release
 
 
+def test_ownership_token_rejects_a_job_that_was_never_claimed(db_session: Session) -> None:
+    """claim を経ていないジョブからトークンを取ろうとしたら失敗させること。
+
+    `started_at` が None のまま所有権判定へ進むと、ガードを素通りしてしまう。
+    """
+    # Arrange
+    job = enqueue(db_session, JobType.FETCH_ARTICLE)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="claim されていない"):
+        ownership_token(job)
+
+
+def test_complete_does_nothing_when_the_job_was_released_after_the_claim(
+    db_session: Session,
+) -> None:
+    """release 後に生き残った処理が completed で踏みつぶさないこと（Issue #27）。
+
+    `stop()` は猶予を超えたタスクをキャンセルして release するが、`asyncio.to_thread`
+    が起こしたスレッドはキャンセルできず、後から `complete` を呼びうる。
+    """
+    # Arrange: claim してトークンを控え、その後 release で pending へ戻す
+    job = enqueue(db_session, JobType.FETCH_ARTICLE)
+    claim_next(db_session)
+    claimed_at = ownership_token(job)
+    release(db_session, job)
+
+    # Act: 取り残されたスレッドが後から complete を呼ぶ
+    written = complete(db_session, job, claimed_at=claimed_at)
+
+    # Assert: 何も書かず pending のまま
+    assert written is False
+    assert job.status == JobStatus.PENDING.value
+    assert job.finished_at is None
+
+
+def test_complete_does_nothing_when_another_worker_reclaimed_the_job(
+    db_session: Session,
+) -> None:
+    """release 後に別ワーカーが再 claim していた場合も上書きしないこと（Issue #27）。
+
+    status だけを見るガードでは、再 claim で実行中 status に戻った時点で
+    旧タスクの書き込みが通ってしまう。claim 時刻の一致まで見る必要がある。
+    """
+    # Arrange: 1回目の claim のトークンを控え、release してから再度 claim する
+    job = enqueue(db_session, JobType.FETCH_ARTICLE)
+    claim_next(db_session)
+    first_claimed_at = ownership_token(job)
+    release(db_session, job)
+    claim_next(db_session)
+    second_claimed_at = ownership_token(job)
+
+    # Act: 1回目の claim を握ったままのスレッドが後から complete を呼ぶ
+    written = complete(db_session, job, claimed_at=first_claimed_at)
+
+    # Assert: 2回目の claim による実行中状態を壊さない
+    assert written is False
+    assert job.status == running_status_for(JobType.FETCH_ARTICLE).value
+    assert job.started_at == second_claimed_at
+
+
+def test_fail_does_nothing_when_the_job_was_released_after_the_claim(
+    db_session: Session,
+) -> None:
+    """release 後に生き残った処理が失敗を書き込まないこと（Issue #27）。
+
+    attempts を増やしてしまうと、利用者都合の中断がリトライ回数を消費する。
+    """
+    # Arrange
+    job = enqueue(db_session, JobType.FETCH_ARTICLE)
+    claim_next(db_session)
+    claimed_at = ownership_token(job)
+    release(db_session, job)
+
+    # Act
+    written = fail(
+        db_session, job, "boom", max_attempts=3, backoff_seconds=5.0, claimed_at=claimed_at
+    )
+
+    # Assert
+    assert written is False
+    assert job.status == JobStatus.PENDING.value
+    assert job.attempts == 0
+    assert job.last_error is None
+
+
 def test_release_does_not_overwrite_a_job_that_already_completed(db_session: Session) -> None:
     """CRITICAL: release がスレッド側で先に completed へ進んだジョブを上書きしないこと。"""
     # Arrange
     job = enqueue(db_session, JobType.FETCH_ARTICLE)
     claim_next(db_session)
-    complete(db_session, job)
+    complete(db_session, job, claimed_at=ownership_token(job))
 
     # Act
     rolled_back = release(db_session, job)
@@ -259,7 +383,15 @@ def test_release_does_not_overwrite_a_job_that_already_failed(db_session: Sessio
     # Arrange
     job = enqueue(db_session, JobType.FETCH_ARTICLE)
     claim_next(db_session)
-    fail(db_session, job, "boom", max_attempts=1, backoff_seconds=1.0, retryable=False)
+    fail(
+        db_session,
+        job,
+        "boom",
+        max_attempts=1,
+        backoff_seconds=1.0,
+        retryable=False,
+        claimed_at=ownership_token(job),
+    )
 
     # Act
     rolled_back = release(db_session, job)
@@ -297,11 +429,18 @@ def test_reclaim_stale_returns_running_jobs_to_pending_and_reports_the_count(
 
     completed_job = enqueue(db_session, JobType.GENERATE_FEED)
     claim_next(db_session)
-    complete(db_session, completed_job)
+    complete(db_session, completed_job, claimed_at=ownership_token(completed_job))
 
     failed_job = enqueue(db_session, JobType.EMBED_ARTICLE)
     claim_next(db_session)
-    fail(db_session, failed_job, "boom", max_attempts=1, backoff_seconds=1.0)
+    fail(
+        db_session,
+        failed_job,
+        "boom",
+        max_attempts=1,
+        backoff_seconds=1.0,
+        claimed_at=ownership_token(failed_job),
+    )
 
     # Act
     reclaimed_count = reclaim_stale(db_session)
