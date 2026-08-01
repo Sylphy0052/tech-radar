@@ -36,8 +36,12 @@ class Settings(BaseSettings):
 
     # ---- LLM (Claude Code CLI headless) ----
     claude_cli_path: str = "claude"
+    # 空ならセッション既定のモデルを使う。再現性が要るときに固定する。
+    claude_cli_model: str | None = None
     llm_timeout_seconds: int = Field(default=180, gt=0)
     llm_max_retries: int = Field(default=3, ge=0)
+    # 指数バックオフの基準秒数（n 回目の待機は base * 2^n）。
+    llm_retry_backoff_seconds: float = Field(default=1.0, ge=0)
 
     # ---- Embedding (ローカル実行) ----
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"

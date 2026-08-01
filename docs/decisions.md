@@ -18,7 +18,7 @@
 
 | 項目 | 決定 |
 | --- | --- |
-| 要約・分類・翻訳・推薦理由 | Claude Code CLI headless（`claude -p --output-format json --allowedTools ""`） |
+| 要約・分類・翻訳・推薦理由 | Claude Code CLI headless（`--print --output-format json`）。ツール無効化の方法は [ADR 0002](adr/0002-llm-tool-isolation.md) |
 | Embedding | `Qwen/Qwen3-Embedding-0.6B` をローカル GPU で実行。1024 次元・`max_length=8192` |
 | Web 検索 | Brave Search API 無料枠（月 2000 クエリ・1 qps）。API キー未設定時は自動 skip |
 | RSS 以外の収集 | Hacker News API / GitHub Releases API / arXiv API / 国内技術メディア RSS |
