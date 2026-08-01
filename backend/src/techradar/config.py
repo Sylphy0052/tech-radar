@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import uuid
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -17,6 +18,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 EmbeddingDevice = Literal["auto", "cuda", "cpu"]
+
+# MVP は認証なしの単一ユーザー（`docs/decisions.md`）のため、固定 UUID を既定の
+# user_id として使う。将来認証を導入する際は `api.deps.get_current_user_id` の
+# 実装を差し替えるだけで済むようにするため、値そのものは環境変数
+# `DEFAULT_USER_ID` で上書き可能にしておく。
+_DEFAULT_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 
 class Settings(BaseSettings):
@@ -72,6 +79,9 @@ class Settings(BaseSettings):
     github_token: str | None = None
 
     # ---- アプリケーション ----
+    # MVP は認証なしの単一ユーザー（`docs/decisions.md`）。全レコードの user_id
+    # にこの値を使う。`api.deps.get_current_user_id` から参照する。
+    default_user_id: uuid.UUID = Field(default=_DEFAULT_USER_ID)
     recommendation_max_age_days: int = Field(default=7, gt=0)
     log_retention_days: int = Field(default=90, gt=0)
     worker_concurrency: int = Field(default=2, gt=0)
