@@ -80,6 +80,8 @@ class Article(Base):
     # リンク切れ・削除済み記事はソフト削除する。履歴と関心プロファイルを壊さないため。
     is_dead: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIMENSIONS))
+    # embedding を生成した時点の body_hash。本文が更新されたら作り直すために使う。
+    embedding_body_hash: Mapped[str | None] = mapped_column(String(64))
 
     __table_args__ = (
         # 7 日フィルターと新着順の取得で使う。
