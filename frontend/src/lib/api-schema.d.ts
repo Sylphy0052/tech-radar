@@ -450,8 +450,11 @@ export interface components {
             article_id: string;
             /** Canonical Url */
             canonical_url: string;
+            feedback: components["schemas"]["ArticleFeedbackResponse"] | null;
             /** Is Primary Source */
             is_primary_source: boolean;
+            /** Is Read */
+            is_read: boolean;
             /** Language */
             language: string | null;
             /** Original Url */

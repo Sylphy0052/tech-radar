@@ -380,8 +380,22 @@
             "title": "Canonical Url",
             "type": "string"
           },
+          "feedback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArticleFeedbackResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "is_primary_source": {
             "title": "Is Primary Source",
+            "type": "boolean"
+          },
+          "is_read": {
+            "title": "Is Read",
             "type": "boolean"
           },
           "language": {
@@ -493,7 +507,9 @@
           "technologies",
           "score",
           "rank",
-          "reasons"
+          "reasons",
+          "is_read",
+          "feedback"
         ],
         "title": "RecommendationItem",
         "type": "object"

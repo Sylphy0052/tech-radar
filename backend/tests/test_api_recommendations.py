@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 from techradar.api.deps import get_now, get_session
 from techradar.api.recommendations import _MAX_CURSOR_RANK_DIGITS, CURSOR_MAX_LENGTH
 from techradar.config import Settings
-from techradar.db import Article, ArticleFeedback, Recommendation, RecommendationRun
-from techradar.db.enums import FeedbackAction, RecommendationMode
+from techradar.db import Article, ArticleFeedback, Recommendation, RecommendationRun, UserArticle
+from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction, RecommendationMode
 from techradar.main import create_app
 from techradar.recommendation.config import get_scoring_config
 from techradar.recommendation.service import find_latest_run
@@ -74,6 +74,26 @@ def add_bad_feedback(session: Session, user_id: uuid.UUID, article: Article) -> 
             article_id=article.id,
             action=FeedbackAction.BAD.value,
             created_at=NOW,
+        )
+    )
+    session.flush()
+
+
+def add_user_article(
+    session: Session,
+    user_id: uuid.UUID,
+    article: Article,
+    origin: ArticleOrigin,
+    *,
+    interest_weight: float = 1.0,
+) -> None:
+    """`user_articles` へ直接 origin を設定する（is_read 判定用テストのセットアップ）。"""
+    session.add(
+        UserArticle(
+            user_id=user_id,
+            article_id=article.id,
+            origin=origin.value,
+            interest_weight=interest_weight,
         )
     )
     session.flush()
@@ -416,3 +436,134 @@ class TestGetFeedRunReuse:
         assert second_response.status_code == 200
         run_count = db_session.scalar(select(func.count()).select_from(RecommendationRun))
         assert run_count == 2
+
+
+class TestRecommendationItemFeedbackAndReadState:
+    """`RecommendationItem` の `feedback` / `is_read`（Issue #13 T2）を検証する。
+
+    Good/Bad/保存や既読状態は推薦生成後に追加されることが多いため、多くのケースで
+    `feed_run_reuse_seconds`（`config/scoring.yaml`）の再利用ウィンドウ内に
+    `get_now` を固定して同じ run を読み直す（`TestGetFeedRunReuse` と同じ手法）。
+    再利用ウィンドウ内であれば `load_recommendation_page` が保存済みの
+    recommendations をそのまま返すため、Bad/Good 由来の候補除外（`load_candidates`
+    の `bad_exists` / `owned_exists`）の影響を受けずに、生成後に付いた最新の
+    feedback / is_read を反映できることを確認できる。
+    """
+
+    def test_feed_item_has_no_feedback_and_is_unread_by_default(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange
+        make_article(db_session, title="候補", embedding=make_embedding(0))
+
+        # Act
+        response = client.get("/api/feed")
+
+        # Assert
+        item = response.json()["items"][0]
+        assert item["feedback"] is None
+        assert item["is_read"] is False
+
+    def test_feed_item_reflects_good_feedback_added_after_generation(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: Good がリロード後も維持される
+        article = make_article(db_session, title="候補", embedding=make_embedding(0))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+        first_response = client.get("/api/feed")
+        item_id = first_response.json()["items"][0]["article_id"]
+        assert item_id == str(article.id)
+
+        # Act — Good を付けてから再利用ウィンドウ内で読み直す
+        feedback_response = client.post(
+            f"/api/articles/{article.id}/feedback", json={"action": "good"}
+        )
+        second_response = client.get("/api/feed")
+
+        # Assert
+        assert feedback_response.status_code == 200
+        item = second_response.json()["items"][0]
+        assert item["feedback"]["action"] == "good"
+        assert item["feedback"]["reason"] is None
+        assert item["is_read"] is False
+
+    def test_feed_item_reflects_bad_feedback_with_reason_added_after_generation(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: Bad（理由付き）がリロード後も維持される
+        article = make_article(db_session, title="候補", embedding=make_embedding(0))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+        client.get("/api/feed")
+
+        # Act
+        feedback_response = client.post(
+            f"/api/articles/{article.id}/feedback",
+            json={"action": "bad", "reason": BadReason.NOT_INTERESTED.value},
+        )
+        response = client.get("/api/feed")
+
+        # Assert
+        assert feedback_response.status_code == 200
+        item = response.json()["items"][0]
+        assert item["feedback"]["action"] == "bad"
+        assert item["feedback"]["reason"] == BadReason.NOT_INTERESTED.value
+
+    def test_feed_item_is_read_when_user_article_origin_is_read_full(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 受入基準: 既読記事に既読マークを表示する
+        article = make_article(db_session, title="候補", embedding=make_embedding(0))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+        client.get("/api/feed")
+        add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.READ_FULL)
+
+        # Act
+        response = client.get("/api/feed")
+
+        # Assert
+        item = response.json()["items"][0]
+        assert item["is_read"] is True
+
+    def test_feed_item_is_unread_when_user_article_origin_is_manual(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 手動登録は既読判定の対象外（`_READ_ORIGIN_VALUES` に含まれない）
+        article = make_article(db_session, title="候補", embedding=make_embedding(0))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+        client.get("/api/feed")
+        add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/feed")
+
+        # Assert
+        item = response.json()["items"][0]
+        assert item["is_read"] is False
+
+    def test_article_recommendations_include_feedback_and_is_read_fields(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 記事起点推薦でも同じ項目が載ることを確認する
+        source_article = make_article(
+            db_session, title="起点記事", embedding=make_embedding(0), topics=["llm"]
+        )
+        related_article = make_article(
+            db_session, title="近い記事", embedding=make_embedding(0), topics=["llm"]
+        )
+        # is_read は候補除外の対象外（owned とは異なる）なので、生成前に既読化しても
+        # 候補には残る。
+        add_user_article(
+            db_session, settings.default_user_id, related_article, ArticleOrigin.READ_FULL
+        )
+
+        # Act
+        response = client.post(f"/api/articles/{source_article.id}/recommendations")
+
+        # Assert
+        item = next(
+            item
+            for item in response.json()["items"]
+            if item["article_id"] == str(related_article.id)
+        )
+        assert item["is_read"] is True
+        assert item["feedback"] is None
