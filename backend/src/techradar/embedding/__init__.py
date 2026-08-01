@@ -14,9 +14,12 @@ from techradar.embedding.fake import FakeEmbeddingProvider
 from techradar.embedding.qwen import QwenEmbeddingProvider, resolve_device
 from techradar.embedding.service import (
     EmbedResult,
+    ScoredArticle,
     embed_articles,
     find_neighbours,
     find_similar_articles,
+    find_similar_by_vector,
+    needs_embedding,
 )
 
 __all__ = [
@@ -27,9 +30,12 @@ __all__ = [
     "EmbeddingProvider",
     "FakeEmbeddingProvider",
     "QwenEmbeddingProvider",
+    "ScoredArticle",
     "assert_dimensions",
     "embed_articles",
     "find_neighbours",
     "find_similar_articles",
+    "find_similar_by_vector",
+    "needs_embedding",
     "resolve_device",
 ]

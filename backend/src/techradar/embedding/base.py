@@ -15,10 +15,6 @@ from typing import Protocol, runtime_checkable
 from techradar.db import EMBEDDING_DIMENSIONS
 from techradar.embedding.errors import EmbeddingDimensionMismatchError
 
-# Qwen3-Embedding は用途ごとに前置きを付けると精度が上がる。
-# 検索クエリ側と文書側で別の前置きを使う。
-QUERY_PROMPT_NAME = "query"
-
 
 @runtime_checkable
 class EmbeddingProvider(Protocol):

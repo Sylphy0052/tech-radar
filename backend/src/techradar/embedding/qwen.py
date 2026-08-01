@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from techradar.config import Settings, get_settings
 from techradar.embedding.base import assert_dimensions
@@ -58,7 +58,9 @@ def resolve_device(
 
 
 @lru_cache(maxsize=1)
-def load_model(model_name: str, device: str, max_length: int) -> SentenceTransformer:
+def load_model(
+    model_name: str, device: str, max_length: int, revision: str | None
+) -> SentenceTransformer:
     """モデルを読み込む。プロセス内で 1 度だけ実行される。"""
     try:
         from sentence_transformers import SentenceTransformer
@@ -68,7 +70,13 @@ def load_model(model_name: str, device: str, max_length: int) -> SentenceTransfo
 
     logger.info("Embedding モデルを読み込みます: %s (device=%s)", model_name, device)
     try:
-        model = SentenceTransformer(model_name, device=device)
+        model = SentenceTransformer(
+            model_name,
+            device=device,
+            revision=revision,
+            # モデルリポジトリ側のコードを実行しない。
+            trust_remote_code=False,
+        )
     except Exception as exc:
         message = f"Embedding モデルを読み込めません: {model_name}"
         raise EmbeddingModelLoadError(message) from exc
@@ -93,12 +101,22 @@ class QwenEmbeddingProvider:
         """実際に使用するデバイス。"""
         return self._device
 
-    def _model(self) -> Any:
+    def _model(self) -> SentenceTransformer:
         return load_model(
             self._settings.embedding_model,
             self._device,
             self._settings.embedding_max_length,
+            self._settings.embedding_model_revision,
         )
+
+    def _truncate(self, text: str) -> str:
+        """トークナイズ前に本文を切る。
+
+        `max_seq_length` はトークナイズ後に効くため、巨大な本文をそのまま
+        渡すとトークナイズ自体で CPU とメモリを消費する。
+        """
+        limit = self._settings.embedding_max_input_characters
+        return text[:limit]
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         """文書を埋め込む。空の入力ではモデルを読み込まない。"""
@@ -106,7 +124,7 @@ class QwenEmbeddingProvider:
             return []
 
         vectors = self._model().encode(
-            list(texts),
+            [self._truncate(text) for text in texts],
             batch_size=self._settings.embedding_batch_size,
             normalize_embeddings=True,
             show_progress_bar=False,
@@ -121,7 +139,7 @@ class QwenEmbeddingProvider:
         文書側と違い、クエリには指示文を前置きする（モデルカードの推奨）。
         """
         vector = self._model().encode(
-            [text],
+            [self._truncate(text)],
             batch_size=1,
             normalize_embeddings=True,
             show_progress_bar=False,
