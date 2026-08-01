@@ -62,6 +62,11 @@ log "backend の依存関係を同期します"
 log "マイグレーションを適用します"
 (cd backend && uv run alembic upgrade head) || fail "マイグレーション失敗"
 
+# 公式ソースレジストリの初期データを投入する (冪等)。
+# 手動確認済み (verified) の行は上書きしない。
+log "公式ソースレジストリを投入します"
+(cd backend && uv run python -m techradar.sources.seed) || fail "レジストリ投入失敗"
+
 if [[ ! -d frontend/node_modules ]]; then
   log "frontend の依存関係をインストールします"
   (cd frontend && npm ci) || fail "frontend: npm ci失敗"

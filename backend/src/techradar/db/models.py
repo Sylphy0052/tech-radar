@@ -208,13 +208,17 @@ class SourceRegistry(Base):
     verified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     __table_args__ = (
-        # 同一ドメイン・同一パスパターンの重複登録を防ぐ。
+        # 同一ドメイン・同一パスパターン・同一 github_org の重複登録を防ぐ。
         # PostgreSQL は既定で NULL 同士を別の値として扱うため、そのままでは
         # path_pattern を持たないドメイン (ドメイン全体にかかる規則) を何度でも
         # 登録できてしまう。NULLS NOT DISTINCT で NULL も同値として扱う。
+        #
+        # github_org を含めるのは、github.com の Release 規則が org 単位で
+        # 別物のため (github.com + /*/*/releases が組織の数だけ存在する)。
         UniqueConstraint(
             "domain",
             "path_pattern",
+            "github_org",
             name="uq_source_registry_domain",
             postgresql_nulls_not_distinct=True,
         ),
