@@ -15,11 +15,12 @@ from collections.abc import Callable
 from sqlalchemy.orm import Session
 
 from techradar.config import Settings
-from techradar.db.enums import JobStatus
+from techradar.db.enums import JobStatus, JobType
 from techradar.db.models import ArticleRegistration
 from techradar.db.session import get_session_factory
 from techradar.jobs.handlers.errors import RegistrationErrorReason
 from techradar.jobs.registry import JobContext
+from techradar.jobs.status import running_status_for
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,20 @@ def load_registration(session: Session, registration_id: uuid.UUID) -> ArticleRe
     if registration is None:
         logger.warning("job_handlers.registration_missing registration_id=%s", registration_id)
     return registration
+
+
+def start_registration_step(
+    session: Session, registration: ArticleRegistration, job_type: JobType
+) -> None:
+    """この段階の処理を開始したことを登録行へ反映する。
+
+    直前の試行が残した `error_reason` はここで消す。リトライ枠が残っている間の
+    失敗も理由を書き込むため、消さずに進むと再試行が成功しても古い理由が残り、
+    `status=completed` と失敗理由が同時に返る矛盾したレスポンスになる。
+    """
+    registration.status = running_status_for(job_type).value
+    registration.error_reason = None
+    session.flush()
 
 
 def record_registration_failure(

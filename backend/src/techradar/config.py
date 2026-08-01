@@ -82,7 +82,6 @@ class Settings(BaseSettings):
     # MVP は認証なしの単一ユーザー（`docs/decisions.md`）。全レコードの user_id
     # にこの値を使う。`api.deps.get_current_user_id` から参照する。
     default_user_id: uuid.UUID = Field(default=_DEFAULT_USER_ID)
-    recommendation_max_age_days: int = Field(default=7, gt=0)
     log_retention_days: int = Field(default=90, gt=0)
     worker_concurrency: int = Field(default=2, gt=0)
     # False ならジョブワーカーを起動しない。テストのたびに実ワーカーが DB を

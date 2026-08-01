@@ -19,15 +19,14 @@ from techradar.embedding import (
     embed_articles,
     needs_embedding,
 )
-from techradar.embedding.errors import EmbeddingError
 from techradar.jobs.handlers._shared import (
     load_registration,
     record_registration_failure,
     run_job_in_thread,
+    start_registration_step,
 )
 from techradar.jobs.handlers.errors import classify_embedding_error
 from techradar.jobs.registry import JobContext, JobHandler
-from techradar.jobs.status import running_status_for
 
 
 def process_embed_article(
@@ -46,28 +45,32 @@ def process_embed_article(
 
     # embed_article の実行中 status は `analyzing` に集約される
     # （`techradar.jobs.status.running_status_for`）。embedding 専用の
-    # 実行中 status は無いため、ここで得られる値も analyzing になる。
-    registration.status = running_status_for(JobType.EMBED_ARTICLE).value
-    session.flush()
+    # 実行中 status は無いため、ここで設定される値も analyzing になる。
+    start_registration_step(session, registration, JobType.EMBED_ARTICLE)
 
     article = session.get(Article, article_id)
     if article is None:
         # 記事行が削除済み。リトライしても解決しないため打ち切る。
         return
 
-    if needs_embedding(article):
-        try:
+    # 分類済みの例外だけでなく想定外の例外も記録する。記録しないまま抜けると
+    # 登録が実行中 status・理由なしのまま残り、UI からは永久に処理中に見える。
+    try:
+        if needs_embedding(article):
             embed_articles(session, provider, [article])
-        except EmbeddingError as exc:
-            reason = classify_embedding_error(exc)
-            record_registration_failure(
-                session, registration, reason, context=context, settings=settings
-            )
-            raise
 
-    # URL 登録の状態遷移（`PROJECT_SPEC.md` §6.2）の終端。
-    registration.status = JobStatus.COMPLETED.value
-    session.flush()
+        # URL 登録の状態遷移（`PROJECT_SPEC.md` §6.2）の終端。
+        registration.status = JobStatus.COMPLETED.value
+        session.flush()
+    except Exception as exc:
+        record_registration_failure(
+            session,
+            registration,
+            classify_embedding_error(exc),
+            context=context,
+            settings=settings,
+        )
+        raise
 
 
 def make_embed_article_handler(

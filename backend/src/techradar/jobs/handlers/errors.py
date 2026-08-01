@@ -21,9 +21,12 @@ class RegistrationErrorReason(StrEnum):
     EXTRACTION_FAILED = "extraction_failed"
     ANALYSIS_FAILED = "analysis_failed"
     EMBEDDING_FAILED = "embedding_failed"
+    # 想定していない例外。分類済みの例外だけを記録すると、それ以外で落ちたときに
+    # 登録が実行中 status・理由なしのまま取り残され、UI からは永久に処理中に見える。
+    UNEXPECTED_FAILURE = "unexpected_failure"
 
 
-def classify_fetch_error(exc: FetchError) -> RegistrationErrorReason:
+def classify_fetch_error(exc: BaseException) -> RegistrationErrorReason:
     """記事取得系の例外を、ユーザーに見せてよい理由へ分類する。
 
     `ExtractionError` は「アクセス自体はできたが本文を取り出せなかった」ことを
@@ -32,20 +35,24 @@ def classify_fetch_error(exc: FetchError) -> RegistrationErrorReason:
     """
     if isinstance(exc, ExtractionError):
         return RegistrationErrorReason.EXTRACTION_FAILED
-    return RegistrationErrorReason.FETCH_FAILED
+    if isinstance(exc, FetchError):
+        return RegistrationErrorReason.FETCH_FAILED
+    return RegistrationErrorReason.UNEXPECTED_FAILURE
 
 
-def classify_analysis_error(exc: LLMError) -> RegistrationErrorReason:
+def classify_analysis_error(exc: BaseException) -> RegistrationErrorReason:
     """解析 (LLM) 系の例外を分類する。
 
     現時点では LLM 呼び出し失敗の内訳（タイムアウト・不正応答等）を
     利用者へ出し分ける要件が無いため、1 種類の理由へ集約する。
     """
-    del exc
-    return RegistrationErrorReason.ANALYSIS_FAILED
+    if isinstance(exc, LLMError):
+        return RegistrationErrorReason.ANALYSIS_FAILED
+    return RegistrationErrorReason.UNEXPECTED_FAILURE
 
 
-def classify_embedding_error(exc: EmbeddingError) -> RegistrationErrorReason:
+def classify_embedding_error(exc: BaseException) -> RegistrationErrorReason:
     """Embedding 系の例外を分類する。"""
-    del exc
-    return RegistrationErrorReason.EMBEDDING_FAILED
+    if isinstance(exc, EmbeddingError):
+        return RegistrationErrorReason.EMBEDDING_FAILED
+    return RegistrationErrorReason.UNEXPECTED_FAILURE

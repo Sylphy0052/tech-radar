@@ -46,6 +46,14 @@ class TestClassifyFetchError:
         # Act / Assert
         assert classify_fetch_error(exc) == RegistrationErrorReason.FETCH_FAILED
 
+    def test_classifies_an_unknown_exception_as_unexpected_failure(self) -> None:
+        """分類対象外の例外も理由を持たせる（登録を実行中のまま残さないため）。"""
+        # Act / Assert
+        assert (
+            classify_fetch_error(RuntimeError("想定していない失敗"))
+            == RegistrationErrorReason.UNEXPECTED_FAILURE
+        )
+
 
 class TestClassifyAnalysisError:
     @pytest.mark.parametrize(
@@ -59,6 +67,13 @@ class TestClassifyAnalysisError:
         # Act / Assert
         assert classify_analysis_error(exc) == RegistrationErrorReason.ANALYSIS_FAILED
 
+    def test_classifies_an_unknown_exception_as_unexpected_failure(self) -> None:
+        # Act / Assert
+        assert (
+            classify_analysis_error(RuntimeError("想定していない失敗"))
+            == RegistrationErrorReason.UNEXPECTED_FAILURE
+        )
+
 
 class TestClassifyEmbeddingError:
     @pytest.mark.parametrize(
@@ -71,3 +86,10 @@ class TestClassifyEmbeddingError:
     def test_classifies_embedding_errors_as_embedding_failed(self, exc: EmbeddingError) -> None:
         # Act / Assert
         assert classify_embedding_error(exc) == RegistrationErrorReason.EMBEDDING_FAILED
+
+    def test_classifies_an_unknown_exception_as_unexpected_failure(self) -> None:
+        # Act / Assert
+        assert (
+            classify_embedding_error(RuntimeError("想定していない失敗"))
+            == RegistrationErrorReason.UNEXPECTED_FAILURE
+        )
