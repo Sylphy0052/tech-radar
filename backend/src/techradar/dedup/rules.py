@@ -183,9 +183,14 @@ def _normalized_urls(signature: ArticleSignature) -> frozenset[str]:
 
     canonical_url と original_url の両方を見る。canonical 抽出に失敗した記事
     や、canonical が無く original だけが登録された記事でも拾えるようにする。
+    空文字は「URL が無い」ことを表すだけなので集合から除く。含めたままだと
+    canonical 抽出に失敗した無関係な記事同士が、空文字同士の一致で重複判定
+    されてしまう。
     """
     return frozenset(
-        {normalize_url(signature.canonical_url), normalize_url(signature.original_url)}
+        url
+        for url in (normalize_url(signature.canonical_url), normalize_url(signature.original_url))
+        if url
     )
 
 
@@ -200,7 +205,9 @@ def find_duplicate_match(
     if left.id == right.id:
         return None
 
-    if left.canonical_url == right.canonical_url:
+    # canonical_url は NOT NULL だが空文字は入りうる（抽出失敗時など）。
+    # 空文字同士を一致とみなすと、無関係な記事同士が全て重複扱いになる。
+    if left.canonical_url and left.canonical_url == right.canonical_url:
         return DuplicateMatch(method=MatchMethod.CANONICAL_URL, similarity=1.0)
 
     if _normalized_urls(left) & _normalized_urls(right):

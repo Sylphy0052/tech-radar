@@ -178,6 +178,24 @@ class TestFindDuplicateMatch:
         # Act / Assert
         assert find_duplicate_match(left, right, THRESHOLDS) is None
 
+    def test_does_not_treat_two_articles_with_a_blank_canonical_url_as_duplicates(self):
+        # Arrange — canonical_url は NOT NULL だが空文字は入りうる。
+        # 空文字同士の一致を「重複」と扱うと、canonical 抽出に失敗した無関係な
+        # 記事同士がすべて重複扱いになってしまう。
+        left = make_signature(
+            canonical_url="",
+            original_url="",
+            title="全く違う話題のタイトルその一",
+        )
+        right = make_signature(
+            canonical_url="",
+            original_url="",
+            title="Completely Unrelated Topic Two",
+        )
+
+        # Act / Assert
+        assert find_duplicate_match(left, right, THRESHOLDS) is None
+
     def test_matches_on_body_hash_when_urls_and_titles_differ(self):
         # Arrange — URL・タイトルは異なるが本文ハッシュが一致する（ミラー掲載など）
         left = make_signature(
