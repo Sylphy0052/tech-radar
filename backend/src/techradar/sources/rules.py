@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from techradar.db.enums import SourceType
+from techradar.sources.weights import DEFAULT_UNKNOWN_SCORE
 
 # Tier 分類（`PROJECT_SPEC.md` §10）。一次情報かどうかの判断はここに集約する。
 TIER_BY_SOURCE_TYPE: dict[SourceType, int] = {
@@ -33,9 +34,6 @@ TIER_BY_SOURCE_TYPE: dict[SourceType, int] = {
 
 # Tier 1-2 を一次情報とする（`PROJECT_SPEC.md` §10）。
 PRIMARY_SOURCE_MAX_TIER = 2
-
-# 分類できなかった場合の値。出典が辿れない記事を上位に出さないため低くする。
-UNKNOWN_AUTHORITY_SCORE = 0.35
 
 # パス規則で 1 セグメントにマッチする記号。
 PATH_WILDCARD = "*"
@@ -180,9 +178,11 @@ def classify_url(url: str, rules: tuple[SourceRule, ...]) -> SourceClassificatio
     """
     rule = find_matching_rule(url, rules)
     if rule is None:
+        # 既定値は `weights.DEFAULT_UNKNOWN_SCORE` と共用する。設定に無い種別へ
+        # 適用する値と同じ意味なので、二重管理を避けて一本化する。
         return SourceClassification(
             source_type=SourceType.UNKNOWN,
-            authority_score=UNKNOWN_AUTHORITY_SCORE,
+            authority_score=DEFAULT_UNKNOWN_SCORE,
             is_primary_source=False,
         )
     return SourceClassification(

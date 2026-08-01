@@ -7,6 +7,7 @@ from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_session
@@ -158,6 +159,31 @@ class TestCreate:
         # Assert
         assert response.status_code == 422
 
+    def test_does_not_convert_a_non_unique_integrity_error_to_409(
+        self, client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Arrange — 一意制約違反 (23505) 以外を 409 に丸めない。将来 FK/CHECK 制約が
+        # 増えても、無関係なエラーが「重複登録」という誤ったメッセージにならないこと
+        class DummyOrig(Exception):
+            sqlstate = "23503"  # foreign_key_violation。一意制約ではない
+
+        def fake_flush() -> None:
+            raise IntegrityError("INSERT", {}, DummyOrig("fk violation"))
+
+        monkeypatch.setattr(db_session, "flush", fake_flush)
+
+        # Act / Assert — 409 に変換されず、元の例外がそのまま伝播する（500 相当）
+        with pytest.raises(IntegrityError):
+            client.post(
+                "/api/sources",
+                json={
+                    "entity_name": "Example",
+                    "domain": "boom.example.com",
+                    "source_type": "official_blog",
+                    "authority_score": 0.9,
+                },
+            )
+
 
 class TestUpdate:
     def test_corrects_the_authority_score(self, client: TestClient, db_session: Session):
@@ -236,16 +262,27 @@ class TestUpdate:
         # Assert
         assert response.status_code == 404
 
-    def test_rejects_a_conflicting_update(self, client: TestClient, db_session: Session):
-        # Arrange — 既存行と同じ (domain, path_pattern, github_org) にはできない
-        make_source(db_session, domain="conflict.example.com", path_pattern="/a")
-        row = make_source(db_session, domain="conflict.example.com", path_pattern="/b")
+    def test_rejects_a_path_pattern_change(self, client: TestClient, db_session: Session):
+        # Arrange — path_pattern は一意キー (domain, path_pattern, github_org) の一部。
+        # PATCH で変えられると、シーダーが次回起動時に config 側の原ルールを
+        # 別行として再投入してしまい、手直しした行と矛盾する形で併存する
+        row = make_source(db_session, domain="keyfield.example.com", path_pattern="/docs")
 
         # Act
-        response = client.patch(f"/api/sources/{row.id}", json={"path_pattern": "/a"})
+        response = client.patch(f"/api/sources/{row.id}", json={"path_pattern": "/guide"})
 
         # Assert
-        assert response.status_code == 409
+        assert response.status_code == 422
+
+    def test_rejects_a_github_org_change(self, client: TestClient, db_session: Session):
+        # Arrange — github_org も一意キーの一部で、理由は path_pattern と同じ
+        row = make_source(db_session, domain="github.com", github_org="anthropics")
+
+        # Act
+        response = client.patch(f"/api/sources/{row.id}", json={"github_org": "openai"})
+
+        # Assert
+        assert response.status_code == 422
 
     def test_rejects_an_out_of_range_score(self, client: TestClient, db_session: Session):
         # Arrange

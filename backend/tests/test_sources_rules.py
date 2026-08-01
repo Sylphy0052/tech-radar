@@ -14,6 +14,7 @@ from techradar.sources.rules import (
     is_primary_source,
     tier_of,
 )
+from techradar.sources.weights import DEFAULT_UNKNOWN_SCORE
 
 OPENAI_RULES = (
     SourceRule(
@@ -230,6 +231,14 @@ class TestMatching:
         # Assert
         assert result.source_type == SourceType.UNKNOWN
         assert result.entity_name is None
+
+    def test_uses_the_shared_unknown_default_score(self):
+        # Arrange / Act — unknown の既定値は weights.DEFAULT_UNKNOWN_SCORE と
+        # 二重管理しない（rules 側に固有の定数を持たない）
+        result = classify_url("https://unregistered.example.net/post", ())
+
+        # Assert
+        assert result.authority_score == DEFAULT_UNKNOWN_SCORE
 
 
 class TestTier:
