@@ -379,6 +379,28 @@ class TestArticleRegistration:
         # Assert
         assert registration.error_reason == "fetch_timeout"
 
+    def test_advances_updated_at_when_the_status_changes(self, db_session: Session):
+        # Arrange
+        registration = ArticleRegistration(
+            user_id=uuid.uuid4(),
+            url="https://example.com/article",
+            normalized_url="https://example.com/article",
+        )
+        db_session.add(registration)
+        db_session.flush()
+        db_session.expire(registration)
+        created_at = registration.created_at
+        first_updated_at = registration.updated_at
+
+        # Act
+        registration.status = JobStatus.FETCHING
+        db_session.flush()
+        db_session.expire(registration)
+
+        # Assert — 登録時は created_at と同時刻、状態が進んだら後ろへ動く
+        assert first_updated_at == created_at
+        assert registration.updated_at > first_updated_at
+
 
 class TestArticleFeedback:
     def test_stores_bad_with_optional_reason(self, db_session: Session):
