@@ -44,6 +44,7 @@ freshness:
   max_age_days: 7
 interest:
   top_k: 3
+  max_profile_articles: 200
 source_match:
   partial_match_score: 0.5
 novelty:
@@ -59,6 +60,8 @@ limits:
   max_candidates_per_run: 500
   default_page_size: 20
   max_page_size: 100
+  feed_run_size: 100
+  article_based_run_size: 20
 """
 
 
