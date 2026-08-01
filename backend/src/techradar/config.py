@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import uuid
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -17,6 +18,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 EmbeddingDevice = Literal["auto", "cuda", "cpu"]
+
+# MVP は単一ユーザー・認証なし（`PROJECT_SPEC.md` §22）のため、登録者を
+# この固定 UUID で表す。将来認証を導入する際は `Settings.default_user_id` の
+# 差し替え（実ユーザーの ID を注入する）だけで済むよう、値をここに集約する。
+DEFAULT_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 
 class Settings(BaseSettings):
@@ -72,6 +78,12 @@ class Settings(BaseSettings):
     github_token: str | None = None
 
     # ---- アプリケーション ----
+    # MVP は単一ユーザー・認証なし（`PROJECT_SPEC.md` §22）。将来の認証導入時に
+    # 差し替える1箇所を集約するための固定値。
+    default_user_id: uuid.UUID = Field(
+        default=DEFAULT_USER_ID,
+        validation_alias="TECHRADAR_DEFAULT_USER_ID",
+    )
     recommendation_max_age_days: int = Field(default=7, gt=0)
     log_retention_days: int = Field(default=90, gt=0)
     worker_concurrency: int = Field(default=2, gt=0)
