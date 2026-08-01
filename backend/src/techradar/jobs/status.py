@@ -16,6 +16,9 @@ _RUNNING_STATUS_BY_JOB_TYPE: dict[JobType, JobStatus] = {
     JobType.EMBED_ARTICLE: JobStatus.ANALYZING,
     JobType.CRAWL_SOURCES: JobStatus.SEARCHING,
     JobType.GENERATE_FEED: JobStatus.SEARCHING,
+    # 重複排除は記事単体の解析ではなく、推薦候補どうしの関係を見て絞り込む処理
+    # （`PROJECT_SPEC.md` §17）のため、候補を探す段階と同じ searching に対応させる。
+    JobType.DEDUPLICATE_ARTICLES: JobStatus.SEARCHING,
 }
 
 # claim_next で遷移しうる実行中 status の集合。reclaim_stale が
