@@ -30,9 +30,35 @@ from techradar.fetcher.pinned_transport import PINNED_IP_EXTENSION_KEY, PinnedIP
 
 SERVER_IDENTITY = "example.com"
 
+# サーバ証明書の identity と一致しないホスト名。異常系で SNI を誤らせるために使う。
+MISMATCHED_HOSTNAME = "wrong.example.org"
+
+# テストサーバの bind 先であり、そのまま pin する IP でもある。両者がずれると
+# 「pin した IP へ接続している」という前提が崩れるため、一箇所で定義する。
+LOOPBACK_IP = "127.0.0.1"
+
 # `httpx.Client` を経由せず transport を直接叩くため、既定のタイムアウトが
 # 適用されない。TLSハンドシェイクが応答しない状況でテストが無限に待つのを避ける。
 TIMEOUT_EXTENSION = {"connect": 5.0, "read": 5.0, "write": 5.0, "pool": 5.0}
+
+SERVER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    """例外の連鎖を列挙する。
+
+    実測した連鎖は `httpx.ConnectError` -> (`__cause__`) ->
+    `httpcore.ConnectError` -> (`__context__`) -> `ssl.SSLCertVerificationError`
+    で、明示的な `raise ... from` (`__cause__`) と暗黙の連鎖 (`__context__`) が
+    混在する。段数も繋ぎ方も httpx/httpcore の実装詳細なので決め打ちせず、
+    両方を辿って連鎖全体を見る。
+    """
+    chain: list[BaseException] = []
+    current = exc.__cause__ or exc.__context__
+    while current is not None and not any(current is seen for seen in chain):
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
 
 
 class _OkHandler(BaseHTTPRequestHandler):
@@ -57,33 +83,30 @@ def ca() -> trustme.CA:
 
 
 @pytest.fixture
-def tls_server(ca: trustme.CA) -> Iterator[str]:
-    """`127.0.0.1` のポート0（OS任せ）で待ち受ける実HTTPSサーバを起動する。
+def tls_server(ca: trustme.CA) -> Iterator[int]:
+    """`LOOPBACK_IP` のポート0（OS任せ）で待ち受ける実HTTPSサーバを起動する。
 
-    サーバ証明書の identity は `example.com` のみで `127.0.0.1` を含めない。
-    実際に割り当てられたポートを `127.0.0.1:<port>` の形式で返す。
+    サーバ証明書の identity は `example.com` のみで、bind 先の IP は含めない。
+    実際に割り当てられたポート番号を返す。
     """
     server_cert = ca.issue_cert(SERVER_IDENTITY)
     server_ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_cert.configure_cert(server_ssl_ctx)
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _OkHandler)
+    httpd = ThreadingHTTPServer((LOOPBACK_IP, 0), _OkHandler)
     httpd.socket = server_ssl_ctx.wrap_socket(httpd.socket, server_side=True)
 
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     try:
-        port = httpd.server_address[1]
-        yield f"127.0.0.1:{port}"
+        yield httpd.server_address[1]
     finally:
         httpd.shutdown()
         httpd.server_close()
-        thread.join(timeout=5)
-
-
-@pytest.fixture
-def pinned_ip() -> str:
-    return "127.0.0.1"
+        thread.join(timeout=SERVER_SHUTDOWN_TIMEOUT_SECONDS)
+        # join のタイムアウトを黙って見逃すと、停止しないサーバが後続テストへ
+        # 影響してもテストは通り続ける。停止したことを明示的に検証する。
+        assert not thread.is_alive(), "TLSサーバのスレッドが停止しなかった"
 
 
 def _build_transport(ca: trustme.CA) -> PinnedIPTransport:
@@ -100,16 +123,15 @@ class TestCertificateVerifiedAgainstOriginalHostname:
     """
 
     def test_certificate_is_verified_against_original_hostname_not_pinned_ip(
-        self, ca: trustme.CA, tls_server: str, pinned_ip: str
+        self, ca: trustme.CA, tls_server: int
     ):
-        # Arrange — サーバ証明書の identity は `example.com` のみ（`127.0.0.1` の
+        # Arrange — サーバ証明書の identity は `example.com` のみ（bind 先の IP の
         # IP SANは無い）。pin した IP に対して検証していれば必ず失敗するはず
-        _, port = tls_server.split(":")
         transport = _build_transport(ca)
         request = httpx.Request(
             "GET",
-            f"https://{SERVER_IDENTITY}:{port}/",
-            extensions={PINNED_IP_EXTENSION_KEY: pinned_ip, "timeout": TIMEOUT_EXTENSION},
+            f"https://{SERVER_IDENTITY}:{tls_server}/",
+            extensions={PINNED_IP_EXTENSION_KEY: LOOPBACK_IP, "timeout": TIMEOUT_EXTENSION},
         )
 
         # Act
@@ -124,22 +146,29 @@ class TestCertificateVerifiedAgainstOriginalHostname:
         assert response.text == "ok"
 
     def test_mismatched_sni_hostname_fails_certificate_verification(
-        self, ca: trustme.CA, tls_server: str, pinned_ip: str
+        self, ca: trustme.CA, tls_server: int
     ):
         # Arrange — 証明書のidentity（`example.com`）と一致しないホスト名で
         # 要求する。SNI・証明書検証が正しく機能していれば拒否されるはず
-        _, port = tls_server.split(":")
         transport = _build_transport(ca)
         request = httpx.Request(
             "GET",
-            f"https://wrong.example.org:{port}/",
-            extensions={PINNED_IP_EXTENSION_KEY: pinned_ip, "timeout": TIMEOUT_EXTENSION},
+            f"https://{MISMATCHED_HOSTNAME}:{tls_server}/",
+            extensions={PINNED_IP_EXTENSION_KEY: LOOPBACK_IP, "timeout": TIMEOUT_EXTENSION},
         )
 
-        # Act / Assert — httpx は下位の ssl.SSLCertVerificationError を
-        # httpx.ConnectError にラップする。ホスト名不一致がメッセージに現れることも確認する
+        # Act — httpx は下位の ssl.SSLCertVerificationError を
+        # httpx.ConnectError にラップする
         try:
-            with pytest.raises(httpx.ConnectError, match=re.escape("wrong.example.org")):
+            with pytest.raises(httpx.ConnectError, match=re.escape(MISMATCHED_HOSTNAME)) as exc:
                 transport.handle_request(request)
         finally:
             transport.close()
+
+        # Assert — 失敗の理由が「要求したホスト名に対する証明書検証」であることを
+        # 二重に確かめる。メッセージ一致は SNI が pin した IP ではなく元のホスト名で
+        # 渡っている証拠になり（pin した IP が使われていればメッセージは IP になる）、
+        # 例外連鎖の型チェックは OpenSSL のメッセージ表現が将来変わっても残る。
+        assert any(
+            isinstance(cause, ssl.SSLCertVerificationError) for cause in _exception_chain(exc.value)
+        )
