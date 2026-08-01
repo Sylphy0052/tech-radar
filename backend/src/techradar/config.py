@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     fetch_max_response_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
     fetch_connect_timeout_seconds: float = Field(default=10.0, gt=0)
     fetch_read_timeout_seconds: float = Field(default=20.0, gt=0)
+    # リダイレクト追跡と本文読み取りを合わせた全体の上限。
+    # ホップ単位のタイムアウトだけでは、少量ずつ送り続ける相手に接続を占有される。
+    fetch_total_timeout_seconds: float = Field(default=60.0, gt=0)
     fetch_user_agent: str = "TechRadar/0.1 (+https://github.com/Sylphy0052/tech-radar)"
 
     # ---- 記事収集 ----

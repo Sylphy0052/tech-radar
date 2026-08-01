@@ -61,9 +61,15 @@ def normalize_url(url: str) -> str:
         # ホストを持たない入力はそのまま返し、判断は呼び出し側に委ねる。
         return url.strip()
 
+    try:
+        port = parts.port
+    except ValueError:
+        # 範囲外のポート番号。ここでは例外にせず、判断は検証側 (`validate_url`) に委ねる。
+        return url.strip()
+
     netloc = host
-    if parts.port is not None and parts.port != DEFAULT_PORTS.get(scheme):
-        netloc = f"{host}:{parts.port}"
+    if port is not None and port != DEFAULT_PORTS.get(scheme):
+        netloc = f"{host}:{port}"
 
     path = parts.path or "/"
     if len(path) > 1:

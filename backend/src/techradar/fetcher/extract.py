@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 
 import trafilatura
 from bs4 import BeautifulSoup
+from readability import Document as ReadabilityDocument
 
 from techradar.fetcher.errors import ExtractionError
 from techradar.fetcher.url import resolve_canonical_url
@@ -31,6 +32,9 @@ DANGEROUS_TAGS = (
     "form",
     "svg",
     "link",
+    "style",
+    # 相対 URL の解決先を差し替えられるため除去する。
+    "base",
     "meta[http-equiv]",
 )
 
@@ -41,6 +45,14 @@ VOID_LIKE_TAGS = frozenset({"embed", "link", "meta"})
 # `<title>` でサイト名を区切るのによく使われる文字。
 TITLE_SEPARATORS = (" | ", " - ", " – ", " — ", " :: ", " » ", " · ", "｜", " ｜ ")
 
+# 属性値から除去して判定する制御文字（ブラウザは URL 解釈時にこれらを無視する）。
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x20\x7f]")
+
+# スクリプト実行やコンテンツ差し込みにつながるスキーム。
+DANGEROUS_URL_SCHEMES = ("javascript:", "vbscript:", "data:")
+
+# これ未満の本文は記事とみなさない。日本語記事なら数百字が下限として妥当で、
+# 一覧ページやエラーページを記事として取り込まないための足切りに使う。
 MIN_BODY_LENGTH = 200
 
 
@@ -55,6 +67,16 @@ class ExtractedArticle:
     language: str | None
     author: str | None
     body_hash: str
+
+
+def has_dangerous_scheme(value: str) -> bool:
+    """属性値がスクリプト実行につながるスキームかを判定する。
+
+    ブラウザは URL 解釈時にタブや改行を無視するため、`jav&#9;ascript:` のような
+    表記も `javascript:` として実行される。判定前に制御文字と空白を取り除く。
+    """
+    collapsed = _CONTROL_CHARACTERS.sub("", value).strip().lower()
+    return collapsed.startswith(DANGEROUS_URL_SCHEMES)
 
 
 def sanitize_html(html: str) -> str:
@@ -72,13 +94,13 @@ def sanitize_html(html: str) -> str:
                     element.insert_after(child.extract())
             element.decompose()
 
-    # インラインのイベントハンドラと javascript: URL を落とす。
+    # インラインのイベントハンドラと危険スキームの URL を落とす。
     for element in soup.find_all(True):
         for attribute in list(getattr(element, "attrs", {})):
             value = element.attrs.get(attribute)
             if attribute.lower().startswith("on"):
                 del element.attrs[attribute]
-            elif isinstance(value, str) and value.strip().lower().startswith("javascript:"):
+            elif isinstance(value, str) and has_dangerous_scheme(value):
                 del element.attrs[attribute]
 
     return str(soup)
@@ -196,6 +218,33 @@ def _extract_title(soup: BeautifulSoup, metadata: object) -> str:
     return ""
 
 
+def _extract_body(sanitized_html: str, source_url: str) -> str | None:
+    """本文を抽出する。取得できなければ None を返す。
+
+    trafilatura を主に使い、失敗した場合は readability にフォールバックする。
+    抽出器ごとに得意なマークアップが異なり、片方だけだと単一障害点になるため。
+    """
+    body = trafilatura.extract(
+        sanitized_html,
+        include_comments=False,
+        include_tables=True,
+        favor_precision=True,
+        url=source_url,
+    )
+    if body and len(body.strip()) >= MIN_BODY_LENGTH:
+        return body.strip()
+
+    try:
+        summary_html = ReadabilityDocument(sanitized_html).summary(html_partial=True)
+    except Exception:
+        return None
+
+    fallback = BeautifulSoup(summary_html, "lxml").get_text(separator="\n", strip=True)
+    if fallback and len(fallback) >= MIN_BODY_LENGTH:
+        return fallback
+    return None
+
+
 def _extract_canonical_href(soup: BeautifulSoup) -> str | None:
     """`<link rel="canonical">` の href を取り出す。"""
     canonical_tag = soup.find("link", rel="canonical")
@@ -213,14 +262,8 @@ def extract_article(html: str, source_url: str) -> ExtractedArticle:
     sanitized = sanitize_html(html)
     soup = BeautifulSoup(sanitized, "lxml")
 
-    body = trafilatura.extract(
-        sanitized,
-        include_comments=False,
-        include_tables=True,
-        favor_precision=True,
-        url=source_url,
-    )
-    if not body or len(body.strip()) < MIN_BODY_LENGTH:
+    body = _extract_body(sanitized, source_url)
+    if body is None:
         message = f"本文を抽出できませんでした: {source_url}"
         raise ExtractionError(message)
 
