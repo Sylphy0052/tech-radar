@@ -58,6 +58,17 @@ describe("apiFetch", () => {
       message: "not found",
     });
   });
+
+  it("resolves to undefined on a 204 No Content response without parsing json", async () => {
+    // Arrange — 204 はボディを持たないため、body に null を渡した Response で再現する
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+
+    // Act
+    const result = await apiFetch<void>("/api/articles/1/feedback", { method: "DELETE" });
+
+    // Assert
+    expect(result).toBeUndefined();
+  });
 });
 
 describe("getHealth", () => {

@@ -40,6 +40,12 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     throw new ApiError(response.status, body || response.statusText);
   }
 
+  // 204 No Content はボディを持たないため json() を呼ぶとパースエラーになる。
+  // 呼び出し側は T = void を指定する想定。
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
   return (await response.json()) as T;
 }
 
