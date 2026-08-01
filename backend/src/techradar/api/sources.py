@@ -10,6 +10,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from psycopg.errors import UniqueViolation
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -60,15 +61,17 @@ class SourceCreate(BaseModel):
 class SourceUpdate(BaseModel):
     """レジストリの部分更新。
 
-    省略した項目は変更しない。`domain` は同一性の基準なので変更させない
-    （別のソースにしたい場合は新規登録する）。
+    省略した項目は変更しない。`domain`・`path_pattern`・`github_org` は一意制約
+    `uq_source_registry_domain` を構成するキーであり、`service._rule_key` の
+    同一性判定にも使われるため変更させない（別のパターンにしたい場合は新規登録
+    する）。ここを変更可能にすると、PATCH で行のキーを変えた後にシーダーを
+    走らせたとき、変更前のキーに一致する config 側の原ルールが「存在しない」と
+    判定されて別行として再投入され、手直しした行と矛盾する形で併存してしまう。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     entity_name: str | None = Field(default=None, min_length=1, max_length=200)
-    path_pattern: str | None = Field(default=None, max_length=255)
-    github_org: str | None = Field(default=None, max_length=100)
     source_type: SourceType | None = None
     authority_score: float | None = Field(default=None, ge=0.0, le=1.0)
     verified: bool | None = None
@@ -139,16 +142,37 @@ def update_source(
     return row
 
 
+UNIQUE_VIOLATION_SQLSTATE = "23505"
+
+
 def _flush_or_conflict(session: Session) -> None:
-    """flush し、一意制約違反を 409 に変換する。
+    """flush し、一意制約違反だけを 409 に変換する。
 
     DB のエラーをそのまま 500 で返すと、利用者は原因（重複登録）が分からない。
+    ただし一意制約違反以外（将来 FK や CHECK 制約が増えた場合など）まで
+    一律 409 に丸めると、無関係なエラーに「重複登録」という誤ったメッセージを
+    返してしまう。SQLSTATE で絞り込み、それ以外はロールバックしたうえで
+    元の例外を再送出する（500 として扱わせる）。
     """
     try:
         session.flush()
     except IntegrityError as exc:
         session.rollback()
+        if not _is_unique_violation(exc):
+            raise
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="同じドメイン・パターンの情報源が既に登録されています",
         ) from exc
+
+
+def _is_unique_violation(exc: IntegrityError) -> bool:
+    """一意制約違反（SQLSTATE 23505）かどうかを判定する。
+
+    psycopg の例外は `orig.sqlstate` に SQLSTATE を持つ。属性が無いドライバ・
+    モック例外に備え、psycopg の例外クラスでも二重にフォールバック判定する。
+    """
+    sqlstate = getattr(exc.orig, "sqlstate", None)
+    if sqlstate is not None:
+        return sqlstate == UNIQUE_VIOLATION_SQLSTATE
+    return isinstance(exc.orig, UniqueViolation)
