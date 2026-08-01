@@ -56,16 +56,17 @@ class TestDetectLanguage:
 
 
 class TestResolveLanguage:
-    def test_uses_a_specific_declared_language(self):
-        # Arrange / Act — 具体的な宣言があればそれを尊重する
+    def test_prefers_detection_over_a_conflicting_declaration(self):
+        # Arrange / Act — 宣言と本文が食い違う場合は本文を根拠にする。
+        # `lang` はテンプレート初期値のまま放置されたサイトが多い
         resolved = resolve_language(declared="ja-JP", body=ENGLISH_BODY)
 
         # Assert
-        assert resolved == "ja"
+        assert resolved == "en"
 
-    @pytest.mark.parametrize("declared", ["", "en-US", "x-default", "und"])
-    def test_ignores_template_defaults_and_detects_from_body(self, declared: str):
-        # Arrange / Act — テンプレート初期値のまま放置されたサイトが多い
+    @pytest.mark.parametrize("declared", ["", "en-US", "x-default", "und", "ja"])
+    def test_detects_from_body_regardless_of_the_declaration(self, declared: str):
+        # Arrange / Act
         resolved = resolve_language(declared=declared, body=JAPANESE_BODY)
 
         # Assert
