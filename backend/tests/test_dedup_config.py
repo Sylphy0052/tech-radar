@@ -13,7 +13,12 @@ from techradar.dedup.config import (
     DedupConfigError,
     load_dedup_config,
 )
-from techradar.dedup.rules import DuplicatePenalties, DuplicateThresholds, UniqueValueSettings
+from techradar.dedup.rules import (
+    DedupLimits,
+    DuplicatePenalties,
+    DuplicateThresholds,
+    UniqueValueSettings,
+)
 
 
 @pytest.fixture(scope="module")
@@ -47,6 +52,11 @@ class TestLoading:
         assert config.unique_value.max_authority_gap == 0.30
         assert config.unique_value.max_candidates_per_cluster == 2
 
+    def test_loads_the_bundled_limits(self, config: DedupConfig):
+        # Arrange / Act / Assert
+        assert config.limits.max_articles_per_run == 500
+        assert config.limits.max_llm_calls_per_run == 50
+
     def test_rejects_a_threshold_outside_the_valid_range(self, tmp_path: Path):
         # Arrange — 0.0〜1.0 の範囲外を起動時に弾く
         path = tmp_path / "dedup.yaml"
@@ -64,7 +74,10 @@ class TestLoading:
             "  content_types: [implementation]\n"
             "  min_technical_quality: 0.7\n"
             "  max_authority_gap: 0.3\n"
-            "  max_candidates_per_cluster: 2\n",
+            "  max_candidates_per_cluster: 2\n"
+            "limits:\n"
+            "  max_articles_per_run: 500\n"
+            "  max_llm_calls_per_run: 50\n",
             encoding="utf-8",
         )
 
@@ -89,12 +102,43 @@ class TestLoading:
             "  content_types: [not_a_content_type]\n"
             "  min_technical_quality: 0.7\n"
             "  max_authority_gap: 0.3\n"
-            "  max_candidates_per_cluster: 2\n",
+            "  max_candidates_per_cluster: 2\n"
+            "limits:\n"
+            "  max_articles_per_run: 500\n"
+            "  max_llm_calls_per_run: 50\n",
             encoding="utf-8",
         )
 
         # Act / Assert
         with pytest.raises(ValueError, match="content_types"):
+            load_dedup_config(path)
+
+    def test_rejects_a_limit_below_the_minimum(self, tmp_path: Path):
+        # Arrange — 0 以下は「何も処理しない設定」になり実質ミスなので起動時に弾く
+        path = tmp_path / "dedup.yaml"
+        path.write_text(
+            "thresholds:\n"
+            "  title_similarity: 0.9\n"
+            "  embedding_similarity: 0.9\n"
+            "penalties:\n"
+            "  canonical_url: 1.0\n"
+            "  normalized_url: 1.0\n"
+            "  body_hash: 1.0\n"
+            "  title: 0.8\n"
+            "  embedding: 0.6\n"
+            "unique_value:\n"
+            "  content_types: [implementation]\n"
+            "  min_technical_quality: 0.7\n"
+            "  max_authority_gap: 0.3\n"
+            "  max_candidates_per_cluster: 2\n"
+            "limits:\n"
+            "  max_articles_per_run: 0\n"
+            "  max_llm_calls_per_run: 50\n",
+            encoding="utf-8",
+        )
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="max_articles_per_run"):
             load_dedup_config(path)
 
     def test_rejects_an_unknown_key(self, tmp_path: Path):
@@ -157,3 +201,12 @@ class TestConversionToRuleDataclasses:
         assert isinstance(settings, UniqueValueSettings)
         assert settings.max_candidates_per_cluster == 2
         assert ContentType.IMPLEMENTATION in settings.content_types
+
+    def test_converts_to_dedup_limits(self, config: DedupConfig):
+        # Arrange / Act
+        limits = config.to_limits()
+
+        # Assert
+        assert isinstance(limits, DedupLimits)
+        assert limits.max_articles_per_run == 500
+        assert limits.max_llm_calls_per_run == 50
