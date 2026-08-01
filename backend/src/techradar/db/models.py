@@ -31,11 +31,13 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from techradar.db.base import Base
+from techradar.db.enums import JobStatus, JobType
 
 # Embedding の次元は採用モデル（Qwen3-Embedding-0.6B）に合わせて固定する。
 # 変更する場合は再 embedding を伴うマイグレーションが必要になる。
@@ -280,6 +282,19 @@ class UserTopicPreference(Base):
     __table_args__ = (PrimaryKeyConstraint("user_id", "topic", name="pk_user_topic_preferences"),)
 
 
+# 巡回ジョブの重複起動を1件に制限する部分ユニークインデックスの述語。
+#
+# DDL の述語は単なる文字列で型チェックが効かないため、enum の値をリネームしても
+# 気付けない。値そのものは列挙から組み立て、リネームには追随させる。
+# crawl_sources の実行中 status が searching であることは `jobs/status.py` の写像が
+# 持つ知識だが、db 層から jobs 層へ依存させたくないためここでは直接指定し、
+# 写像との一致は tests/test_api_crawl.py で検証する。
+ACTIVE_CRAWL_JOB_INDEX_PREDICATE = (
+    f"type = '{JobType.CRAWL_SOURCES.value}' "
+    f"AND status IN ('{JobStatus.PENDING.value}', '{JobStatus.SEARCHING.value}')"
+)
+
+
 class Job(Base):
     """ジョブキュー（`FOR UPDATE SKIP LOCKED` で取得する）。"""
 
@@ -307,6 +322,16 @@ class Job(Base):
         # ワーカーが次のジョブを引くときの検索条件
         # (status = 'pending' かつ available_at <= now() を available_at 順に取る)。
         Index("ix_jobs_status_available_at", "status", "available_at"),
+        # 巡回ジョブの重複起動を DB 側で1件に制限する (Issue #26)。API 側の事前確認だけでは
+        # 確認と INSERT の間に別リクエストが割り込む TOCTOU レースを塞げないため、
+        # 一意制約を最終的な防衛線に置く。crawl_sources が取りうる実行中 status は
+        # searching だけなので、pending と合わせた2つを「まだ終わっていない」とみなす。
+        Index(
+            "ux_jobs_active_crawl_sources",
+            "type",
+            unique=True,
+            postgresql_where=text(ACTIVE_CRAWL_JOB_INDEX_PREDICATE),
+        ),
     )
 
 
