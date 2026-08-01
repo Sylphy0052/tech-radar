@@ -10,7 +10,6 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from psycopg.errors import UniqueViolation
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +18,7 @@ from sqlalchemy.orm import Session
 from techradar.api.deps import get_session
 from techradar.db import SourceRegistry
 from techradar.db.enums import SourceType
+from techradar.db.errors import is_unique_violation
 
 router = APIRouter(prefix="/api/sources", tags=["sources"])
 
@@ -142,9 +142,6 @@ def update_source(
     return row
 
 
-UNIQUE_VIOLATION_SQLSTATE = "23505"
-
-
 def _flush_or_conflict(session: Session) -> None:
     """flush し、一意制約違反だけを 409 に変換する。
 
@@ -158,21 +155,9 @@ def _flush_or_conflict(session: Session) -> None:
         session.flush()
     except IntegrityError as exc:
         session.rollback()
-        if not _is_unique_violation(exc):
+        if not is_unique_violation(exc):
             raise
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="同じドメイン・パターンの情報源が既に登録されています",
         ) from exc
-
-
-def _is_unique_violation(exc: IntegrityError) -> bool:
-    """一意制約違反（SQLSTATE 23505）かどうかを判定する。
-
-    psycopg の例外は `orig.sqlstate` に SQLSTATE を持つ。属性が無いドライバ・
-    モック例外に備え、psycopg の例外クラスでも二重にフォールバック判定する。
-    """
-    sqlstate = getattr(exc.orig, "sqlstate", None)
-    if sqlstate is not None:
-        return sqlstate == UNIQUE_VIOLATION_SQLSTATE
-    return isinstance(exc.orig, UniqueViolation)
