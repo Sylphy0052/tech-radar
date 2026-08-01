@@ -1,0 +1,325 @@
+# 公式ソースレジストリ（PROJECT_SPEC.md §10, §11）
+#
+# コードに埋め込まず、この設定ファイルと DB (source_registry テーブル) で管理する。
+# 起動時のシーダーがこのファイルを DB へ投入する。DB 側で verified = true にした行は
+# 手動確認済みとして扱い、シーダーが上書きしない。
+#
+# 判定の仕様:
+#   domain      : ホストの一致。サブドメインも一致とみなす (openai.com は blog.openai.com に一致)
+#   path        : パスの前方一致。セグメント単位で比較する (/docs は /documentation に一致しない)
+#                 "*" は 1 セグメントにマッチする (/*/*/releases など)
+#   github_org  : GitHub の org 一致。公式 org 以外のフォークを公式扱いしないための条件
+#   type        : source_type (techradar.db.enums.SourceType)
+#   authority   : 省略時は authority_by_source_type の値を使う
+#
+# 同じ URL に複数の規則が一致する場合は、より具体的な規則 (ホスト完全一致 > パスが深い) を採る。
+
+# authority スコアの重み (PROJECT_SPEC.md §10 の初期 authority 値)
+authority_by_source_type:
+  official_documentation: 1.00
+  api_specification: 1.00
+  standard_specification: 1.00
+  official_release_notes: 1.00
+  official_research: 0.95
+  original_paper: 0.95
+  official_blog: 0.90
+  official_github_release: 0.90
+  company_tech_blog: 0.75
+  maintainer_article: 0.60
+  personal_article: 0.60
+  tech_media: 0.45
+  news_repost: 0.20
+  summary_repost: 0.20
+  unknown: 0.35
+
+# レジストリ未登録ドメインの推定
+fallback:
+  default_source_type: unknown
+  # ホストの先頭ラベルがこれらなら企業 Tech Blog とみなす
+  host_prefixes:
+    - engineering
+    - developer
+    - developers
+    - devblog
+    - tech
+  # パスがこれらで始まるなら企業 Tech Blog とみなす
+  path_hints:
+    - /engineering
+    - /engineering-blog
+    - /tech-blog
+    - /techblog
+  # 種別が分かっているドメイン
+  domains:
+    zenn.dev: personal_article
+    qiita.com: personal_article
+    note.com: personal_article
+    hatenablog.com: personal_article
+    hatenadiary.jp: personal_article
+    medium.com: personal_article
+    dev.to: personal_article
+    substack.com: personal_article
+    speakerdeck.com: personal_article
+    b.hatena.ne.jp: summary_repost
+    news.ycombinator.com: summary_repost
+    reddit.com: summary_repost
+    publickey1.jp: tech_media
+    itmedia.co.jp: tech_media
+    atmarkit.itmedia.co.jp: tech_media
+    gihyo.jp: tech_media
+    codezine.jp: tech_media
+    thinkit.co.jp: tech_media
+    techcrunch.com: tech_media
+    theverge.com: tech_media
+    arstechnica.com: tech_media
+    infoq.com: tech_media
+    thenewstack.io: tech_media
+    venturebeat.com: news_repost
+    zdnet.com: news_repost
+
+entities:
+  - name: OpenAI
+    rules:
+      - domain: platform.openai.com
+        path: /docs
+        type: official_documentation
+      - domain: openai.com
+        path: /index
+        type: official_blog
+      - domain: openai.com
+        path: /research
+        type: official_research
+      - domain: openai.com
+        type: official_blog
+      - domain: github.com
+        path: /*/*/releases
+        github_org: openai
+        type: official_github_release
+
+  - name: Anthropic
+    rules:
+      - domain: docs.anthropic.com
+        type: official_documentation
+      - domain: docs.claude.com
+        type: official_documentation
+      - domain: anthropic.com
+        path: /research
+        type: official_research
+      - domain: anthropic.com
+        path: /engineering
+        type: official_blog
+      - domain: anthropic.com
+        path: /news
+        type: official_blog
+      - domain: anthropic.com
+        type: official_blog
+      - domain: github.com
+        path: /*/*/releases
+        github_org: anthropics
+        type: official_github_release
+
+  - name: Google
+    rules:
+      - domain: developers.google.com
+        type: official_documentation
+      - domain: cloud.google.com
+        path: /docs
+        type: official_documentation
+      - domain: ai.google.dev
+        type: official_documentation
+      - domain: research.google
+        type: official_research
+      - domain: deepmind.google
+        type: official_research
+      - domain: developers.googleblog.com
+        type: official_blog
+      - domain: blog.google
+        type: official_blog
+      - domain: android-developers.googleblog.com
+        type: official_blog
+      - domain: web.dev
+        type: official_documentation
+      - domain: github.com
+        path: /*/*/releases
+        github_org: google
+        type: official_github_release
+      - domain: github.com
+        path: /*/*/releases
+        github_org: googleapis
+        type: official_github_release
+
+  - name: Microsoft
+    rules:
+      - domain: learn.microsoft.com
+        type: official_documentation
+      - domain: devblogs.microsoft.com
+        type: official_blog
+      - domain: azure.microsoft.com
+        path: /blog
+        type: official_blog
+      - domain: microsoft.com
+        path: /research
+        type: official_research
+      - domain: github.com
+        path: /*/*/releases
+        github_org: microsoft
+        type: official_github_release
+      - domain: github.com
+        path: /*/*/releases
+        github_org: dotnet
+        type: official_github_release
+
+  - name: AWS
+    rules:
+      - domain: docs.aws.amazon.com
+        type: official_documentation
+      - domain: aws.amazon.com
+        path: /blogs
+        type: official_blog
+      - domain: aws.amazon.com
+        path: /about-aws/whats-new
+        type: official_release_notes
+      - domain: github.com
+        path: /*/*/releases
+        github_org: aws
+        type: official_github_release
+
+  - name: Meta
+    rules:
+      - domain: ai.meta.com
+        path: /research
+        type: official_research
+      - domain: ai.meta.com
+        path: /blog
+        type: official_blog
+      - domain: engineering.fb.com
+        type: official_blog
+      - domain: react.dev
+        type: official_documentation
+      - domain: github.com
+        path: /*/*/releases
+        github_org: facebook
+        type: official_github_release
+
+  - name: Hugging Face
+    rules:
+      - domain: huggingface.co
+        path: /docs
+        type: official_documentation
+      - domain: huggingface.co
+        path: /blog
+        type: official_blog
+      - domain: huggingface.co
+        path: /papers
+        type: original_paper
+      - domain: github.com
+        path: /*/*/releases
+        github_org: huggingface
+        type: official_github_release
+
+  - name: GitHub
+    rules:
+      - domain: docs.github.com
+        type: official_documentation
+      - domain: github.blog
+        path: /changelog
+        type: official_release_notes
+      - domain: github.blog
+        type: official_blog
+      - domain: github.com
+        path: /*/*/releases
+        github_org: github
+        type: official_github_release
+
+  - name: GitLab
+    rules:
+      - domain: docs.gitlab.com
+        type: official_documentation
+      - domain: about.gitlab.com
+        path: /releases
+        type: official_release_notes
+      - domain: about.gitlab.com
+        path: /blog
+        type: official_blog
+
+  - name: Cloudflare
+    rules:
+      - domain: developers.cloudflare.com
+        type: official_documentation
+      - domain: blog.cloudflare.com
+        type: official_blog
+      - domain: github.com
+        path: /*/*/releases
+        github_org: cloudflare
+        type: official_github_release
+
+  - name: NVIDIA
+    rules:
+      - domain: docs.nvidia.com
+        type: official_documentation
+      - domain: developer.nvidia.com
+        path: /blog
+        type: official_blog
+      - domain: blogs.nvidia.com
+        type: official_blog
+      - domain: github.com
+        path: /*/*/releases
+        github_org: NVIDIA
+        type: official_github_release
+
+  - name: Python
+    rules:
+      - domain: docs.python.org
+        type: official_documentation
+      - domain: peps.python.org
+        type: standard_specification
+      - domain: blog.python.org
+        type: official_blog
+      - domain: github.com
+        path: /*/*/releases
+        github_org: python
+        type: official_github_release
+
+  - name: Rust
+    rules:
+      - domain: doc.rust-lang.org
+        type: official_documentation
+      - domain: blog.rust-lang.org
+        type: official_blog
+      - domain: github.com
+        path: /*/*/releases
+        github_org: rust-lang
+        type: official_github_release
+
+  - name: TypeScript
+    rules:
+      - domain: typescriptlang.org
+        path: /docs
+        type: official_documentation
+      - domain: devblogs.microsoft.com
+        path: /typescript
+        type: official_blog
+      # microsoft/TypeScript の Release は Microsoft の規則 (github_org: microsoft) で拾う。
+      # 同じ規則を二重に書くとシードが重複として弾く。
+
+  - name: arXiv
+    rules:
+      - domain: arxiv.org
+        type: original_paper
+
+  - name: IETF
+    rules:
+      - domain: rfc-editor.org
+        type: standard_specification
+      - domain: datatracker.ietf.org
+        type: standard_specification
+
+  - name: W3C
+    rules:
+      - domain: w3.org
+        path: /TR
+        type: standard_specification
+
+  - name: WHATWG
+    rules:
+      - domain: spec.whatwg.org
+        type: standard_specification
