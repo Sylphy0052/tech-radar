@@ -18,6 +18,8 @@ dependencies = [
     "lxml>=5.3",
     "readability-lxml>=0.8",
     "charset-normalizer>=3.4",
+    "sentence-transformers>=3.3",
+    "torch==2.9.1",
 ]
 
 [project.optional-dependencies]
@@ -99,3 +101,14 @@ exclude_lines = [
 python-version = "3.12"
 # tests は `tests.conftest` のヘルパーを import するためパッケージとして解決させる。
 root = ["./src", "."]
+
+# PyTorch はドライバが対応する CUDA 版を明示的に選ぶ。
+# 既定の PyPI 版は cu130 でビルドされており、CUDA 12.8 までのドライバでは
+# CUDA が使えず CPU へ落ちる（実測で確認）。
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
