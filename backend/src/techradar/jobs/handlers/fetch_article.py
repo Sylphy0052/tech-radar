@@ -1,12 +1,17 @@
-"""`fetch_article` ジョブハンドラ（`PROJECT_SPEC.md` §6.2, Issue #12 T3）。
+"""`fetch_article` ジョブハンドラ（`PROJECT_SPEC.md` §6.2, Issue #12 T3, Issue #9 T15）。
 
-URL から記事を取得・保存し、手動登録の関心記事として `user_articles` へ
-追加したうえで `analyze_article` を積む。
+URL から記事を取得・保存する。payload に `registration_id` があれば
+ユーザーの明示的な URL 登録として扱い、手動登録の関心記事として
+`user_articles` へ追加する。`registration_id` が無ければ巡回
+（`crawl_sources`）由来のジョブとして扱い、登録行の更新は一切行わない
+（`_process_without_registration` 参照）。どちらの経路でも最終的に
+`analyze_article` を積む。
 """
 
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -32,8 +37,14 @@ MANUAL_REGISTRATION_INTEREST_WEIGHT = 1.0
 
 def process_fetch_article(session: Session, context: JobContext, settings: Settings) -> None:
     """`fetch_article` ジョブ 1 件分の処理。"""
-    registration_id = uuid.UUID(context.payload["registration_id"])
     url = context.payload["url"]
+    registration_id = _optional_registration_id(context.payload)
+
+    if registration_id is None:
+        # 巡回由来のジョブ。登録行が無いため、以降の登録更新・失敗記録はすべて
+        # 省略する（`_process_without_registration` のコメント参照）。
+        _process_without_registration(session, url, settings)
+        return
 
     registration = load_registration(session, registration_id)
     if registration is None:
@@ -70,6 +81,30 @@ def process_fetch_article(session: Session, context: JobContext, settings: Setti
             settings=settings,
         )
         raise
+
+
+def _process_without_registration(session: Session, url: str, settings: Settings) -> None:
+    """登録行を伴わない（巡回由来の）`fetch_article` を処理する。
+
+    手動登録との違い:
+    - `user_articles` へは追加しない。手動登録（`origin=manual`, 重み 1.0）は
+      ユーザーの明示的な関心表明を表すが、巡回で機械的に見つけただけの候補に
+      同じ重みを与えると実際の関心度を過大評価してしまうため（受入基準）。
+    - 失敗理由の記録先である登録行が無いため `record_registration_failure_safely`
+      は呼ばない。例外はここで握りつぶさずそのまま再送出し、ジョブ自体の失敗
+      記録（`techradar.jobs.queue.fail` が書き込む `jobs.last_error`）に委ねる。
+    """
+    result = ingest_article(session, url, settings=settings)
+    enqueue(session, JobType.ANALYZE_ARTICLE, {"article_id": str(result.article.id)})
+    session.flush()
+
+
+def _optional_registration_id(payload: dict[str, Any]) -> uuid.UUID | None:
+    """payload から `registration_id` を取り出す。無ければ巡回由来として `None`。"""
+    raw = payload.get("registration_id")
+    if raw is None:
+        return None
+    return uuid.UUID(raw)
 
 
 def _link_user_article(session: Session, user_id: uuid.UUID, article_id: uuid.UUID) -> None:
