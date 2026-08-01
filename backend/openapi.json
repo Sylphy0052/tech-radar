@@ -1,6 +1,62 @@
 {
   "components": {
     "schemas": {
+      "ArticleFeedbackCreate": {
+        "additionalProperties": false,
+        "description": "フィードバック登録リクエスト。",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/FeedbackAction"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BadReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "ArticleFeedbackCreate",
+        "type": "object"
+      },
+      "ArticleFeedbackResponse": {
+        "description": "フィードバックの公開表現。",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "action",
+          "reason",
+          "created_at"
+        ],
+        "title": "ArticleFeedbackResponse",
+        "type": "object"
+      },
       "ArticleRecommendationsResponse": {
         "description": "記事起点推薦（`POST /api/articles/{article_id}/recommendations`）のレスポンス。",
         "properties": {
@@ -114,6 +170,19 @@
         "title": "ArticleRegistrationResponse",
         "type": "object"
       },
+      "BadReason": {
+        "description": "Bad の理由（`PROJECT_SPEC.md` §7.2）。任意項目。",
+        "enum": [
+          "not_interested",
+          "too_shallow",
+          "already_known",
+          "promotional",
+          "untrusted_source",
+          "too_repetitive"
+        ],
+        "title": "BadReason",
+        "type": "string"
+      },
       "CrawlRunCreate": {
         "additionalProperties": false,
         "description": "巡回ジョブの起動リクエスト。省略可能。",
@@ -183,6 +252,16 @@
         ],
         "title": "FeedResponse",
         "type": "object"
+      },
+      "FeedbackAction": {
+        "description": "記事へのフィードバック種別。",
+        "enum": [
+          "good",
+          "bad",
+          "save"
+        ],
+        "title": "FeedbackAction",
+        "type": "string"
       },
       "HTTPValidationError": {
         "properties": {
@@ -765,6 +844,95 @@
         "summary": "Get Article Registration",
         "tags": [
           "articles"
+        ]
+      }
+    },
+    "/api/articles/{article_id}/feedback": {
+      "delete": {
+        "description": "記事へのフィードバックを取り消す。\n\nGood / 保存に由来する `user_articles` 行も合わせて削除する\n（手動登録由来の行は残す）。",
+        "operationId": "delete_article_feedback_api_articles__article_id__feedback_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "article_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Article Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Article Feedback",
+        "tags": [
+          "feedback"
+        ]
+      },
+      "post": {
+        "description": "記事へ Good / Bad / 保存を記録する（`PROJECT_SPEC.md` §7）。",
+        "operationId": "create_article_feedback_api_articles__article_id__feedback_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "article_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Article Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArticleFeedbackCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleFeedbackResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Article Feedback",
+        "tags": [
+          "feedback"
         ]
       }
     },

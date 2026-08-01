@@ -50,6 +50,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/articles/{article_id}/feedback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Article Feedback
+         * @description 記事へ Good / Bad / 保存を記録する（`PROJECT_SPEC.md` §7）。
+         */
+        post: operations["create_article_feedback_api_articles__article_id__feedback_post"];
+        /**
+         * Delete Article Feedback
+         * @description 記事へのフィードバックを取り消す。
+         *
+         *     Good / 保存に由来する `user_articles` 行も合わせて削除する
+         *     （手動登録由来の行は残す）。
+         */
+        delete: operations["delete_article_feedback_api_articles__article_id__feedback_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/articles/{article_id}/recommendations": {
         parameters: {
             query?: never;
@@ -223,6 +250,29 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * ArticleFeedbackCreate
+         * @description フィードバック登録リクエスト。
+         */
+        ArticleFeedbackCreate: {
+            action: components["schemas"]["FeedbackAction"];
+            reason?: components["schemas"]["BadReason"] | null;
+        };
+        /**
+         * ArticleFeedbackResponse
+         * @description フィードバックの公開表現。
+         */
+        ArticleFeedbackResponse: {
+            /** Action */
+            action: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Reason */
+            reason: string | null;
+        };
+        /**
          * ArticleRecommendationsResponse
          * @description 記事起点推薦（`POST /api/articles/{article_id}/recommendations`）のレスポンス。
          */
@@ -287,6 +337,12 @@ export interface components {
             url: string;
         };
         /**
+         * BadReason
+         * @description Bad の理由（`PROJECT_SPEC.md` §7.2）。任意項目。
+         * @enum {string}
+         */
+        BadReason: "not_interested" | "too_shallow" | "already_known" | "promotional" | "untrusted_source" | "too_repetitive";
+        /**
          * CrawlRunCreate
          * @description 巡回ジョブの起動リクエスト。省略可能。
          */
@@ -317,6 +373,12 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
         };
+        /**
+         * FeedbackAction
+         * @description 記事へのフィードバック種別。
+         * @enum {string}
+         */
+        FeedbackAction: "good" | "bad" | "save";
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -573,6 +635,70 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ArticleRegistrationResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_article_feedback_api_articles__article_id__feedback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                article_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArticleFeedbackCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArticleFeedbackResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_article_feedback_api_articles__article_id__feedback_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                article_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
