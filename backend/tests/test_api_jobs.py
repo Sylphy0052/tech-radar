@@ -68,3 +68,16 @@ class TestGetJob:
 
         # Assert
         assert "payload" not in response.json()
+
+    def test_does_not_expose_the_last_error(self, client: TestClient, db_session: Session) -> None:
+        """HIGH: last_error は例外メッセージに URL 等の内部情報が入りうるため露出させない。"""
+        # Arrange
+        job = enqueue(db_session, JobType.FETCH_ARTICLE)
+        job.last_error = "https://internal.example.com/secret?api_key=xxxxx"
+        db_session.flush()
+
+        # Act
+        response = client.get(f"/api/jobs/{job.id}")
+
+        # Assert
+        assert "last_error" not in response.json()
