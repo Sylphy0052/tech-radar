@@ -1,8 +1,8 @@
 """URL 登録 API（`PROJECT_SPEC.md` §6.2, §20, Issue #12）。
 
 MVP は単一ユーザー・認証なし（§22）のため、登録者は常に
-`Settings.default_user_id` を使う。認証を導入する際はこの1箇所を
-差し替えればよい。
+`api.deps.get_current_user_id` が返す ID を使う。認証を導入する際は
+その依存の実装を差し替えればよい。
 """
 
 from __future__ import annotations
@@ -17,8 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from techradar.api.deps import get_current_settings, get_session
-from techradar.config import Settings
+from techradar.api.deps import get_current_user_id, get_session
 from techradar.db.enums import JobStatus, JobType
 from techradar.db.models import ArticleRegistration
 from techradar.fetcher.url import normalize_url
@@ -27,7 +26,7 @@ from techradar.jobs.queue import enqueue
 router = APIRouter(prefix="/api/articles", tags=["articles"])
 
 SessionDep = Annotated[Session, Depends(get_session)]
-SettingsDep = Annotated[Settings, Depends(get_current_settings)]
+UserIdDep = Annotated[uuid.UUID, Depends(get_current_user_id)]
 
 # 極端に長い URL による無用なリソース消費を避けるための上限。
 MAX_URL_LENGTH = 2048
@@ -121,7 +120,7 @@ def _create_registration(
 def create_article_registration(
     payload: ArticleRegistrationCreate,
     session: SessionDep,
-    settings: SettingsDep,
+    user_id: UserIdDep,
     response: Response,
 ) -> ArticleRegistration:
     """URL を登録し、記事取得ジョブを積む。
@@ -129,7 +128,6 @@ def create_article_registration(
     同じ URL（正規化後）を何度も登録しても fetch ジョブを積み増さないよう、
     既存登録があればそれをそのまま返す。
     """
-    user_id = settings.default_user_id
     normalized_url = normalize_url(payload.url)
 
     existing = _find_existing_registration(session, user_id, normalized_url)

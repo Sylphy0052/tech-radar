@@ -19,10 +19,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 EmbeddingDevice = Literal["auto", "cuda", "cpu"]
 
-# MVP は単一ユーザー・認証なし（`PROJECT_SPEC.md` §22）のため、登録者を
-# この固定 UUID で表す。将来認証を導入する際は `Settings.default_user_id` の
-# 差し替え（実ユーザーの ID を注入する）だけで済むよう、値をここに集約する。
-DEFAULT_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+# MVP は認証なしの単一ユーザー（`docs/decisions.md`）のため、固定 UUID を既定の
+# user_id として使う。将来認証を導入する際は `api.deps.get_current_user_id` の
+# 実装を差し替えるだけで済むようにするため、値そのものは環境変数
+# `DEFAULT_USER_ID` で上書き可能にしておく。
+_DEFAULT_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 
 class Settings(BaseSettings):
@@ -78,12 +79,9 @@ class Settings(BaseSettings):
     github_token: str | None = None
 
     # ---- アプリケーション ----
-    # MVP は単一ユーザー・認証なし（`PROJECT_SPEC.md` §22）。将来の認証導入時に
-    # 差し替える1箇所を集約するための固定値。
-    default_user_id: uuid.UUID = Field(
-        default=DEFAULT_USER_ID,
-        validation_alias="TECHRADAR_DEFAULT_USER_ID",
-    )
+    # MVP は認証なしの単一ユーザー（`docs/decisions.md`）。全レコードの user_id
+    # にこの値を使う。`api.deps.get_current_user_id` から参照する。
+    default_user_id: uuid.UUID = Field(default=_DEFAULT_USER_ID)
     recommendation_max_age_days: int = Field(default=7, gt=0)
     log_retention_days: int = Field(default=90, gt=0)
     worker_concurrency: int = Field(default=2, gt=0)

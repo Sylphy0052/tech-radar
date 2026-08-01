@@ -36,14 +36,6 @@ def test_rejects_non_positive_worker_concurrency():
         Settings(_env_file=None, worker_concurrency=0)
 
 
-def test_uses_seven_days_as_recommendation_age_limit_by_default():
-    # Arrange / Act
-    settings = Settings(_env_file=None)
-
-    # Assert — 仕様の「直近 7 日以内」に対応する
-    assert settings.recommendation_max_age_days == 7
-
-
 def test_caches_settings_singleton():
     # Arrange
     get_settings.cache_clear()

@@ -1,6 +1,40 @@
 {
   "components": {
     "schemas": {
+      "ArticleRecommendationsResponse": {
+        "description": "記事起点推薦（`POST /api/articles/{article_id}/recommendations`）のレスポンス。",
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RecommendationItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "mode",
+          "generated_at",
+          "items"
+        ],
+        "title": "ArticleRecommendationsResponse",
+        "type": "object"
+      },
       "ArticleRegistrationCreate": {
         "additionalProperties": false,
         "description": "URL 登録リクエスト。\n\nSSRF 対策そのもの（内部アドレスの拒否等）は実際に取得する\n`techradar.fetcher` 側の責務のため、ここではスキームと長さの形式検証に\n留める（`crawl.py` の `CrawlRunCreate` と同じ方針）。",
@@ -121,6 +155,35 @@
         "title": "CrawlRunResponse",
         "type": "object"
       },
+      "FeedResponse": {
+        "description": "Discover フィード（`GET /api/feed`）のレスポンス。",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RecommendationItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "FeedResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -224,6 +287,136 @@
           "finished_at"
         ],
         "title": "JobResponse",
+        "type": "object"
+      },
+      "RecommendationItem": {
+        "description": "推薦結果 1 件のレスポンス。\n\n記事本文（`Article.body`）は含めない（ADR 0001、外部には表示しない）。",
+        "properties": {
+          "article_id": {
+            "format": "uuid",
+            "title": "Article Id",
+            "type": "string"
+          },
+          "canonical_url": {
+            "title": "Canonical Url",
+            "type": "string"
+          },
+          "is_primary_source": {
+            "title": "Is Primary Source",
+            "type": "boolean"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "original_url": {
+            "title": "Original Url",
+            "type": "string"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "rank": {
+            "title": "Rank",
+            "type": "integer"
+          },
+          "reasons": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "title": "Reasons",
+            "type": "object"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "source_domain": {
+            "title": "Source Domain",
+            "type": "string"
+          },
+          "summary_ja": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Ja"
+          },
+          "technologies": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Technologies",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topics": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "translated_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Translated Title"
+          }
+        },
+        "required": [
+          "article_id",
+          "canonical_url",
+          "original_url",
+          "title",
+          "translated_title",
+          "summary_ja",
+          "source_domain",
+          "language",
+          "published_at",
+          "is_primary_source",
+          "topics",
+          "technologies",
+          "score",
+          "rank",
+          "reasons"
+        ],
+        "title": "RecommendationItem",
         "type": "object"
       },
       "SourceCreate": {
@@ -575,9 +768,53 @@
         ]
       }
     },
+    "/api/articles/{article_id}/recommendations": {
+      "post": {
+        "description": "指定記事に近い記事を推薦する（`PROJECT_SPEC.md` §13.1）。\n\n構成比は適用せず、`rank_candidates` の上位をそのまま rank 昇順で返す\n（`recommendation/service.py` の ARTICLE_BASED モード）。",
+        "operationId": "create_article_recommendations_api_articles__article_id__recommendations_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "article_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Article Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleRecommendationsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Article Recommendations",
+        "tags": [
+          "recommendations"
+        ]
+      }
+    },
     "/api/crawl/runs": {
       "post": {
-        "description": "巡回ジョブを enqueue する。\n\nUI のボタン連打などで重複起動されると、`crawl_sources` 1件ごとに発生する\n検索 API / LLM 呼び出しが無制限に積み上がり、追加課金ゼロという前提に\n直接影響する。pending または実行中 status の `crawl_sources` ジョブが既に\n存在する場合は新規作成せず、その job_id を 200 OK で返す。存在しなければ\n従来どおり新規に enqueue して 201 Created を返す。",
+        "description": "巡回ジョブを enqueue する。\n\nUI のボタン連打などで重複起動されると、`crawl_sources` 1件ごとに発生する\n検索 API / LLM 呼び出しが無制限に積み上がり、追加課金ゼロという前提に\n直接影響する。pending または実行中 status の `crawl_sources` ジョブが既に\n存在する場合は新規作成せず、その job_id を 200 OK で返す。存在しなければ\n従来どおり新規に enqueue して 201 Created を返す。\n\n事前確認と INSERT の間には別リクエストが割り込みうる（TOCTOU）。SELECT 時点で\n対象の行が無い以上、行ロックでは塞げないため、最終的な排他は部分ユニーク\nインデックス `ux_jobs_active_crawl_sources` に任せ、ここではその違反を\n「相手が先に積んだ」ものとして扱う。",
         "operationId": "create_crawl_run_api_crawl_runs_post",
         "requestBody": {
           "content": {
@@ -631,6 +868,70 @@
         "summary": "Create Crawl Run",
         "tags": [
           "crawl"
+        ]
+      }
+    },
+    "/api/feed": {
+      "get": {
+        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。\n\n`cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ\n新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。\n`cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、\nページ間で重複が出ないようにする（受入基準）。\n\n古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。",
+        "operationId": "get_feed_api_feed_get",
+        "parameters": [
+          {
+            "description": "前回レスポンスの next_cursor をそのまま渡す",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "前回レスポンスの next_cursor をそのまま渡す",
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Feed",
+        "tags": [
+          "recommendations"
         ]
       }
     },

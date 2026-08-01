@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -441,7 +442,7 @@ async def test_stop_does_not_hang_when_a_handler_swallows_cancelled_error(
     settings = _fast_settings(
         worker_shutdown_grace_seconds=0.05, worker_cancel_await_timeout_seconds=0.1
     )
-    _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
+    job_id = _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
     worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
     await worker.start()
     await asyncio.wait_for(started.wait(), timeout=2.0)
@@ -452,6 +453,233 @@ async def test_stop_does_not_hang_when_a_handler_swallows_cancelled_error(
     # ハンドラのバックグラウンド継続分（最大 0.25 秒）が完全に終わるのを待ち、
     # テスト終了後まで残留タスクが生き残らないようにする。
     await asyncio.sleep(0.3)
+
+    # Assert: 取り残されたタスクが後から完走しても、release で戻した pending を
+    # completed へ書き換えないこと（Issue #27）。
+    with worker_session_factory() as session:
+        job = session.get(Job, job_id)
+    assert job is not None
+    assert job.status == JobStatus.PENDING.value
+    assert job.finished_at is None
+
+
+async def test_a_late_write_from_an_abandoned_task_does_not_overwrite_a_released_job(
+    worker_session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """受入基準: release 済みのジョブが後から completed / failed へ上書きされないこと。
+
+    `asyncio.to_thread` が起こしたスレッドはキャンセルできない。`_complete_job_sync`
+    をスレッドで実行している最中に stop() がキャンセルした場合、コルーチンは
+    CancelledError で終わる一方、スレッドはそのまま完了を書きにくる。
+    """
+    # Arrange: 完了記録の直前で足止めし、stop() のキャンセルを受けさせる
+    reached_completion = asyncio.Event()
+    allow_completion = threading.Event()
+
+    async def handler(context: JobContext) -> None:
+        return None
+
+    registry = JobHandlerRegistry()
+    registry.register(JobType.FETCH_ARTICLE, handler)
+    settings = _fast_settings(
+        worker_shutdown_grace_seconds=0.05, worker_cancel_await_timeout_seconds=0.1
+    )
+    job_id = _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
+    worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
+
+    original_complete_job_sync = worker._complete_job_sync
+
+    def blocking_complete_job_sync(claimed: Any, duration_ms: int) -> None:
+        # スレッド側で走る。ここで待たせている間に stop() がキャンセルと release を行う。
+        reached_completion.set()
+        allow_completion.wait(timeout=5.0)
+        original_complete_job_sync(claimed, duration_ms)
+
+    monkeypatch.setattr(worker, "_complete_job_sync", blocking_complete_job_sync)
+
+    await worker.start()
+    await asyncio.wait_for(reached_completion.wait(), timeout=2.0)
+
+    # Act: 完了記録が終わる前に停止し、そのあとスレッド側の書き込みを進ませる
+    await asyncio.wait_for(worker.stop(), timeout=2.0)
+    allow_completion.set()
+    await asyncio.sleep(0.3)
+
+    # Assert: release で戻した pending のままで、completed に化けていない
+    with worker_session_factory() as session:
+        job = session.get(Job, job_id)
+    assert job is not None
+    assert job.status == JobStatus.PENDING.value
+    assert job.finished_at is None
+
+
+async def test_a_late_failure_write_from_an_abandoned_task_does_not_overwrite_a_released_job(
+    worker_session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """失敗の記録側も、release 済みのジョブを上書きしないこと（Issue #27）。
+
+    `complete` と同じガードを共有しているが、失敗の記録では attempts が増えるため、
+    通ってしまうと利用者都合の中断がリトライ回数を消費する。
+    """
+    # Arrange: ハンドラを失敗させ、失敗記録の直前で足止めする
+    reached_failure = asyncio.Event()
+    allow_failure = threading.Event()
+
+    async def handler(context: JobContext) -> None:
+        raise RuntimeError("boom")
+
+    registry = JobHandlerRegistry()
+    registry.register(JobType.FETCH_ARTICLE, handler)
+    settings = _fast_settings(
+        worker_shutdown_grace_seconds=0.05, worker_cancel_await_timeout_seconds=0.1
+    )
+    job_id = _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
+    worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
+
+    original_fail_job_sync = worker._fail_job_sync
+
+    def blocking_fail_job_sync(
+        claimed: Any, error: str, duration_ms: int, *, retryable: bool
+    ) -> None:
+        reached_failure.set()
+        allow_failure.wait(timeout=5.0)
+        original_fail_job_sync(claimed, error, duration_ms, retryable=retryable)
+
+    monkeypatch.setattr(worker, "_fail_job_sync", blocking_fail_job_sync)
+
+    await worker.start()
+    await asyncio.wait_for(reached_failure.wait(), timeout=2.0)
+
+    # Act
+    await asyncio.wait_for(worker.stop(), timeout=2.0)
+    allow_failure.set()
+    await asyncio.sleep(0.3)
+
+    # Assert: release で戻した pending のままで、attempts も増えていない
+    with worker_session_factory() as session:
+        job = session.get(Job, job_id)
+    assert job is not None
+    assert job.status == JobStatus.PENDING.value
+    assert job.attempts == 0
+    assert job.last_error is None
+
+
+async def test_stop_completes_the_remaining_work_when_one_release_fails(
+    worker_session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """1件の release が失敗しても、残りの後始末と reclaim_stale を実行すること。
+
+    停止処理を「どれか1つが転んだら全部やめる」形にすると、DB の一時的なエラー
+    1件で取り残しタスクの退避もシャットダウン時の回収も飛んでしまう。
+    """
+    # Arrange: 2本とも猶予超過させ、最初の release だけ失敗させる
+    concurrency = 2
+    started = asyncio.Semaphore(0)
+
+    async def handler(context: JobContext) -> None:
+        started.release()
+        await asyncio.sleep(10)
+
+    registry = JobHandlerRegistry()
+    registry.register(JobType.FETCH_ARTICLE, handler)
+    settings = _fast_settings(
+        worker_concurrency=concurrency,
+        worker_shutdown_grace_seconds=0.05,
+        worker_cancel_await_timeout_seconds=0.1,
+    )
+    job_ids = [
+        _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
+        for _ in range(concurrency)
+    ]
+    worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
+
+    original_release_job_sync = worker._release_job_sync
+    release_calls: list[uuid.UUID] = []
+
+    def flaky_release_job_sync(job_id: uuid.UUID) -> bool:
+        release_calls.append(job_id)
+        if len(release_calls) == 1:
+            message = "simulated DB error during release"
+            raise RuntimeError(message)
+        return original_release_job_sync(job_id)
+
+    monkeypatch.setattr(worker, "_release_job_sync", flaky_release_job_sync)
+
+    reclaim_calls: list[int] = []
+    original_reclaim_stale_sync = worker._reclaim_stale_sync
+
+    def counting_reclaim_stale_sync() -> int:
+        reclaimed = original_reclaim_stale_sync()
+        reclaim_calls.append(reclaimed)
+        return reclaimed
+
+    await worker.start()
+    for _ in range(concurrency):
+        await asyncio.wait_for(started.acquire(), timeout=2.0)
+    # start() も reclaim_stale を呼ぶため、差し替えは起動後にする。
+    monkeypatch.setattr(worker, "_reclaim_stale_sync", counting_reclaim_stale_sync)
+
+    # Act: stop() 自体は例外を投げずに完了する
+    await asyncio.wait_for(worker.stop(), timeout=3.0)
+
+    # Assert: 両方の release が試みられ、shutdown 時の reclaim_stale も走っている
+    assert len(release_calls) == concurrency
+    assert len(reclaim_calls) == 1
+
+    # 失敗しなかった側は pending へ戻り、失敗した側も reclaim_stale が回収する
+    with worker_session_factory() as session:
+        jobs = [session.get(Job, job_id) for job_id in job_ids]
+    assert all(job is not None for job in jobs)
+    assert {job.status for job in jobs if job is not None} == {JobStatus.PENDING.value}
+
+
+async def test_stop_cancels_overdue_tasks_concurrently(
+    worker_session_factory: sessionmaker[Session],
+) -> None:
+    """受入基準: 複数タスクが同時に猶予超過してもシャットダウンが直列に伸びないこと。
+
+    キャンセル待ちを1件ずつ `await` していると、所要時間が
+    `grace + N * cancel_await_timeout` まで伸びる。まとめて待てば
+    `cancel_await_timeout` 1回分に収まる。
+    """
+    # Arrange: 2本とも猶予を超え、かつキャンセルを握り潰すハンドラ
+    concurrency = 2
+    cancel_await_timeout = 0.4
+    started = asyncio.Semaphore(0)
+
+    async def handler(context: JobContext) -> None:
+        started.release()
+        for _ in range(20):
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(0.05)
+
+    registry = JobHandlerRegistry()
+    registry.register(JobType.FETCH_ARTICLE, handler)
+    settings = _fast_settings(
+        worker_concurrency=concurrency,
+        worker_shutdown_grace_seconds=0.05,
+        worker_cancel_await_timeout_seconds=cancel_await_timeout,
+    )
+    for _ in range(concurrency):
+        _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
+    worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
+    await worker.start()
+    for _ in range(concurrency):
+        await asyncio.wait_for(started.acquire(), timeout=2.0)
+
+    # Act
+    began = time.monotonic()
+    await asyncio.wait_for(worker.stop(), timeout=5.0)
+    elapsed = time.monotonic() - began
+
+    # Assert: 直列なら 2 * 0.4 = 0.8 秒を超える。並行なら 0.4 秒台に収まる。
+    assert elapsed < cancel_await_timeout * 2
+
+    # ハンドラのバックグラウンド継続分が終わるのを待ってからテストを抜ける。
+    await asyncio.sleep(1.1)
 
 
 async def test_stop_logs_exceptions_from_tasks_that_finish_within_the_grace_period(

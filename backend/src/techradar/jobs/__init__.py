@@ -11,6 +11,7 @@ from techradar.jobs.queue import (
     complete,
     enqueue,
     fail,
+    ownership_token,
     reclaim_stale,
     release,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "create_default_registry",
     "enqueue",
     "fail",
+    "ownership_token",
     "reclaim_stale",
     "record_job_event",
     "release",

@@ -47,6 +47,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/articles/{article_id}/recommendations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Article Recommendations
+         * @description 指定記事に近い記事を推薦する（`PROJECT_SPEC.md` §13.1）。
+         *
+         *     構成比は適用せず、`rank_candidates` の上位をそのまま rank 昇順で返す
+         *     （`recommendation/service.py` の ARTICLE_BASED モード）。
+         */
+        post: operations["create_article_recommendations_api_articles__article_id__recommendations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/crawl/runs": {
         parameters: {
             query?: never;
@@ -65,8 +88,41 @@ export interface paths {
          *     直接影響する。pending または実行中 status の `crawl_sources` ジョブが既に
          *     存在する場合は新規作成せず、その job_id を 200 OK で返す。存在しなければ
          *     従来どおり新規に enqueue して 201 Created を返す。
+         *
+         *     事前確認と INSERT の間には別リクエストが割り込みうる（TOCTOU）。SELECT 時点で
+         *     対象の行が無い以上、行ロックでは塞げないため、最終的な排他は部分ユニーク
+         *     インデックス `ux_jobs_active_crawl_sources` に任せ、ここではその違反を
+         *     「相手が先に積んだ」ものとして扱う。
          */
         post: operations["create_crawl_run_api_crawl_runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/feed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Feed
+         * @description Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。
+         *
+         *     `cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の
+         *     `limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ
+         *     新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。
+         *     `cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、
+         *     ページ間で重複が出ないようにする（受入基準）。
+         *
+         *     古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。
+         */
+        get: operations["get_feed_api_feed_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -164,6 +220,26 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * ArticleRecommendationsResponse
+         * @description 記事起点推薦（`POST /api/articles/{article_id}/recommendations`）のレスポンス。
+         */
+        ArticleRecommendationsResponse: {
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /** Items */
+            items: components["schemas"]["RecommendationItem"][];
+            /** Mode */
+            mode: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+        };
+        /**
          * ArticleRegistrationCreate
          * @description URL 登録リクエスト。
          *
@@ -228,6 +304,16 @@ export interface components {
             /** Status */
             status: string;
         };
+        /**
+         * FeedResponse
+         * @description Discover フィード（`GET /api/feed`）のレスポンス。
+         */
+        FeedResponse: {
+            /** Items */
+            items: components["schemas"]["RecommendationItem"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -284,6 +370,49 @@ export interface components {
             status: string;
             /** Type */
             type: string;
+        };
+        /**
+         * RecommendationItem
+         * @description 推薦結果 1 件のレスポンス。
+         *
+         *     記事本文（`Article.body`）は含めない（ADR 0001、外部には表示しない）。
+         */
+        RecommendationItem: {
+            /**
+             * Article Id
+             * Format: uuid
+             */
+            article_id: string;
+            /** Canonical Url */
+            canonical_url: string;
+            /** Is Primary Source */
+            is_primary_source: boolean;
+            /** Language */
+            language: string | null;
+            /** Original Url */
+            original_url: string;
+            /** Published At */
+            published_at: string | null;
+            /** Rank */
+            rank: number;
+            /** Reasons */
+            reasons: {
+                [key: string]: number | string;
+            };
+            /** Score */
+            score: number;
+            /** Source Domain */
+            source_domain: string;
+            /** Summary Ja */
+            summary_ja: string | null;
+            /** Technologies */
+            technologies: string[];
+            /** Title */
+            title: string;
+            /** Topics */
+            topics: string[];
+            /** Translated Title */
+            translated_title: string | null;
         };
         /**
          * SourceCreate
@@ -453,6 +582,37 @@ export interface operations {
             };
         };
     };
+    create_article_recommendations_api_articles__article_id__recommendations_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                article_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArticleRecommendationsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     create_crawl_run_api_crawl_runs_post: {
         parameters: {
             query?: never;
@@ -482,6 +642,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CrawlRunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_feed_api_feed_get: {
+        parameters: {
+            query?: {
+                /** @description 前回レスポンスの next_cursor をそのまま渡す */
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedResponse"];
                 };
             };
             /** @description Validation Error */
