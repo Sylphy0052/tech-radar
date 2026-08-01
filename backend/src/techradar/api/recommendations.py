@@ -11,7 +11,7 @@ import binascii
 import logging
 import math
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -157,6 +157,9 @@ def _decode_cursor(cursor: str) -> tuple[uuid.UUID, int]:
         raise InvalidCursorError from exc
 
     # 極端に長い桁数の文字列を int() へ渡さないよう、変換前に桁数を検証する。
+    # `CURSOR_MAX_LENGTH` はこの桁数から導出しているため、桁数超過の大半は
+    # 手前の長さ検証で弾かれる。ここで実際に弾けるのは base64 の端数ぶんだけ
+    # 長さ上限に収まってしまうケースで、独立した防御層ではない。
     if len(rank_text.removeprefix("-")) > _MAX_CURSOR_RANK_DIGITS:
         raise InvalidCursorError
 
@@ -176,7 +179,11 @@ def _resolve_discover_run_id(
     そうでなければ新規生成する。`feed_run_reuse_seconds` が 0 の場合は常に
     新規生成する（無効化）。
 
-    古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。
+    直近 run の読み取りと生成の間に排他制御は掛けないため、ほぼ同時に届いた
+    cursor 無しのリクエストは、いずれも「再利用できる run が無い」と判断して
+    それぞれ run を作りうる。単一ユーザー・ローカル実行の前提では実害が小さい
+    ため許容する。古い run の削除ジョブと API のレート制限も本 MR のスコープ外
+    （いずれも Issue #28）。
     """
     reuse_seconds = get_scoring_config().limits.feed_run_reuse_seconds
     if reuse_seconds > 0:
@@ -199,6 +206,7 @@ def create_article_recommendations(
     session: SessionDep,
     settings: SettingsDep,
     user_id: UserIdDep,
+    now: NowDep,
 ) -> ArticleRecommendationsResponse:
     """指定記事に近い記事を推薦する（`PROJECT_SPEC.md` §13.1）。
 
@@ -209,7 +217,6 @@ def create_article_recommendations(
     if source_article is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="記事が見つかりません")
 
-    now = datetime.now(UTC)
     result = generate_recommendations(
         session,
         user_id,

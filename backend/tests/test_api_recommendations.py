@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_now, get_session
-from techradar.api.recommendations import CURSOR_MAX_LENGTH
+from techradar.api.recommendations import _MAX_CURSOR_RANK_DIGITS, CURSOR_MAX_LENGTH
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, Recommendation, RecommendationRun
 from techradar.db.enums import FeedbackAction, RecommendationMode
@@ -316,8 +316,22 @@ class TestGetFeed:
 
     def test_returns_400_for_a_cursor_with_an_oversized_rank(self, client: TestClient) -> None:
         # Arrange — 受入基準: rank 部分の桁数が異常に大きい cursor は 400
-        # （int() へ渡す前に桁数で弾く）
-        raw = f"{uuid.uuid4()}:{'9' * 20}"
+        # （int() へ渡す前に桁数で弾く）。桁数を増やすほど cursor 自体も長くなり、
+        # 手前の長さチェックで弾かれて桁数チェックへ到達しなくなるため、
+        # 上限をちょうど 1 桁だけ超える長さにする。
+        raw = f"{uuid.uuid4()}:{'9' * (_MAX_CURSOR_RANK_DIGITS + 1)}"
+        cursor = base64.urlsafe_b64encode(raw.encode()).decode("ascii").rstrip("=")
+        assert len(cursor) <= CURSOR_MAX_LENGTH
+
+        # Act
+        response = client.get("/api/feed", params={"cursor": cursor})
+
+        # Assert
+        assert response.status_code == 400
+
+    def test_returns_400_for_a_cursor_whose_run_id_is_not_a_uuid(self, client: TestClient) -> None:
+        # Arrange — base64 としては復号できるが run_id が UUID ではない cursor
+        raw = "not-a-uuid:1"
         cursor = base64.urlsafe_b64encode(raw.encode()).decode("ascii").rstrip("=")
 
         # Act
