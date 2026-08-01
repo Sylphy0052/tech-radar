@@ -86,6 +86,14 @@ class Article(Base):
     analyzed_body_hash: Mapped[str | None] = mapped_column(String(64))
     # 解析の進行状態（pending / analyzing / completed / failed）。
     analysis_status: Mapped[str | None] = mapped_column(Text)
+    # 代表記事への自己参照。代表記事は duplicate_of_article_id IS NULL であり、
+    # クラスタは同じ代表 ID でグループ化する。代表記事が削除されても重複記事自体は
+    # 残すため ondelete は SET NULL にする。
+    duplicate_of_article_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("articles.id", ondelete="SET NULL")
+    )
+    # 重複と判定された記事の推薦スコアを下げるための減点。代表記事は 0。
+    duplicate_penalty: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
 
     __table_args__ = (
         # 7 日フィルターと新着順の取得で使う。
@@ -93,6 +101,8 @@ class Article(Base):
         # 同一本文の再解析を避けるためのキャッシュ判定に使う。
         Index("ix_articles_body_hash", "body_hash"),
         Index("ix_articles_source_domain", "source_domain"),
+        # クラスタ単位の取得と、代表記事（IS NULL）だけを絞り込む用途で使う。
+        Index("ix_articles_duplicate_of_article_id", "duplicate_of_article_id"),
         # 近傍検索。コサイン距離で使うため vector_cosine_ops を指定する。
         Index(
             "ix_articles_embedding_hnsw",
