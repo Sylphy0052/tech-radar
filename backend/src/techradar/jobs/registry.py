@@ -66,23 +66,13 @@ class JobHandlerRegistry:
         return frozenset(self._handlers.keys())
 
 
-async def _crawl_sources_placeholder(context: JobContext) -> None:
-    """`crawl_sources` のプレースホルダハンドラ（no-op）。
-
-    公式ソースレジストリを巡回して候補記事を集め、後続の `fetch_article`
-    ジョブを積む処理は Issue #9 の担当。本タスク（T3）はワーカーの配線を
-    通すことが目的のため、ここでは何もしないハンドラだけを登録しておく。
-    """
-    return None
-
-
 def create_default_registry(settings: Settings | None = None) -> JobHandlerRegistry:
     """既定のレジストリを返す。
 
-    `fetch_article` / `analyze_article` / `embed_article` は URL 登録の
-    end-to-end（Issue #12 T3）を成立させるハンドラを登録する。
-    `generate_feed` / `deduplicate_articles` はまだハンドラの実装がない
-    後続タスクの担当のため、あえて登録しない。未登録種別のジョブが
+    `crawl_sources` / `fetch_article` / `analyze_article` / `embed_article` は
+    巡回から URL 登録の end-to-end（Issue #9, Issue #12 T3）までを成立させる
+    ハンドラを登録する。`generate_feed` / `deduplicate_articles` はまだハンドラの
+    実装がない後続タスクの担当のため、あえて登録しない。未登録種別のジョブが
     enqueue された場合、ワーカー側で検出してリトライせず即 failed に
     できるようにするため（登録漏れを握りつぶさない）。
 
@@ -94,12 +84,13 @@ def create_default_registry(settings: Settings | None = None) -> JobHandlerRegis
 
     from techradar.jobs.handlers import (
         make_analyze_article_handler,
+        make_crawl_sources_handler,
         make_embed_article_handler,
         make_fetch_article_handler,
     )
 
     registry = JobHandlerRegistry()
-    registry.register(JobType.CRAWL_SOURCES, _crawl_sources_placeholder)
+    registry.register(JobType.CRAWL_SOURCES, make_crawl_sources_handler(resolved_settings))
     registry.register(JobType.FETCH_ARTICLE, make_fetch_article_handler(resolved_settings))
     registry.register(JobType.ANALYZE_ARTICLE, make_analyze_article_handler(resolved_settings))
     registry.register(JobType.EMBED_ARTICLE, make_embed_article_handler(resolved_settings))
