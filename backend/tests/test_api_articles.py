@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_session
@@ -25,6 +25,32 @@ def client(db_session: Session) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def independent_sessions(migrated_engine: Engine) -> Iterator[Callable[[], Session]]:
+    """互いに独立した DB 接続をテスト内で必要な数だけ払い出す。
+
+    `db_session` は1本の接続を共有し外側トランザクションでロールバックする作りのため、
+    「コミット済みの行が別接続から見えるか」は再現できない。ここでは接続ごとに
+    独立したトランザクションを張り、テストがコミットした行の後始末まで責任を持つ。
+    """
+    sessions: list[Session] = []
+
+    def open_session() -> Session:
+        session = Session(bind=migrated_engine, expire_on_commit=False)
+        sessions.append(session)
+        return session
+
+    try:
+        yield open_session
+    finally:
+        for session in sessions:
+            session.close()
+        with Session(bind=migrated_engine) as cleanup_session:
+            cleanup_session.execute(delete(ArticleRegistration))
+            cleanup_session.execute(delete(Job).where(Job.type == JobType.FETCH_ARTICLE.value))
+            cleanup_session.commit()
 
 
 class TestCreateArticleRegistration:
@@ -46,6 +72,31 @@ class TestCreateArticleRegistration:
 
         jobs = db_session.scalars(select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)).all()
         assert len(jobs) == 1
+
+    def test_commits_the_registration_before_responding(
+        self, independent_sessions: Callable[[], Session]
+    ) -> None:
+        """受入基準: 応答を受け取った時点で、別接続からも登録を追跡できること。
+
+        リクエスト単位のセッションは FastAPI の依存の後処理でコミットされるが、
+        後処理が走るのはレスポンス送信より後になる。UI は応答直後に
+        `GET /api/articles/registrations/{id}` を叩くため、コミットを応答前に
+        済ませておかないと登録直後の状態取得が 404 になる。
+        """
+        # Arrange
+        api_session = independent_sessions()
+        observer = independent_sessions()
+        app = create_app(Settings(_env_file=None))
+        app.dependency_overrides[get_session] = lambda: api_session
+
+        # Act
+        with TestClient(app) as test_client:
+            response = test_client.post("/api/articles", json={"url": "https://example.com/a"})
+
+        # Assert — 応答時点で別接続から見えること（コミット済みであること）
+        assert response.status_code == 201
+        registration_id = uuid.UUID(response.json()["id"])
+        assert observer.get(ArticleRegistration, registration_id) is not None
 
     def test_does_not_expose_normalized_url_or_user_id(self, client: TestClient) -> None:
         """内部情報（正規化 URL・ユーザー ID）を無用に露出させない。"""

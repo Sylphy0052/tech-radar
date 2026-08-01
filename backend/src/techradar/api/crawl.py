@@ -129,6 +129,12 @@ def create_crawl_run(
             raise
         return _existing_job_response(session, response, exc)
 
+    # 応答を返す前にコミットする。リクエスト単位のセッションは依存の後処理で
+    # コミットされるが、後処理が走るのはレスポンス送信より後になる。UI は応答直後に
+    # `GET /api/jobs/{job_id}` でポーリングを始めるため、ここでコミットしておかないと
+    # 起動したばかりのジョブが 404 になる。
+    session.commit()
+
     return CrawlRunResponse(job_id=job.id, status=job.status)
 
 
