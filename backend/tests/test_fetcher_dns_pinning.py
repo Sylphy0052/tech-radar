@@ -172,6 +172,54 @@ class TestPinnedIPTransportUnit:
         assert sent.headers["Host"] == "example.com"
         assert sent.extensions["sni_hostname"] == "example.com"
 
+    def test_rejects_hostname_as_pinned_value(self):
+        # Arrange — pin 値にホスト名文字列が渡るケース（呼び出し側の不備を模す）。
+        # IP リテラルでなければ httpcore が再解決してしまい対策が無意味になるため拒否する
+        recorded: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            recorded.append(request)
+            return httpx.Response(200)
+
+        transport = PinnedIPTransport(inner=httpx.MockTransport(handler))
+        request = httpx.Request(
+            "GET",
+            "https://example.com/article",
+            extensions={PINNED_IP_EXTENSION_KEY: "attacker.example.net"},
+        )
+
+        # Act / Assert — fail-closed で拒否し、inner へは到達させない
+        with pytest.raises(UnsafeUrlError):
+            transport.handle_request(request)
+        assert recorded == []
+
+    def test_supports_ipv6_pinned_address_with_non_default_port(self):
+        # Arrange — IPv6 pin と非既定ポートの組合せ（それぞれ単独ではテスト済みだが未検証）
+        recorded: list[httpx.Request] = []
+        ipv6_address = "2606:2800:220:1:248:1893:25c8:1946"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            recorded.append(request)
+            return httpx.Response(200)
+
+        transport = PinnedIPTransport(inner=httpx.MockTransport(handler))
+        request = httpx.Request(
+            "GET",
+            "https://example.com:8443/article",
+            extensions={PINNED_IP_EXTENSION_KEY: ipv6_address},
+        )
+
+        # Act
+        transport.handle_request(request)
+
+        # Assert
+        sent = recorded[0]
+        assert sent.url.host == ipv6_address
+        assert sent.url.port == 8443
+        assert str(sent.url).startswith(f"https://[{ipv6_address}]:8443")
+        assert sent.headers["Host"] == "example.com:8443"
+        assert sent.extensions["sni_hostname"] == "example.com"
+
     def test_close_delegates_to_inner(self):
         # Arrange
         closed = {"called": False}
@@ -366,6 +414,44 @@ class TestFetchPageUsesPinnedTransport:
         # Assert — canonical 解決の基準に使われるため IP 化した URL を返してはいけない
         assert page.final_url == "https://example.com/a"
         assert "93.184.216.34" not in page.final_url
+
+
+class TestFetchPageDisablesConnectionReuse:
+    """コネクションプール再利用によるTLS証明書検証スキップを防ぐ設定を確かめる。
+
+    httpcore の `can_handle_request` は origin（scheme, host, port）の一致だけで
+    再利用可否を判定する。PinnedIPTransport は接続先を IP へ書き換えるため、
+    origin はホスト名を含まなくなる。SNI・証明書検証は新規接続確立時にしか
+    行われないため、異なるホスト名のホップが同一 IP に解決されると、後続の
+    ホップが前段のホップ用に確立された TLS 接続（別ホスト向けに検証済み）を
+    使い回してしまい、証明書検証が一度も行われなくなる。
+    `max_keepalive_connections=0` でコネクション再利用自体を無効化することで
+    全ホップで新規接続・新規検証を強制していることを確かめる。
+    """
+
+    def test_inner_http_transport_disables_keepalive_and_trust_env(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Arrange — httpx.HTTPTransport(...) へ渡される引数を記録する factory に差し替える
+        monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo("93.184.216.34"))
+        recorded_kwargs: list[dict] = []
+
+        def factory(*args, **kwargs):
+            recorded_kwargs.append(kwargs)
+            return httpx.MockTransport(html_response)
+
+        monkeypatch.setattr(fetcher_http.httpx, "HTTPTransport", factory)
+
+        # Act
+        fetch_page("https://example.com/a", settings=settings)
+
+        # Assert — コネクション再利用が無効化されており、環境のプロキシ設定も使わない
+        assert len(recorded_kwargs) == 1
+        kwargs = recorded_kwargs[0]
+        assert kwargs["trust_env"] is False
+        limits = kwargs["limits"]
+        assert isinstance(limits, httpx.Limits)
+        assert limits.max_keepalive_connections == 0
 
 
 class TestPinnedIpExtensionKeyIsPlainAddress:

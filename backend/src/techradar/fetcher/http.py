@@ -149,7 +149,24 @@ def fetch_page(url: str, settings: Settings | None = None) -> FetchedPage:
         # 検証した IP へ直接接続するため実接続は PinnedIPTransport 経由にする。
         # httpx が接続時に独自に再解決すると、検証と接続の間に応答を差し替える
         # DNS リバインディング（TOCTOU）を許してしまう。
-        transport=PinnedIPTransport(inner=httpx.HTTPTransport(trust_env=False)),
+        #
+        # max_keepalive_connections=0 でコネクション再利用を無効化する。
+        # PinnedIPTransport が接続先を IP へ書き換えるため、httpcore の
+        # コネクション再利用可否判定（origin 一致）は IP 単位でしか見なくなり、
+        # ホスト名の違いを区別しない。TLS の SNI・証明書検証は新規接続確立時に
+        # 一度だけ行われるため、リダイレクトのホップ1（ホストA）とホップ2
+        # （ホストB）が同一 IP に解決されると、ホップ2 がホップ1 の TLS 接続
+        # （SNI=A で検証済み）を再利用してしまい、B に対する証明書検証が
+        # 一度も行われなくなる。共有 CDN やマルチテナント環境で実際に成立する
+        # 穴のため、コネクション再利用自体を無効化して全ホップで確実に
+        # 新規接続・新規検証させる。ホップ数は fetch_max_redirects で
+        # 上限が抑えられており、都度接続確立するコストは軽微。
+        transport=PinnedIPTransport(
+            inner=httpx.HTTPTransport(
+                trust_env=False,
+                limits=httpx.Limits(max_keepalive_connections=0),
+            )
+        ),
     ) as client:
         for _ in range(resolved.fetch_max_redirects + 1):
             if time.monotonic() > deadline:

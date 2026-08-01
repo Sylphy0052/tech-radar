@@ -7,17 +7,27 @@
 
 `PinnedIPTransport` はこの隙間を塞ぐ。呼び出し側が検証済みの IP を
 `request.extensions` 経由で渡し、このトランスポートは名前解決をやり直さず
-その IP へ直接接続する。TLS の SNI と証明書検証は元のホスト名に対して行う。
+その IP へ直接接続する。
+
+TLS の SNI と証明書検証は新規接続確立時に一度だけ、元のホスト名に対して
+行われる。pin により origin（接続先の同一性判定）が IP 単位に潰れるため、
+呼び出し側（`fetch_page`）でコネクションプールの再利用を無効化しないと、
+ホスト名の異なる別ホップが同一 TLS 接続を使い回し、その別ホストに対する
+証明書検証が一度も行われないまま応答を受け取ってしまう。
 """
 
 from __future__ import annotations
+
+import ipaddress
 
 import httpx
 
 from techradar.fetcher.errors import UnsafeUrlError
 
 # `request.extensions` に載せる pin 済み IP のキー名。
-PINNED_IP_EXTENSION_KEY = "pinned_ip"
+# httpx/httpcore が予約する extension キー（`sni_hostname` 等）と辞書空間を
+# 共有するため、将来の衝突を避けるためアプリ固有の prefix を付ける。
+PINNED_IP_EXTENSION_KEY = "techradar.pinned_ip"
 
 
 def _build_host_header(url: httpx.URL) -> str:
@@ -54,6 +64,15 @@ class PinnedIPTransport(httpx.BaseTransport):
         if not pinned_ip:
             message = f"接続先 IP が pin されていないリクエストです: {request.url}"
             raise UnsafeUrlError(message)
+
+        # pin 値がホスト名だと httpcore が独自に再解決してしまい、この対策が
+        # 静かに無効化される。IP アドレスリテラルであることを必ず検証する
+        # （fail-closed）。
+        try:
+            ipaddress.ip_address(pinned_ip)
+        except ValueError as exc:
+            message = f"pin された値が IP アドレスではありません: {pinned_ip!r}"
+            raise UnsafeUrlError(message) from exc
 
         original_url = request.url
         original_host = original_url.host
