@@ -38,6 +38,21 @@ class _FailingEmbeddingProvider:
         raise EmbeddingModelLoadError(self._message)
 
 
+class _UnexpectedlyFailingEmbeddingProvider:
+    """`EmbeddingError` 以外で失敗する `EmbeddingProvider`（想定外の例外の再現用）。"""
+
+    name = "unexpected"
+    dimensions = 1024
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        message = "想定していない失敗"
+        raise RuntimeError(message)
+
+    def embed_query(self, text: str) -> list[float]:
+        message = "想定していない失敗"
+        raise RuntimeError(message)
+
+
 @pytest.fixture
 def settings() -> Settings:
     return Settings(_env_file=None)
@@ -57,13 +72,16 @@ def make_article(session: Session, *, body_hash: str | None = "hash-1") -> Artic
     return article
 
 
-def make_registration(session: Session, article: Article) -> ArticleRegistration:
+def make_registration(
+    session: Session, article: Article, *, error_reason: str | None = None
+) -> ArticleRegistration:
     registration = ArticleRegistration(
         user_id=uuid.uuid4(),
         url="https://example.com/a",
         normalized_url=normalize_url("https://example.com/a"),
         status=JobStatus.ANALYZING.value,
         article_id=article.id,
+        error_reason=error_reason,
     )
     session.add(registration)
     session.flush()
@@ -109,6 +127,29 @@ class TestProcessEmbedArticleSuccess:
 
         # Assert — URL 登録の状態遷移の終端（PROJECT_SPEC.md §6.2）
         assert registration.status == JobStatus.COMPLETED.value
+
+    def test_clears_the_failure_reason_left_by_an_earlier_attempt(
+        self, db_session: Session, settings: Settings
+    ) -> None:
+        """一時的な失敗のあと再試行が成功したら、古い失敗理由を残さない。
+
+        `error_reason` はリトライ枠が残っている間も記録されるため、消さないと
+        `status=completed` と失敗理由が同時に返る矛盾したレスポンスになる。
+        """
+        # Arrange
+        article = make_article(db_session)
+        registration = make_registration(
+            db_session, article, error_reason=RegistrationErrorReason.EMBEDDING_FAILED.value
+        )
+        context = make_context(registration, article)
+        provider = FakeEmbeddingProvider()
+
+        # Act
+        process_embed_article(db_session, context, settings, provider)
+
+        # Assert
+        assert registration.status == JobStatus.COMPLETED.value
+        assert registration.error_reason is None
 
 
 class TestSkipsWhenEmbeddingNotNeeded:
@@ -198,6 +239,28 @@ class TestProcessEmbedArticleFailure:
 
         # Assert
         assert registration.status != JobStatus.FAILED.value
+
+    def test_records_a_generic_reason_for_an_unclassified_failure(
+        self, db_session: Session, settings: Settings
+    ) -> None:
+        """分類対象外の例外でも、登録を実行中のまま取り残さない。
+
+        分類済みの例外だけを記録する作りだと、想定外の例外で落ちたときに
+        `status` が実行中・`error_reason` が空のまま固定され、UI からは
+        永久に処理中に見える。
+        """
+        # Arrange
+        article = make_article(db_session)
+        registration = make_registration(db_session, article)
+        context = make_context(registration, article)
+        provider = _UnexpectedlyFailingEmbeddingProvider()
+
+        # Act
+        with pytest.raises(RuntimeError):
+            process_embed_article(db_session, context, settings, provider)
+
+        # Assert
+        assert registration.error_reason == RegistrationErrorReason.UNEXPECTED_FAILURE.value
 
 
 class TestProcessEmbedArticleMissingRow:

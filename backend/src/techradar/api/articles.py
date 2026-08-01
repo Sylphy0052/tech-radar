@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_current_user_id, get_session
 from techradar.db.enums import JobStatus, JobType
+from techradar.db.errors import is_unique_violation
 from techradar.db.models import ArticleRegistration
 from techradar.fetcher.url import normalize_url
 from techradar.jobs.queue import enqueue
@@ -100,8 +101,13 @@ def _create_registration(
     session.add(registration)
     try:
         session.flush()
-    except IntegrityError:
+    except IntegrityError as exc:
+        # 判定より先に巻き戻す（`crawl.py` の `create_crawl_run` と同じ順序）。
         session.rollback()
+        if not is_unique_violation(exc):
+            # 一意制約以外の整合性エラーを「重複登録」として握り潰すと、
+            # 原因の異なる失敗が 500 ではなく不可解な応答として現れる。
+            raise
         return None
     return registration
 
@@ -167,9 +173,19 @@ def create_article_registration(
 def get_article_registration(
     registration_id: uuid.UUID,
     session: SessionDep,
+    user_id: UserIdDep,
 ) -> ArticleRegistration:
-    """登録の状態を取得する。"""
-    registration = session.get(ArticleRegistration, registration_id)
+    """登録の状態を取得する。
+
+    作成側と同じく `user_id` で絞る。絞らないままにすると、認証を導入した際に
+    このエンドポイントだけ他ユーザーの登録を返してしまう。
+    """
+    registration = session.scalar(
+        select(ArticleRegistration).where(
+            ArticleRegistration.id == registration_id,
+            ArticleRegistration.user_id == user_id,
+        )
+    )
     if registration is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="登録が見つかりません")
     return registration

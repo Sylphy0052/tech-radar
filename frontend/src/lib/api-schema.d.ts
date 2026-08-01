@@ -37,6 +37,9 @@ export interface paths {
         /**
          * Get Article Registration
          * @description 登録の状態を取得する。
+         *
+         *     作成側と同じく `user_id` で絞る。絞らないままにすると、認証を導入した際に
+         *     このエンドポイントだけ他ユーザーの登録を返してしまう。
          */
         get: operations["get_article_registration_api_articles_registrations__registration_id__get"];
         put?: never;

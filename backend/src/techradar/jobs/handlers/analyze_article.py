@@ -20,13 +20,12 @@ from techradar.jobs.handlers._shared import (
     load_registration,
     record_registration_failure,
     run_job_in_thread,
+    start_registration_step,
 )
 from techradar.jobs.handlers.errors import classify_analysis_error
 from techradar.jobs.queue import enqueue
 from techradar.jobs.registry import JobContext, JobHandler
-from techradar.jobs.status import running_status_for
 from techradar.llm import ClaudeCliProvider, LLMProvider
-from techradar.llm.errors import LLMError
 
 
 def process_analyze_article(
@@ -45,31 +44,35 @@ def process_analyze_article(
     if registration is None:
         return
 
-    registration.status = running_status_for(JobType.ANALYZE_ARTICLE).value
-    session.flush()
+    start_registration_step(session, registration, JobType.ANALYZE_ARTICLE)
 
     article = session.get(Article, article_id)
     if article is None:
         # 記事行が削除済み。リトライしても解決しないため打ち切る。
         return
 
-    if needs_analysis(article):
-        try:
+    # 分類済みの例外だけでなく想定外の例外も記録する。記録しないまま抜けると
+    # 登録が実行中 status・理由なしのまま残り、UI からは永久に処理中に見える。
+    try:
+        if needs_analysis(article):
             run_analysis(session, provider, article, job_id=context.job_id, sleep=sleep)
-        except LLMError as exc:
-            reason = classify_analysis_error(exc)
-            record_registration_failure(
-                session, registration, reason, context=context, settings=settings
-            )
-            raise
 
-    next_job = enqueue(
-        session,
-        JobType.EMBED_ARTICLE,
-        {"registration_id": str(registration.id), "article_id": str(article.id)},
-    )
-    registration.job_id = next_job.id
-    session.flush()
+        next_job = enqueue(
+            session,
+            JobType.EMBED_ARTICLE,
+            {"registration_id": str(registration.id), "article_id": str(article.id)},
+        )
+        registration.job_id = next_job.id
+        session.flush()
+    except Exception as exc:
+        record_registration_failure(
+            session,
+            registration,
+            classify_analysis_error(exc),
+            context=context,
+            settings=settings,
+        )
+        raise
 
 
 def make_analyze_article_handler(

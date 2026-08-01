@@ -15,17 +15,16 @@ from sqlalchemy.orm import Session
 from techradar.config import Settings, get_settings
 from techradar.db.enums import ArticleOrigin, JobType
 from techradar.db.models import UserArticle
-from techradar.fetcher.errors import FetchError
 from techradar.fetcher.service import ingest_article
 from techradar.jobs.handlers._shared import (
     load_registration,
     record_registration_failure,
     run_job_in_thread,
+    start_registration_step,
 )
 from techradar.jobs.handlers.errors import classify_fetch_error
 from techradar.jobs.queue import enqueue
 from techradar.jobs.registry import JobContext, JobHandler
-from techradar.jobs.status import running_status_for
 
 # 手動 URL 登録の関心重み（`PROJECT_SPEC.md` §7.1）。
 MANUAL_REGISTRATION_INTEREST_WEIGHT = 1.0
@@ -40,33 +39,37 @@ def process_fetch_article(session: Session, context: JobContext, settings: Setti
     if registration is None:
         return
 
-    registration.status = running_status_for(JobType.FETCH_ARTICLE).value
-    session.flush()
+    start_registration_step(session, registration, JobType.FETCH_ARTICLE)
 
+    # 分類済みの例外だけでなく想定外の例外も記録する。記録しないまま抜けると
+    # 登録が実行中 status・理由なしのまま残り、UI からは永久に処理中に見える。
     try:
         result = ingest_article(session, url, settings=settings)
-    except FetchError as exc:
-        reason = classify_fetch_error(exc)
+
+        _link_user_article(session, registration.user_id, result.article.id)
+
+        next_job = enqueue(
+            session,
+            JobType.ANALYZE_ARTICLE,
+            {"registration_id": str(registration.id), "article_id": str(result.article.id)},
+        )
+        registration.article_id = result.article.id
+        registration.job_id = next_job.id
+        # fetch 完了時点では status を `analyzing` にしない。各段階の責務を分け、
+        # 「今どの段階が実際に動いているか」を、その段階のハンドラ自身が開始時に
+        # 反映する設計にする。ここで先回りして analyzing にすると、
+        # analyze_article ジョブがまだ claim されていない間も analyzing と表示され、
+        # 表示と実処理の段階が食い違う。
+        session.flush()
+    except Exception as exc:
         record_registration_failure(
-            session, registration, reason, context=context, settings=settings
+            session,
+            registration,
+            classify_fetch_error(exc),
+            context=context,
+            settings=settings,
         )
         raise
-
-    _link_user_article(session, registration.user_id, result.article.id)
-
-    next_job = enqueue(
-        session,
-        JobType.ANALYZE_ARTICLE,
-        {"registration_id": str(registration.id), "article_id": str(result.article.id)},
-    )
-    registration.article_id = result.article.id
-    registration.job_id = next_job.id
-    # fetch 完了時点では status を `analyzing` にしない。各段階の責務を分け、
-    # 「今どの段階が実際に動いているか」を、その段階のハンドラ自身が開始時に
-    # 反映する設計にする。ここで先回りして analyzing にすると、
-    # analyze_article ジョブがまだ claim されていない間も analyzing と表示され、
-    # 表示と実処理の段階が食い違う。
-    session.flush()
 
 
 def _link_user_article(session: Session, user_id: uuid.UUID, article_id: uuid.UUID) -> None:

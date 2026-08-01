@@ -233,6 +233,30 @@ class TestGetArticleRegistration:
         # Assert
         assert response.status_code == 404
 
+    def test_returns_404_for_a_registration_owned_by_another_user(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """他ユーザーの登録は参照させない。
+
+        MVP は単一ユーザーのため現状は到達しない経路だが、作成側 (`POST`) が
+        `user_id` で絞っているのに参照側が絞らないままだと、認証を導入した
+        ときにこのエンドポイントだけ他人の登録を返してしまう。
+        """
+        # Arrange
+        other_registration = ArticleRegistration(
+            user_id=uuid.uuid4(),
+            url="https://example.com/other",
+            normalized_url="https://example.com/other",
+        )
+        db_session.add(other_registration)
+        db_session.flush()
+
+        # Act
+        response = client.get(f"/api/articles/registrations/{other_registration.id}")
+
+        # Assert
+        assert response.status_code == 404
+
     def test_does_not_expose_normalized_url_or_user_id(self, client: TestClient) -> None:
         # Arrange
         create_response = client.post("/api/articles", json={"url": "https://example.com/article"})
