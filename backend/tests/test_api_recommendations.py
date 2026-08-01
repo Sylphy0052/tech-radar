@@ -5,18 +5,20 @@ from __future__ import annotations
 import base64
 import uuid
 from collections.abc import Iterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from techradar.api.deps import get_session
+from techradar.api.deps import get_now, get_session
+from techradar.api.recommendations import CURSOR_MAX_LENGTH
 from techradar.config import Settings
-from techradar.db import Article, ArticleFeedback, Recommendation
+from techradar.db import Article, ArticleFeedback, Recommendation, RecommendationRun
 from techradar.db.enums import FeedbackAction, RecommendationMode
 from techradar.main import create_app
+from techradar.recommendation.config import get_scoring_config
 from techradar.recommendation.service import find_latest_run
 
 NOW = datetime(2026, 8, 1, tzinfo=UTC)
@@ -301,3 +303,102 @@ class TestGetFeed:
 
         # Assert
         assert response.status_code == 422
+
+    def test_returns_400_for_a_cursor_exceeding_the_max_length(self, client: TestClient) -> None:
+        # Arrange — 受入基準: 上限を超える長さの cursor は 400
+        oversized_cursor = "A" * (CURSOR_MAX_LENGTH + 1)
+
+        # Act
+        response = client.get("/api/feed", params={"cursor": oversized_cursor})
+
+        # Assert
+        assert response.status_code == 400
+
+    def test_returns_400_for_a_cursor_with_an_oversized_rank(self, client: TestClient) -> None:
+        # Arrange — 受入基準: rank 部分の桁数が異常に大きい cursor は 400
+        # （int() へ渡す前に桁数で弾く）
+        raw = f"{uuid.uuid4()}:{'9' * 20}"
+        cursor = base64.urlsafe_b64encode(raw.encode()).decode("ascii").rstrip("=")
+
+        # Act
+        response = client.get("/api/feed", params={"cursor": cursor})
+
+        # Assert
+        assert response.status_code == 400
+
+
+class TestGetFeedRunReuse:
+    """cursor 無しの GET /api/feed が run を無制限に生成しないことを検証する。"""
+
+    def test_does_not_generate_a_new_run_within_the_reuse_window(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: 短時間に 2 回叩いても run は 1 つしか作られない
+        for index in range(3):
+            make_article(db_session, title=f"候補{index}", embedding=make_embedding(index))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+
+        # Act
+        first_response = client.get("/api/feed")
+        client.app.dependency_overrides[get_now] = lambda: NOW + timedelta(seconds=1)
+        second_response = client.get("/api/feed")
+
+        # Assert
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        run_count = db_session.scalar(select(func.count()).select_from(RecommendationRun))
+        assert run_count == 1
+        # 再利用時も返る items は 1 回目と同じ（rank 1 始まり）
+        first_items = first_response.json()["items"]
+        second_items = second_response.json()["items"]
+        assert [item["article_id"] for item in first_items] == [
+            item["article_id"] for item in second_items
+        ]
+        assert [item["rank"] for item in second_items] == list(range(1, len(second_items) + 1))
+
+    def test_generates_a_new_run_after_the_reuse_window_expires(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: 再利用期限を過ぎたら新しい run が作られる
+        make_article(db_session, title="候補", embedding=make_embedding(0))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+        client.get("/api/feed")
+        reuse_seconds = get_scoring_config().limits.feed_run_reuse_seconds
+
+        # Act
+        client.app.dependency_overrides[get_now] = lambda: (
+            NOW + timedelta(seconds=reuse_seconds + 1)
+        )
+        response = client.get("/api/feed")
+
+        # Assert
+        assert response.status_code == 200
+        run_count = db_session.scalar(select(func.count()).select_from(RecommendationRun))
+        assert run_count == 2
+
+    def test_always_generates_a_new_run_when_reuse_is_disabled(
+        self,
+        client: TestClient,
+        db_session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Arrange — 受入基準: feed_run_reuse_seconds=0 は常に新規生成を意味する
+        config = get_scoring_config()
+        disabled_config = config.model_copy(
+            update={"limits": config.limits.model_copy(update={"feed_run_reuse_seconds": 0})}
+        )
+        monkeypatch.setattr(
+            "techradar.api.recommendations.get_scoring_config", lambda: disabled_config
+        )
+        make_article(db_session, title="候補", embedding=make_embedding(0))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+
+        # Act
+        first_response = client.get("/api/feed")
+        second_response = client.get("/api/feed")
+
+        # Assert
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        run_count = db_session.scalar(select(func.count()).select_from(RecommendationRun))
+        assert run_count == 2

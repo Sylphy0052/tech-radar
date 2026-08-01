@@ -85,13 +85,9 @@ override はマージ主体と承認要件のみ。以下は**引き続き強制
 
 ## 注意点 (Gotcha)
 
-### pytest のテスト用DBは全セッション共有
+### pytest のテスト用DBはworktreeごとに分離済み (Issue #23)
 
-backend の pytest はセッション開始時に `techradar_test` という**固定名**のDBを DROP/CREATE する ([backend/tests/conftest.py](backend/tests/conftest.py))。worktree を分けてもDB名は同じなので、別セッションが同時に pytest を回すと互いのDBを破壊し合う。
-
-- 症状: `psycopg.errors.AdminShutdown: terminating connection due to administrator command` に続いて `column ... does not exist` が大量に出る。`check.sh` も巻き添えで落ち、commit がブロックされる
-- 対処: 大量 fail に `AdminShutdown` が混ざっていたら、実装バグと判断する前に単独で再実行する。緑になればコードは正しい。並列セッションで作業する日は pytest の実行タイミングをずらす
-- 恒久対策 (DB名を worktree ごとに分ける) は未実施
+backend の pytest はセッション開始時にテスト用DBを DROP/CREATE する ([backend/tests/conftest.py](backend/tests/conftest.py))。DB名は作業ディレクトリ（worktree）のパスから決まるハッシュ接尾辞付き (`techradar_test_<8桁hash>`) のため、worktree を分ければ別セッションが同時に pytest を回しても互いのDBを破壊し合わない（同じ worktree では毎回同じ名前になるため DB が無尽蔵に増えることもない）。
 
 ### frontend の Next.js は訓練データと異なる
 

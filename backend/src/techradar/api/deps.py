@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 from fastapi import Request
 from sqlalchemy.orm import Session
@@ -40,3 +41,13 @@ def get_current_user_id(request: Request) -> uuid.UUID:
     差し替えるだけで済むようにする。
     """
     return get_app_settings(request).default_user_id
+
+
+def get_now() -> datetime:
+    """現在時刻（UTC）を返す。
+
+    `datetime.now(UTC)` を直接呼ぶ代わりにこの依存を経由することで、テストから
+    `app.dependency_overrides[get_now]` で固定時刻に差し替えられるようにする
+    （`GET /api/feed` の run 再利用期限判定など、時刻に依存する挙動の検証に使う）。
+    """
+    return datetime.now(UTC)

@@ -8,26 +8,35 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
+import math
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from techradar.api.deps import get_app_settings, get_current_user_id, get_session
+from techradar.api.deps import get_app_settings, get_current_user_id, get_now, get_session
 from techradar.config import Settings
 from techradar.db import Article, Recommendation, RecommendationRun
 from techradar.db.enums import RecommendationMode
 from techradar.recommendation.config import get_scoring_config
-from techradar.recommendation.service import generate_recommendations, load_recommendation_page
+from techradar.recommendation.service import (
+    find_latest_run,
+    generate_recommendations,
+    load_recommendation_page,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["recommendations"])
 
 SessionDep = Annotated[Session, Depends(get_session)]
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 UserIdDep = Annotated[uuid.UUID, Depends(get_current_user_id)]
+NowDep = Annotated[datetime, Depends(get_now)]
 
 # GET /api/feed の limit の既定値・上限値は config/scoring.yaml の limits に従う
 # （運用しながら調整するため、コードに埋め込まない）。
@@ -37,6 +46,20 @@ MAX_PAGE_SIZE = _page_size_limits.max_page_size
 
 # cursor 文字列（デコード後）中の run_id と rank の区切り文字。
 _CURSOR_SEPARATOR = ":"
+
+# cursor がデコード後に含む rank 部分の桁数上限。実際の rank は
+# limits.feed_run_size（config/scoring.yaml）以下に収まるため十分な余裕を
+# 持たせつつ、極端に長い数字列を int() へ渡さないための安全弁。
+_MAX_CURSOR_RANK_DIGITS = 10
+
+# cursor（デコード前の raw 文字列: UUID 36 文字 + 区切り 1 文字 + rank 桁数上限）
+# の最大長。
+_MAX_CURSOR_RAW_LENGTH = 36 + len(_CURSOR_SEPARATOR) + _MAX_CURSOR_RANK_DIGITS
+# base64（パディング無し）へエンコードした cursor 文字列の最大長。3 バイトごとに
+# 4 文字になるため切り上げで計算する。FastAPI の `Query(max_length=...)` は超過時
+# に 422 を返すが、他の壊れた cursor と同じ 400 に統一したいため、上限チェックは
+# `_decode_cursor` 内で行い、ここでは定数としてのみ持つ。
+CURSOR_MAX_LENGTH = math.ceil(_MAX_CURSOR_RAW_LENGTH / 3) * 4
 
 
 class RecommendationItem(BaseModel):
@@ -119,16 +142,52 @@ def _encode_cursor(run_id: uuid.UUID, rank: int) -> str:
 def _decode_cursor(cursor: str) -> tuple[uuid.UUID, int]:
     """cursor 文字列を run_id と rank へ復元する。
 
-    壊れた cursor（base64 として不正・区切り文字が無い・UUID/整数として不正）は
-    すべて `InvalidCursorError` にまとめる。呼び出し側で 400 に変換する。
+    壊れた cursor（長すぎる・base64 として不正・区切り文字が無い・rank の桁数が
+    異常・UUID/整数として不正）はすべて `InvalidCursorError` にまとめる。
+    呼び出し側で 400 に変換する。
     """
+    if len(cursor) > CURSOR_MAX_LENGTH:
+        raise InvalidCursorError
+
     padding = "=" * (-len(cursor) % 4)
     try:
         raw = base64.urlsafe_b64decode(cursor + padding).decode("utf-8")
         run_id_text, rank_text = raw.rsplit(_CURSOR_SEPARATOR, 1)
-        return uuid.UUID(run_id_text), int(rank_text)
     except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
         raise InvalidCursorError from exc
+
+    # 極端に長い桁数の文字列を int() へ渡さないよう、変換前に桁数を検証する。
+    if len(rank_text.removeprefix("-")) > _MAX_CURSOR_RANK_DIGITS:
+        raise InvalidCursorError
+
+    try:
+        return uuid.UUID(run_id_text), int(rank_text)
+    except ValueError as exc:
+        raise InvalidCursorError from exc
+
+
+def _resolve_discover_run_id(
+    session: Session, settings: Settings, user_id: uuid.UUID, now: datetime
+) -> uuid.UUID:
+    """cursor 無しの `GET /api/feed` が使う run の id を決める。
+
+    直近の DISCOVER run が再利用してよい時間内（`config/scoring.yaml` の
+    `limits.feed_run_reuse_seconds`）なら新規生成せずその run を再利用し、
+    そうでなければ新規生成する。`feed_run_reuse_seconds` が 0 の場合は常に
+    新規生成する（無効化）。
+
+    古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。
+    """
+    reuse_seconds = get_scoring_config().limits.feed_run_reuse_seconds
+    if reuse_seconds > 0:
+        latest_run = find_latest_run(session, user_id, RecommendationMode.DISCOVER)
+        if latest_run is not None and now - latest_run.generated_at <= timedelta(
+            seconds=reuse_seconds
+        ):
+            return latest_run.id
+
+    result = generate_recommendations(session, user_id, RecommendationMode.DISCOVER, settings, now)
+    return result.run_id
 
 
 @router.post(
@@ -181,6 +240,7 @@ def get_feed(
     session: SessionDep,
     settings: SettingsDep,
     user_id: UserIdDep,
+    now: NowDep,
     cursor: Annotated[
         str | None, Query(description="前回レスポンスの next_cursor をそのまま渡す")
     ] = None,
@@ -188,21 +248,22 @@ def get_feed(
 ) -> FeedResponse:
     """Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。
 
-    `cursor` 省略時は新しい run を生成して DISCOVER モードの先頭ページを返す。
+    `cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の
+    `limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ
+    新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。
     `cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、
     ページ間で重複が出ないようにする（受入基準）。
+
+    古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。
     """
     if cursor is None:
-        now = datetime.now(UTC)
-        result = generate_recommendations(
-            session, user_id, RecommendationMode.DISCOVER, settings, now
-        )
-        run_id = result.run_id
+        run_id = _resolve_discover_run_id(session, settings, user_id, now)
         after_rank: int | None = None
     else:
         try:
             run_id, after_rank = _decode_cursor(cursor)
         except InvalidCursorError as exc:
+            logger.warning("cursor のデコードに失敗しました")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="cursor が不正です"
             ) from exc
@@ -211,6 +272,7 @@ def get_feed(
         # 別ユーザーの run・記事起点推薦の run（mode が違う）を指す cursor も、
         # このフィードの続きとしては無効として扱う。
         if run is None or run.user_id != user_id or run.mode != RecommendationMode.DISCOVER.value:
+            logger.warning("cursor が指す run が見つからないか一致しません: run_id=%s", run_id)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="cursor が指す推薦結果が見つかりません",

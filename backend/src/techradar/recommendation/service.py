@@ -79,6 +79,9 @@ def build_interest_profile(
     topics を集める。`settings` は他の DB 連携関数と揃えた引数だが、この関数は
     現時点では `Settings` の値を参照しない（将来 Settings 側にプロファイル関連の
     項目が増えた場合に備えて残す）。
+
+    origin ごとの重み（`user_articles.interest_weight`）と時間減衰は Phase 5
+    （#15）のスコープであり、本実装ではどちらも適用せず全記事を均等に扱う。
     """
     del settings  # 現時点では未使用（呼び出し側との引数統一のために残す）。
 
@@ -152,27 +155,30 @@ def load_candidates(
     以下を除外する。
 
     * リンク切れ記事（`is_dead`）
-    * 公開から `Settings.recommendation_max_age_days` を超えた記事
-      （`published_at` が NULL なら `fetched_at` で代替する）
+    * 公開から `config/scoring.yaml` の `freshness.max_age_days` を超えた記事
+      （`published_at` が NULL なら `fetched_at` で代替する）。freshness スコアの
+      減衰基準（`ranking.compute_freshness`）と単一の真実源を共有する
     * この user が Bad 済みの記事
     * この user が既に関心記事として登録済み（origin が manual/good/saved）の記事
     * `source_article_id`（記事起点推薦の起点記事自身）
 
-    `user_articles` / `article_feedback` / `source_registry` は候補記事数に
+    Bad 済み・登録済みの除外は、ユーザーの履歴が伸びるほど大きくなる ID 集合を
+    `NOT IN` に渡すのではなく、`article_feedback` / `user_articles` への相関
+    サブクエリ（`NOT EXISTS`）で行う。バインドパラメータ数が履歴サイズに比例して
+    増え続けるのを避けるため。
+
+    `user_articles`（is_read 判定用）と `source_registry` は候補記事数に
     関わらず 1 回ずつ取得して辞書化し、N+1 クエリを避ける。
+
+    `settings` は他の DB 連携関数と揃えた引数だが、この関数は現時点では
+    `Settings` の値を参照しない（`recommendation_max_age_days` は Issue #11 の
+    自己レビューで `scoring.yaml` の `freshness.max_age_days` に一本化し削除した）。
     """
+    del settings  # 現時点では未使用（呼び出し側との引数統一のために残す）。
+
     config = get_scoring_config()
     max_candidates = config.limits.max_candidates_per_run
-    since = now - timedelta(days=settings.recommendation_max_age_days)
-
-    bad_article_ids = set(
-        session.scalars(
-            select(ArticleFeedback.article_id).where(
-                ArticleFeedback.user_id == user_id,
-                ArticleFeedback.action == FeedbackAction.BAD.value,
-            )
-        ).all()
-    )
+    since = now - timedelta(days=config.freshness.max_age_days)
 
     origins_by_article_id: dict[uuid.UUID, set[str]] = {}
     for article_id, origin in session.execute(
@@ -180,20 +186,36 @@ def load_candidates(
     ).all():
         origins_by_article_id.setdefault(article_id, set()).add(origin)
 
-    owned_article_ids = {
-        article_id
-        for article_id, origins in origins_by_article_id.items()
-        if origins & _OWNED_ORIGIN_VALUES
-    }
-
-    excluded_article_ids = bad_article_ids | owned_article_ids
-    if source_article_id is not None:
-        excluded_article_ids = excluded_article_ids | {source_article_id}
+    bad_exists = (
+        select(ArticleFeedback.article_id)
+        .where(
+            ArticleFeedback.article_id == Article.id,
+            ArticleFeedback.user_id == user_id,
+            ArticleFeedback.action == FeedbackAction.BAD.value,
+        )
+        .correlate(Article)
+        .exists()
+    )
+    owned_exists = (
+        select(UserArticle.article_id)
+        .where(
+            UserArticle.article_id == Article.id,
+            UserArticle.user_id == user_id,
+            UserArticle.origin.in_(_OWNED_ORIGIN_VALUES),
+        )
+        .correlate(Article)
+        .exists()
+    )
 
     published_or_fetched_at = func.coalesce(Article.published_at, Article.fetched_at)
-    filters = [Article.is_dead.is_(False), published_or_fetched_at >= since]
-    if excluded_article_ids:
-        filters.append(Article.id.notin_(excluded_article_ids))
+    filters = [
+        Article.is_dead.is_(False),
+        published_or_fetched_at >= since,
+        ~bad_exists,
+        ~owned_exists,
+    ]
+    if source_article_id is not None:
+        filters.append(Article.id != source_article_id)
 
     total = session.scalar(select(func.count()).select_from(Article).where(*filters)) or 0
     articles = session.scalars(
@@ -271,6 +293,11 @@ def _build_article_based_profile(session: Session, source_article_id: uuid.UUID)
     `compute_interest_similarity` は候補に embedding が無い、またはプロファイルが
     空なら 0.0 を返す仕様のため、これは例外にはならず「一致度で差が付かない」
     挙動になる。
+
+    記事起点推薦では `known_topics` が起点記事自身の topics になるため、
+    `compute_novelty`（新規性）は「起点記事とどれだけトピックを共有していないか」
+    の裏返しとして働く。つまりここでの novelty は一般的な「ユーザーにとって
+    未知のテーマか」ではなく「起点記事と主題がどれだけ離れているか」を表す。
     """
     source_article = session.get(Article, source_article_id)
     if source_article is None:

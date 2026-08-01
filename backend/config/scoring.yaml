@@ -31,8 +31,10 @@ weights:
   novelty: 0.05
 
 penalties:
-  # Bad 済みの候補はほぼ表示させたくないため、最大寄与（重み合計 1.0）に
-  # 匹敵する満額減点にする。フィードからの除外自体はサービス層の責務
+  # 主経路は候補取得の時点（recommendation/service.py の load_candidates）で
+  # Bad 済み記事そのものを除外することであり、この減点はそこをすり抜けた場合
+  # に備える純粋関数側の防御的な多重防御（本番では通常到達しない）。到達した
+  # 場合に備え、最大寄与（重み合計 1.0）に匹敵する満額減点にしておく
   bad: 1.0
   # 既読記事の再表示は抑制するが完全排除はしない（§6.1）ため、
   # 他項目の寄与で挽回できる程度の減点に留める
@@ -47,7 +49,11 @@ authority_gate:
   min_factor: 0.2
 
 freshness:
-  # フィード条件「原則として公開から7日以内」（§6.1）と揃える
+  # フィード条件「原則として公開から7日以内」（§6.1）と揃える。候補の絞り込み
+  # （recommendation/service.py の load_candidates が since を求める基準）と
+  # freshness スコアの減衰基準（compute_freshness）の単一の真実源。
+  # 旧 Settings.recommendation_max_age_days（環境変数 RECOMMENDATION_MAX_AGE_DAYS）
+  # はここと二重管理になっていたため、Issue #11 自己レビューで廃止しこちらへ一本化した
   max_age_days: 7
 
 interest:
@@ -101,3 +107,8 @@ limits:
   # 記事起点推薦 1 回の実行で保存する件数。Discover ほど多くの候補を
   # 必要としない用途（「この記事に近い記事」）のため少なめにする
   article_based_run_size: 20
+  # cursor 無しで GET /api/feed を呼んだとき、直近の DISCOVER run をこの秒数
+  # 以内なら新規生成せず再利用する（api/recommendations.py の get_feed）。
+  # 0 は「常に新規生成する」（無効化）を意味する。古い run の削除ジョブと
+  # API のレート制限自体は別スコープ（Issue #28）
+  feed_run_reuse_seconds: 600

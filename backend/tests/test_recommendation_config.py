@@ -62,6 +62,7 @@ limits:
   max_page_size: 100
   feed_run_size: 100
   article_based_run_size: 20
+  feed_run_reuse_seconds: 600
 """
 
 

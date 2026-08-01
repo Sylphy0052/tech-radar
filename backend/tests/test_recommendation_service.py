@@ -170,7 +170,6 @@ def _reset_scoring_config_cache() -> Iterator[None]:
     get_scoring_config.cache_clear()
     yield
     get_scoring_config.cache_clear()
-    get_scoring_config.cache_clear()
 
 
 class TestLoadCandidatesExcludesBadArticles:

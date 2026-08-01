@@ -3,10 +3,11 @@
 重み・減点・フィード構成比のパラメータをコードに埋め込まず `config/scoring.yaml`
 で管理する。読み込み時に Pydantic で検証し、壊れた設定を検出する。
 
-`get_scoring_config()` は `lru_cache` 付きの遅延読み込みのため、この検証が
-実際に走るのはプロセス起動時ではなく、推薦処理が初めて呼ばれたタイミングである
-（起動時ヘルスチェックとしての導入はこの MR のスコープ外、`dedup/config.py` と
-同じ方針）。
+`get_scoring_config()` は `lru_cache` 付きの遅延読み込みで、`dedup/config.py` と
+同じ方針だが、`api/recommendations.py` がルーターのモジュールレベルで
+`get_scoring_config().limits` を読むため、実際にはアプリ起動時（ルーター import
+経由）に検証が走り fail-fast する。壊れた設定のまま起動できてしまう事態を防げる
+ため、この挙動は意図的なものとして維持する。
 """
 
 from __future__ import annotations
@@ -148,6 +149,10 @@ class LimitsConfig(BaseModel):
     feed_run_size: int = Field(ge=MIN_PAGE_SIZE)
     # 記事起点推薦 1 回の実行で保存する件数。
     article_based_run_size: int = Field(ge=MIN_PAGE_SIZE)
+    # cursor 無しで GET /api/feed を呼んだとき、直近の DISCOVER run をこの秒数
+    # 以内なら新規生成せず再利用する（`api/recommendations.py` の `get_feed`）。
+    # 0 は「常に新規生成する」（無効化）を意味する。
+    feed_run_reuse_seconds: int = Field(ge=0)
 
     @model_validator(mode="after")
     def _validate_default_within_max(self) -> LimitsConfig:
