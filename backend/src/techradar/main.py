@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     worker: JobWorker | None = None
     if settings.worker_enabled:
-        registry = create_default_registry()
+        registry = create_default_registry(settings)
         worker = JobWorker(settings=settings, registry=registry)
         await worker.start()
     app.state.job_worker = worker

@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from techradar.config import Settings, get_settings
 from techradar.db.enums import JobType
 
 
@@ -75,15 +76,31 @@ async def _crawl_sources_placeholder(context: JobContext) -> None:
     return None
 
 
-def create_default_registry() -> JobHandlerRegistry:
+def create_default_registry(settings: Settings | None = None) -> JobHandlerRegistry:
     """既定のレジストリを返す。
 
-    `crawl_sources` のみを登録する。`fetch_article` / `analyze_article` /
-    `embed_article` / `generate_feed` はまだハンドラの実装がない後続タスクの
-    担当のため、あえて登録しない。未登録種別のジョブが enqueue された場合、
-    ワーカー側で検出してリトライせず即 failed にできるようにするため
-    （登録漏れを握りつぶさない）。
+    `fetch_article` / `analyze_article` / `embed_article` は URL 登録の
+    end-to-end（Issue #12 T3）を成立させるハンドラを登録する。
+    `generate_feed` / `deduplicate_articles` はまだハンドラの実装がない
+    後続タスクの担当のため、あえて登録しない。未登録種別のジョブが
+    enqueue された場合、ワーカー側で検出してリトライせず即 failed に
+    できるようにするため（登録漏れを握りつぶさない）。
+
+    `techradar.jobs.handlers` 配下のモジュールは型注釈で `JobContext` /
+    `JobHandler` を参照するためこのモジュールを import し返す。関数内で
+    import することで、モジュール読み込み時点の循環 import を避ける。
     """
+    resolved_settings = settings or get_settings()
+
+    from techradar.jobs.handlers import (
+        make_analyze_article_handler,
+        make_embed_article_handler,
+        make_fetch_article_handler,
+    )
+
     registry = JobHandlerRegistry()
     registry.register(JobType.CRAWL_SOURCES, _crawl_sources_placeholder)
+    registry.register(JobType.FETCH_ARTICLE, make_fetch_article_handler(resolved_settings))
+    registry.register(JobType.ANALYZE_ARTICLE, make_analyze_article_handler(resolved_settings))
+    registry.register(JobType.EMBED_ARTICLE, make_embed_article_handler(resolved_settings))
     return registry
