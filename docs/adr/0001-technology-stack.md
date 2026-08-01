@@ -19,11 +19,14 @@
 
 ### LLM: Claude Code CLI を headless で使用する
 
-要約・分類・翻訳・推薦理由生成には、`claude -p --output-format json --allowedTools ""` を subprocess として実行する。
+要約・分類・翻訳・推薦理由生成には、Claude Code CLI を `--print --output-format json` で subprocess として実行する。
+ツールの無効化方法は当初 `--allowedTools ""` としていたが、実測で効果がないことが判明したため
+[ADR 0002](0002-llm-tool-isolation.md) で訂正した。
 
 - 追加の API 課金が発生しない
 - `--output-format json` により構造化出力をパースできる
-- `--allowedTools ""` でツールを全無効化する。記事本文は非信頼入力であり、`PROJECT_SPEC.md` §21 の「本文をツール実行権限のあるエージェントへ直接渡さない」を満たすために必須
+- ツールを無効化する。記事本文は非信頼入力であり、`PROJECT_SPEC.md` §21 の「本文をツール実行権限のあるエージェントへ直接渡さない」を満たすために必須。
+  **具体的な方法は [ADR 0002](0002-llm-tool-isolation.md) を参照**（`--allowedTools ""` は無効化しない）
 
 `LLMProvider` プロトコルで抽象化し、実装を差し替え可能にする。
 
