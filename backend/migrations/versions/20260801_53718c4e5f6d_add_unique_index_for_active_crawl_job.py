@@ -28,7 +28,19 @@ ACTIVE_CRAWL_JOB_PREDICATE = "type = 'crawl_sources' AND status IN ('pending', '
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
+    """Upgrade schema.
+
+    適用前提: アクティブな crawl_sources ジョブが2件以上残っている DB では、
+    CREATE UNIQUE INDEX 自体が失敗する。まさにこの Issue のレースで重複が
+    作られた後の DB がありうるため、適用が失敗した場合は
+    `SELECT id, status, created_at FROM jobs
+       WHERE type = 'crawl_sources' AND status IN ('pending', 'searching')
+       ORDER BY created_at`
+    で重複を確認し、最古の1件を残して他を failed へ倒してから再実行する。
+    ここで自動的に倒さないのは、どれを残すかが運用判断であり、
+    マイグレーションが黙ってジョブを failed にするほうが危険なため
+    （デプロイ先を持たずローカル DB 1つだけという前提。ADR 0001）。
+    """
     # 巡回ジョブの重複起動を DB 側で1件に制限する（Issue #26）。
     #
     # API 側は enqueue 前にアクティブなジョブの有無を SELECT で確認しているが、

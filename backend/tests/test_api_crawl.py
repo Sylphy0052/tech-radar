@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from fastapi import Response
 from fastapi.testclient import TestClient
+from psycopg.errors import ForeignKeyViolation
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,9 +19,10 @@ from techradar.api import crawl
 from techradar.api.crawl import CrawlRunResponse, create_crawl_run
 from techradar.api.deps import get_session
 from techradar.config import Settings
-from techradar.db.enums import JobType
-from techradar.db.models import Job
+from techradar.db.enums import JobStatus, JobType
+from techradar.db.models import ACTIVE_CRAWL_JOB_INDEX_PREDICATE, Job
 from techradar.jobs.queue import claim_next, complete, enqueue
+from techradar.jobs.status import running_status_for
 from techradar.main import create_app
 
 
@@ -222,6 +224,47 @@ class TestCreateCrawlRunUnderConcurrency:
         with pytest.raises(IntegrityError):
             enqueue(session_b, JobType.CRAWL_SOURCES, {})
 
+    def test_the_database_rejects_a_second_job_while_the_first_one_is_running(
+        self, independent_sessions: Callable[[], Session]
+    ) -> None:
+        """インデックスの述語が pending だけでなく実行中 status も覆っていること。
+
+        アプリ層の事前確認だけを通るテストでは、述語から searching が抜け落ちても
+        気付けない。DB 制約そのものが実行中ジョブを守っていることを確かめる。
+        """
+        # Arrange: 1件目を claim して searching へ遷移させ、コミットする
+        session_a = independent_sessions()
+        enqueue(session_a, JobType.CRAWL_SOURCES, {})
+        claimed = claim_next(session_a)
+        assert claimed is not None
+        assert claimed.status == running_status_for(JobType.CRAWL_SOURCES).value
+        session_a.commit()
+
+        # Act / Assert
+        session_b = independent_sessions()
+        with pytest.raises(IntegrityError):
+            enqueue(session_b, JobType.CRAWL_SOURCES, {})
+
+    def test_the_index_predicate_covers_exactly_the_statuses_the_api_treats_as_active(
+        self,
+    ) -> None:
+        """インデックスの述語とアプリ側の「アクティブ」判定がずれていないこと。
+
+        DDL の述語は文字列のため型チェックが効かず、`jobs/status.py` の写像を
+        変えても DB 側は追随しない。両者の乖離をここで検出する。
+        """
+        # Arrange
+        expected_statuses = {
+            JobStatus.PENDING.value,
+            running_status_for(JobType.CRAWL_SOURCES).value,
+        }
+
+        # Assert: アプリ側の集合と、DDL 述語に現れる status が一致する
+        assert crawl._ACTIVE_CRAWL_JOB_STATUSES == expected_statuses
+        for status_value in expected_statuses:
+            assert f"'{status_value}'" in ACTIVE_CRAWL_JOB_INDEX_PREDICATE
+        assert f"type = '{JobType.CRAWL_SOURCES.value}'" in ACTIVE_CRAWL_JOB_INDEX_PREDICATE
+
     def test_a_finished_crawl_job_does_not_block_the_next_one(
         self, independent_sessions: Callable[[], Session]
     ) -> None:
@@ -338,3 +381,26 @@ class TestCreateCrawlRunUnderConcurrency:
         session = independent_sessions()
         with pytest.raises(IntegrityError):
             create_crawl_run(session, Response(status_code=201), None)
+
+    def test_does_not_swallow_an_integrity_error_that_is_not_a_unique_violation(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """一意制約違反以外の IntegrityError は重複として握り潰さず送出すること。
+
+        すべての IntegrityError を「相手が先に積んだ」と解釈すると、外部キー違反や
+        将来追加される CHECK 制約の違反まで 200 OK に化けてしまう。
+        """
+        # Arrange: 一意制約違反ではない IntegrityError (外部キー違反) を起こさせる
+        foreign_key_violation = IntegrityError(
+            "INSERT INTO jobs ...", {}, ForeignKeyViolation("insert or update violates foreign key")
+        )
+
+        def raise_foreign_key_violation(*args: object, **kwargs: object) -> Job:
+            raise foreign_key_violation
+
+        monkeypatch.setattr(crawl, "enqueue", raise_foreign_key_violation)
+
+        # Act / Assert
+        with pytest.raises(IntegrityError) as excinfo:
+            create_crawl_run(db_session, Response(status_code=201), None)
+        assert excinfo.value is foreign_key_violation

@@ -121,6 +121,10 @@ def create_crawl_run(
     try:
         job = enqueue(session, JobType.CRAWL_SOURCES, job_payload)
     except IntegrityError as exc:
+        # 判定より先に巻き戻す。以降の問い合わせを失敗したトランザクション上で
+        # 実行させないため、また再送出する場合も呼び出し側へ中断状態の
+        # セッションを渡さないため（`api/sources.py` の `_flush_or_conflict` と同じ順序）。
+        session.rollback()
         if not is_unique_violation(exc):
             raise
         return _existing_job_response(session, response, exc)
@@ -133,13 +137,11 @@ def _existing_job_response(
 ) -> CrawlRunResponse:
     """一意制約で弾かれたとき、競合相手が積んだジョブを 200 OK として返す。
 
-    ロールバックしないと、以降の問い合わせが失敗したトランザクション上で
-    実行されてしまう。巻き戻したうえで改めてアクティブなジョブを引き直す。
-
-    相手のジョブが引き直しまでの間に完了していると、返すべきジョブが無くなる。
-    その場合は握り潰さず元の例外を送出する（重複ではなく想定外の状態のため）。
+    呼び出し側でロールバック済みであることを前提に、改めてアクティブなジョブを
+    引き直す。相手のジョブが引き直しまでの間に完了していると返すべきジョブが
+    無くなるため、その場合は握り潰さず元の例外を送出する（重複ではなく想定外の
+    状態のため）。
     """
-    session.rollback()
     active_job = _find_active_crawl_job(session)
     if active_job is None:
         raise exc
