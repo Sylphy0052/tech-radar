@@ -38,6 +38,8 @@ class CandidateSignature:
     embedding: tuple[float, ...] | None
     source_authority: float
     is_primary_source: bool
+    # フィードの多様性枠（`composition.py`）が、既選択候補とのドメイン重複判定に使う。
+    source_domain: str
     source_entity_names: tuple[str, ...]
     topics: tuple[str, ...]
     technologies: tuple[str, ...]
@@ -131,12 +133,20 @@ class NoveltySettings:
 
 @dataclass(frozen=True)
 class FeedComposition:
-    """Discover フィードの構成比の目安（`PROJECT_SPEC.md` §15）。合計は 1.0 にする。"""
+    """Discover フィードの構成比の目安（`PROJECT_SPEC.md` §15）。
+
+    比率 4 項目（`strong_interest` 〜 `diversity`）の合計は 1.0 にする。
+    枠判定用の閾値 2 項目（`composition.py` が使う）は比率合計には含めない。
+    """
 
     strong_interest: float
     primary_source: float
     exploration: float
     diversity: float
+    # 関心一致度がこの値以上なら「強い関心一致」枠とみなす（`composition.py`）。
+    strong_interest_min_similarity: float
+    # 新規性がこの値以上なら「新規テーマ探索」枠とみなす（`composition.py`）。
+    exploration_min_novelty: float
 
 
 @dataclass(frozen=True)

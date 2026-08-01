@@ -51,7 +51,12 @@ INTEREST_SETTINGS = InterestSettings(top_k=3)
 MATCH_SETTINGS = MatchSettings(partial_match_score=0.5)
 NOVELTY_SETTINGS = NoveltySettings(default_when_no_topics=0.5)
 FEED_COMPOSITION = FeedComposition(
-    strong_interest=0.55, primary_source=0.25, exploration=0.15, diversity=0.05
+    strong_interest=0.55,
+    primary_source=0.25,
+    exploration=0.15,
+    diversity=0.05,
+    strong_interest_min_similarity=0.5,
+    exploration_min_novelty=0.6,
 )
 LIMITS = RankingLimits(max_candidates_per_run=500, default_page_size=20, max_page_size=100)
 
@@ -76,6 +81,7 @@ def make_candidate(
     embedding: tuple[float, ...] | None = (1.0, 0.0, 0.0),
     source_authority: float = 0.5,
     is_primary_source: bool = False,
+    source_domain: str = "example.com",
     source_entity_names: tuple[str, ...] = (),
     topics: tuple[str, ...] = (),
     technologies: tuple[str, ...] = (),
@@ -92,6 +98,7 @@ def make_candidate(
         embedding=embedding,
         source_authority=source_authority,
         is_primary_source=is_primary_source,
+        source_domain=source_domain,
         source_entity_names=source_entity_names,
         topics=topics,
         technologies=technologies,

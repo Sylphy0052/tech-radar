@@ -53,6 +53,8 @@ feed_composition:
   primary_source: 0.25
   exploration: 0.15
   diversity: 0.05
+  strong_interest_min_similarity: 0.5
+  exploration_min_novelty: 0.6
 limits:
   max_candidates_per_run: 500
   default_page_size: 20
