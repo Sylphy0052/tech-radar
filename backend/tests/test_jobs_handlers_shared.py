@@ -13,7 +13,7 @@ from collections.abc import Iterator
 
 import pytest
 from sqlalchemy import Engine, create_engine, delete, text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from techradar.config import Settings
@@ -30,6 +30,13 @@ from techradar.jobs.handlers._shared import (
 )
 from techradar.jobs.handlers.errors import RegistrationErrorReason
 from techradar.jobs.registry import JobContext
+
+# NOT NULL 違反の SQLSTATE。伝播した例外が元の原因由来かの確認に使う。
+NOT_NULL_VIOLATION_SQLSTATE = "23502"
+
+
+class _ConnectionClosed(Exception):
+    """接続断を模した DBAPI 例外。"""
 
 
 @pytest.fixture
@@ -155,6 +162,42 @@ class TestRecordFailureAfterRollback:
                 settings=settings,
             )
 
+    def test_returns_without_raising_when_even_the_rollback_fails(
+        self, handler_session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """巻き戻し自体が失敗しても例外を外へ出さないこと。
+
+        接続が切れている場合は rollback すら通らない。ここで例外を送出すると、
+        呼び出し元が元の障害を再送出する前に別の例外へすり替わってしまう。
+        """
+        # Arrange
+        registration_id = make_registration_row(handler_session_factory)
+        settings = Settings(_env_file=None, job_max_attempts=1)
+        context = make_context(registration_id, attempts=0)
+
+        with handler_session_factory() as session:
+            with pytest.raises(DBAPIError):
+                session.execute(
+                    text(
+                        "INSERT INTO jobs (id, type, status) "
+                        "VALUES (gen_random_uuid(), NULL, 'pending')"
+                    )
+                )
+
+            def _raise_on_rollback() -> None:
+                raise OperationalError("ROLLBACK", {}, orig=_ConnectionClosed())
+
+            monkeypatch.setattr(session, "rollback", _raise_on_rollback)
+
+            # Act / Assert — 例外を送出せずに戻る
+            record_registration_failure_safely(
+                session,
+                registration_id,
+                RegistrationErrorReason.UNEXPECTED_FAILURE,
+                context=context,
+                settings=settings,
+            )
+
 
 class TestRunJobInThread:
     async def test_commits_the_operations_writes_on_success(
@@ -214,10 +257,13 @@ class TestRunJobInThread:
                 raise exc from None
 
         # Act
-        with pytest.raises(DBAPIError):
+        with pytest.raises(DBAPIError) as exc_info:
             await run_job_in_thread(context, settings, _operation)
 
-        # Assert
+        # Assert — 伝播したのは元の NOT NULL 違反そのもの（記録処理の二次エラーではない）
+        assert isinstance(exc_info.value, IntegrityError)
+        assert getattr(exc_info.value.orig, "sqlstate", None) == NOT_NULL_VIOLATION_SQLSTATE
+
         with handler_session_factory() as verify_session:
             reloaded = verify_session.get(ArticleRegistration, registration_id)
             assert reloaded is not None

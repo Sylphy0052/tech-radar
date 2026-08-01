@@ -12,7 +12,7 @@ import logging
 import uuid
 from collections.abc import Callable
 
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from techradar.config import Settings
@@ -107,18 +107,39 @@ def record_registration_failure_safely(
     巻き戻すと、この試行が途中まで書いた内容（取得できた記事や実行中 status）も消える。
     ジョブは同じ payload で再試行されるため取り直せる一方、失敗理由を残せないままだと
     登録が実行中のまま取り残されるので、記録できることを優先する。
+
+    この関数自体は決して例外を送出しない。呼び出し元は元の例外を再送出するために
+    この呼び出しの後ろへ処理を続けるため、ここで別の例外を投げると原因がすり替わる。
     """
-    if _try_record_failure(session, registration_id, reason, context=context, settings=settings):
+    first_error = _try_record_failure(
+        session, registration_id, reason, context=context, settings=settings
+    )
+    if first_error is None:
         return
 
-    session.rollback()
-    if not _try_record_failure(
-        session, registration_id, reason, context=context, settings=settings
-    ):
+    try:
+        session.rollback()
+    except DBAPIError:
+        # 接続そのものが切れている場合は巻き戻しすら通らない。記録は諦める
+        # （ジョブ側の失敗記録は `jobs.last_error` に残る）。
         logger.exception(
+            "job_handlers.failure_record_rollback_failed registration_id=%s job_id=%s",
+            registration_id,
+            context.job_id,
+        )
+        return
+
+    retry_error = _try_record_failure(
+        session, registration_id, reason, context=context, settings=settings
+    )
+    if retry_error is not None:
+        # 記録を阻んだ例外そのものを残す。ここは呼び出し元の `except` の中であり、
+        # 暗黙の例外情報は元の障害を指してしまうため、明示的に渡す。
+        logger.error(
             "job_handlers.failure_record_failed registration_id=%s job_id=%s",
             registration_id,
             context.job_id,
+            exc_info=retry_error,
         )
 
 
@@ -129,23 +150,27 @@ def _try_record_failure(
     *,
     context: JobContext,
     settings: Settings,
-) -> bool:
-    """失敗理由の記録を1度だけ試し、書けたかどうかを返す。
+) -> DBAPIError | None:
+    """失敗理由の記録を1度だけ試し、書けなかった場合はその例外を返す。
 
-    登録行が存在しない場合も「これ以上やることは無い」ため書けた扱いにする
+    握るのは DB とのやり取りに由来する例外だけにする。セッションの誤用など
+    こちらの実装バグ由来の例外まで握ると、記録できない原因が「2回とも失敗」の
+    ログ1行に丸められて追えなくなる。
+
+    登録行が存在しない場合も「これ以上やることは無い」ため成功扱いにする
     （呼び出し側に巻き戻しと再試行をさせない）。
     """
     try:
         registration = session.get(ArticleRegistration, registration_id)
         if registration is None:
             logger.warning("job_handlers.registration_missing registration_id=%s", registration_id)
-            return True
+            return None
         record_registration_failure(
             session, registration, reason, context=context, settings=settings
         )
-    except SQLAlchemyError:
-        return False
-    return True
+    except DBAPIError as exc:
+        return exc
+    return None
 
 
 async def run_job_in_thread(
