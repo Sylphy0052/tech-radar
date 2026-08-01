@@ -128,6 +128,53 @@ class TestArticle:
         assert db_session.get(Article, article.id) is not None
         assert article.is_dead is True
 
+    def test_defaults_duplicate_penalty_to_zero(self, db_session: Session):
+        # Arrange
+        article = make_article()
+
+        # Act — 代表記事（重複なし）は duplicate_of_article_id を持たない
+        db_session.add(article)
+        db_session.flush()
+        db_session.expire(article)
+
+        # Assert
+        assert article.duplicate_penalty == pytest.approx(0.0)
+        assert article.duplicate_of_article_id is None
+
+    def test_persists_duplicate_of_article_reference(self, db_session: Session):
+        # Arrange — クラスタは同じ代表記事の id でグループ化する
+        representative = make_article()
+        db_session.add(representative)
+        db_session.flush()
+        duplicate = make_article(duplicate_of_article_id=representative.id, duplicate_penalty=0.5)
+
+        # Act
+        db_session.add(duplicate)
+        db_session.flush()
+        db_session.expire(duplicate)
+
+        # Assert
+        assert duplicate.duplicate_of_article_id == representative.id
+        assert duplicate.duplicate_penalty == pytest.approx(0.5)
+
+    def test_clears_duplicate_reference_when_representative_is_deleted(self, db_session: Session):
+        # Arrange
+        representative = make_article()
+        db_session.add(representative)
+        db_session.flush()
+        duplicate = make_article(duplicate_of_article_id=representative.id)
+        db_session.add(duplicate)
+        db_session.flush()
+
+        # Act — 代表記事が削除されても重複記事自体は残り、参照だけ外れる
+        db_session.delete(representative)
+        db_session.flush()
+        db_session.expire(duplicate)
+
+        # Assert
+        assert db_session.get(Article, duplicate.id) is not None
+        assert duplicate.duplicate_of_article_id is None
+
 
 class TestUserArticle:
     def test_records_origin_and_weight(self, db_session: Session):
