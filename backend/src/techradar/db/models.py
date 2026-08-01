@@ -82,6 +82,10 @@ class Article(Base):
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIMENSIONS))
     # embedding を生成した時点の body_hash。本文が更新されたら作り直すために使う。
     embedding_body_hash: Mapped[str | None] = mapped_column(String(64))
+    # 解析した時点の body_hash。同じ本文を二度 LLM へ渡さないために使う。
+    analyzed_body_hash: Mapped[str | None] = mapped_column(String(64))
+    # 解析の進行状態（pending / analyzing / completed / failed）。
+    analysis_status: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
         # 7 日フィルターと新着順の取得で使う。
