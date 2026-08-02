@@ -165,3 +165,39 @@ class TestSourceDomainDoesNotReachTheNetwork:
         )
         jobs = db_session.scalars(select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)).all()
         assert jobs == []
+
+
+class TestInvalidSourceDomainPayload:
+    """`Job.payload` は JSONB のため文字列以外が入りうる。
+
+    API を経ずに積まれたジョブでも、絞り込み側の文字列操作で
+    `AttributeError` を起こさず「絞り込み指定なし」として続行する。
+    """
+
+    @pytest.mark.parametrize("invalid_source_domain", [123, ["example.com"], {"host": "a"}, True])
+    def test_falls_back_to_no_scoping_when_source_domain_is_not_a_string(
+        self,
+        db_session: Session,
+        settings: Settings,
+        monkeypatch: pytest.MonkeyPatch,
+        invalid_source_domain: object,
+    ) -> None:
+        # Arrange
+        candidate = CandidateArticle(
+            url="https://example.com/a",
+            title="A",
+            published_at=datetime.now(UTC),
+            collector_name="fake",
+        )
+        _patch_collect_candidates_with_collectors(
+            monkeypatch, [_FakeCollector("fake", [candidate])]
+        )
+
+        # Act
+        process_crawl_sources(
+            db_session, make_context({"source_domain": invalid_source_domain}), settings
+        )
+
+        # Assert — 絞り込みなしとして扱われ、候補がそのまま enqueue される
+        jobs = db_session.scalars(select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)).all()
+        assert [job.payload["url"] for job in jobs] == ["https://example.com/a"]

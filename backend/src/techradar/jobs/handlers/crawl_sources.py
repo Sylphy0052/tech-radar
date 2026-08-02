@@ -8,12 +8,17 @@
 
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 from sqlalchemy.orm import Session
 
 from techradar.collectors.service import collect_candidates
 from techradar.config import Settings, get_settings
 from techradar.jobs.handlers._shared import run_job_in_thread
 from techradar.jobs.registry import JobContext, JobHandler
+
+logger = logging.getLogger(__name__)
 
 
 def process_crawl_sources(session: Session, context: JobContext, settings: Settings) -> None:
@@ -30,8 +35,24 @@ def process_crawl_sources(session: Session, context: JobContext, settings: Setti
     `techradar.fetcher.fetch_resource` / `fetch_page` 経由でのみ行うため、
     `source_domain` の値が SSRF の入力として使われることはない。
     """
-    source_domain = context.payload.get("source_domain")
-    collect_candidates(session, settings=settings, source_domain=source_domain)
+    collect_candidates(session, settings=settings, source_domain=_source_domain(context.payload))
+
+
+def _source_domain(payload: dict[str, Any]) -> str | None:
+    """payload から `source_domain` を取り出す。
+
+    `Job.payload` は JSONB のため、API を経ずに積まれたジョブでは文字列以外
+    （list / int / dict）が入りうる。そのまま渡すと絞り込み側の文字列操作が
+    `AttributeError` で落ち、原因の分からない失敗としてジョブに記録される。
+    境界は API 層だけでなくジョブ実行層にも置き、型が違えば「絞り込み指定なし」
+    として扱う（巡回自体は続行してよいため、例外にはしない）。
+    """
+    raw = payload.get("source_domain")
+    if not isinstance(raw, str):
+        if raw is not None:
+            logger.warning("crawl_sources.invalid_source_domain type=%s", type(raw).__name__)
+        return None
+    return raw
 
 
 def make_crawl_sources_handler(settings: Settings | None = None) -> JobHandler:
