@@ -477,7 +477,7 @@ describe("useFeed", () => {
     expect(fetchMock).toHaveBeenCalledTimes(callCountAfterRateLimit);
   });
 
-  it("re-shows the rate limit message when loadMore is pressed during the cooldown", async () => {
+  it("re-shows the rate limit message with the remaining wait when loadMore is pressed during the cooldown", async () => {
     // Arrange — 429 のあとフィードバック送信が成功してエラー表示が消える状況
     const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
       if (init?.method === "POST") {
@@ -492,24 +492,30 @@ describe("useFeed", () => {
       return jsonResponse({ items: [itemA], next_cursor: "page-2" });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed());
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-    act(() => {
-      result.current.loadMore();
-    });
-    await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
-    act(() => {
-      result.current.applyFeedback(itemA.article_id, "good");
-    });
-    await waitFor(() => expect(result.current.error).toBeNull());
+    const clock = stubAdvanceableClock();
+    try {
+      const { result } = renderHook(() => useFeed());
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      act(() => {
+        result.current.loadMore();
+      });
+      await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
+      act(() => {
+        result.current.applyFeedback(itemA.article_id, "good");
+      });
+      await waitFor(() => expect(result.current.error).toBeNull());
 
-    // Act
-    act(() => {
-      result.current.loadMore();
-    });
+      // Act — 25 秒経過した時点で「さらに読み込む」を押す
+      clock.advance(25_000);
+      act(() => {
+        result.current.loadMore();
+      });
 
-    // Assert — 押しても何も起きないのではなく、待機中である旨を出し直す
-    expect(result.current.error).toBe("リクエストが多すぎます。約30秒後に再度お試しください。");
+      // Assert — 押しても何も起きないのではなく、残りの待ち時間を出し直す
+      expect(result.current.error).toBe("リクエストが多すぎます。約5秒後に再度お試しください。");
+    } finally {
+      clock.restore();
+    }
   });
 
   it("allows loadMore again once the Retry-After window has elapsed", async () => {

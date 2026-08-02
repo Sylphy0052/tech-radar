@@ -246,10 +246,12 @@ describe("DiscoverFeed", () => {
     render(<DiscoverFeed />);
 
     // Assert — 一時的な制限を「記事が無い」と誤って伝えない
-    await waitFor(() =>
-      expect(
-        screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
-      ).toBeInTheDocument(),
+    await waitFor(
+      () =>
+        expect(
+          screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
+        ).toBeInTheDocument(),
+      { timeout: 5_000 },
     );
     expect(screen.queryByText("表示できる記事がありません。")).not.toBeInTheDocument();
   });
@@ -274,10 +276,13 @@ describe("DiscoverFeed", () => {
     act(() => {
       triggerIntersection(true);
     });
-    await waitFor(() =>
-      expect(
-        screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
-      ).toBeInTheDocument(),
+    await waitFor(
+      () =>
+        expect(
+          screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
+        ).toBeInTheDocument(),
+      // 既定の 1 秒では、テストファイル並列実行で負荷が高いときに間に合わないことがある。
+      { timeout: 5_000 },
     );
     const callCountAfterRateLimit = fetchMock.mock.calls.length;
     act(() => {

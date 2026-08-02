@@ -7,7 +7,7 @@ import { getFeed } from "@/lib/feed";
 import type { FeedItem } from "@/lib/feed";
 import { deleteFeedback, sendFeedback } from "@/lib/feedback";
 import type { ArticleFeedback, BadReason, FeedbackAction } from "@/lib/feedback";
-import { getRequestErrorMessage } from "@/lib/request-error-message";
+import { getRateLimitMessage, getRequestErrorMessage } from "@/lib/request-error-message";
 
 interface UseFeedResult {
   items: FeedItem[];
@@ -27,32 +27,19 @@ interface UseFeedResult {
  */
 const DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 60;
 
-/** 追加ロードを止めている間、なぜ止まっているかを再提示するための保持値。 */
-interface RateLimitCooldown {
-  /** 追加ロードを再開してよい時刻（epoch ミリ秒）。 */
-  until: number;
-  message: string;
-}
-
 /**
- * 429 を受けたときだけ、追加ロードを止める期限を更新する。
+ * 429 を受けたときだけ、追加ロードを止める期限（epoch ミリ秒）を更新する。
  *
  * 無限スクロールはセンチネルが可視になるたびに `loadMore` を呼ぶため、
  * 制限に掛かった直後にそのまま再試行すると残りの許容回数を食い潰し、
  * 待機時間だけが伸びていく。
  */
-function applyRateLimitCooldown(
-  cooldownRef: { current: RateLimitCooldown | null },
-  error: unknown,
-): void {
+function applyRateLimitCooldown(untilRef: { current: number }, error: unknown): void {
   if (!isRateLimitError(error)) {
     return;
   }
   const waitSeconds = error.retryAfterSeconds ?? DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS;
-  cooldownRef.current = {
-    until: Date.now() + waitSeconds * 1000,
-    message: getRequestErrorMessage(error),
-  };
+  untilRef.current = Date.now() + waitSeconds * 1000;
 }
 
 /** 既存項目と新規項目を article_id で重複排除しながら連結する。 */
@@ -102,8 +89,8 @@ export function useFeed(): UseFeedResult {
   const nextCursorRef = useRef<string | null>(null);
   const isLoadingMoreRef = useRef(false);
 
-  // レート制限（429）を受けたあとのクールダウン。解除後も残るが、期限を過ぎていれば無視される。
-  const rateLimitCooldownRef = useRef<RateLimitCooldown | null>(null);
+  // レート制限（429）を受けたあと、追加ロードを再開してよい時刻（epoch ミリ秒）。
+  const rateLimitedUntilRef = useRef(0);
 
   // 送信中（pending）の article_id 集合。同じボタンを再レンダリングを挟まず
   // 連打すると、itemsRef がまだ更新されていない古い feedback を読んでしまい、
@@ -166,11 +153,11 @@ export function useFeed(): UseFeedResult {
     if (nextCursorRef.current === null || isLoadingMoreRef.current) {
       return;
     }
-    const cooldown = rateLimitCooldownRef.current;
-    if (cooldown !== null && Date.now() < cooldown.until) {
+    const remainingMs = rateLimitedUntilRef.current - Date.now();
+    if (remainingMs > 0) {
       // レート制限中は追加ロードを行わない。他の操作の成功でエラー表示が消えていても
-      // 「押しても何も起きない」状態にならないよう、待機中である旨を出し直す。
-      setError(cooldown.message);
+      // 「押しても何も起きない」状態にならないよう、残り時間を計算し直して出す。
+      setError(getRateLimitMessage(Math.ceil(remainingMs / 1000)));
       return;
     }
     const cursor = nextCursorRef.current;
@@ -190,7 +177,7 @@ export function useFeed(): UseFeedResult {
         if (!isMountedRef.current) {
           return;
         }
-        applyRateLimitCooldown(rateLimitCooldownRef, err);
+        applyRateLimitCooldown(rateLimitedUntilRef, err);
         setError(getRequestErrorMessage(err));
       })
       .finally(() => {

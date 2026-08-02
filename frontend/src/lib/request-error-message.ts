@@ -14,8 +14,12 @@ const RATE_LIMIT_MESSAGE = "リクエストが多すぎます。しばらくし�
 
 const SERVER_ERROR_STATUS_THRESHOLD = 500;
 
-/** レート制限（429）は通信障害ではなく意図的な拒否なので、待てば回復すると伝える。 */
-function getRateLimitMessage(retryAfterSeconds: number | null): string {
+/**
+ * レート制限（429）は通信障害ではなく意図的な拒否なので、待てば回復すると伝える。
+ *
+ * 待機中に再提示する呼び出し側（`useFeed`）が残り秒数を計算し直して使うため export する。
+ */
+export function getRateLimitMessage(retryAfterSeconds: number | null): string {
   // 0 秒（境界ちょうどで弾かれた場合）は「約0秒後」が不自然なので秒数を出さない。
   if (retryAfterSeconds === null || retryAfterSeconds <= 0) {
     return RATE_LIMIT_MESSAGE;

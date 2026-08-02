@@ -94,7 +94,8 @@ describe("apiFetch", () => {
     ["a negative value", "-1"],
     ["a hexadecimal notation", "0x1e"],
     ["an exponential notation", "1e2"],
-    ["a value beyond the accepted upper bound", "999999999"],
+    ["a value just beyond the accepted upper bound", "301"],
+    ["a value far beyond the accepted upper bound", "999999999"],
   ])("leaves retryAfterSeconds null for %s in Retry-After", async (_label, headerValue) => {
     // Arrange
     vi.stubGlobal(
@@ -110,6 +111,20 @@ describe("apiFetch", () => {
 
     // Act / Assert
     await expect(apiFetch("/api/feed")).rejects.toMatchObject({ retryAfterSeconds: null });
+  });
+
+  it("keeps a Retry-After value exactly at the accepted upper bound", async () => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response("too many requests", { status: 429, headers: { "Retry-After": "300" } }),
+      ),
+    );
+
+    // Act / Assert
+    await expect(apiFetch("/api/feed")).rejects.toMatchObject({ retryAfterSeconds: 300 });
   });
 
   it("leaves retryAfterSeconds null when the Retry-After header is not delta-seconds", async () => {
