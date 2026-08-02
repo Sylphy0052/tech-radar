@@ -55,6 +55,18 @@
         "title": "ArticleFeedbackResponse",
         "type": "object"
       },
+      "ArticleOrigin": {
+        "description": "関心記事に追加された経路（`PROJECT_SPEC.md` §7.1 の重み表に対応）。",
+        "enum": [
+          "manual",
+          "good",
+          "saved",
+          "read_full",
+          "clicked"
+        ],
+        "title": "ArticleOrigin",
+        "type": "string"
+      },
       "ArticleRecommendationsResponse": {
         "description": "記事起点推薦（`POST /api/articles/{article_id}/recommendations`）のレスポンス。",
         "properties": {
@@ -296,6 +308,166 @@
           "brave_search_enabled"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "InterestArticleItem": {
+        "description": "関心記事一覧（`GET /api/articles`）1 件のレスポンス（`PROJECT_SPEC.md` §6.3）。",
+        "properties": {
+          "article_id": {
+            "format": "uuid",
+            "title": "Article Id",
+            "type": "string"
+          },
+          "canonical_url": {
+            "title": "Canonical Url",
+            "type": "string"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "is_primary_source": {
+            "title": "Is Primary Source",
+            "type": "boolean"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/ArticleOrigin"
+          },
+          "original_url": {
+            "title": "Original Url",
+            "type": "string"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "registered_at": {
+            "format": "date-time",
+            "title": "Registered At",
+            "type": "string"
+          },
+          "source_domain": {
+            "title": "Source Domain",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topics": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "translated_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Translated Title"
+          }
+        },
+        "required": [
+          "article_id",
+          "origin",
+          "registered_at",
+          "title",
+          "translated_title",
+          "canonical_url",
+          "original_url",
+          "source_domain",
+          "language",
+          "topics",
+          "domain",
+          "category",
+          "content_type",
+          "is_primary_source",
+          "published_at"
+        ],
+        "title": "InterestArticleItem",
+        "type": "object"
+      },
+      "InterestArticleListResponse": {
+        "description": "関心記事一覧のレスポンス。",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InterestArticleItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "InterestArticleListResponse",
         "type": "object"
       },
       "JobResponse": {
@@ -780,6 +952,221 @@
   "openapi": "3.1.0",
   "paths": {
     "/api/articles": {
+      "get": {
+        "description": "関心記事一覧を返す（`PROJECT_SPEC.md` §6.3）。\n\n手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）\n降順で返す。タイブレークに `user_articles.id` を使い、cursor はこの2つの組から作る。",
+        "operationId": "list_interest_articles_api_articles_get",
+        "parameters": [
+          {
+            "description": "登録方法。複数指定可",
+            "in": "query",
+            "name": "origin",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/ArticleOrigin"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "登録方法。複数指定可",
+              "title": "Origin"
+            }
+          },
+          {
+            "description": "ジャンル大分類",
+            "in": "query",
+            "name": "domain",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ジャンル大分類",
+              "title": "Domain"
+            }
+          },
+          {
+            "description": "ジャンル中分類",
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ジャンル中分類",
+              "title": "Category"
+            }
+          },
+          {
+            "description": "情報源",
+            "in": "query",
+            "name": "source_domain",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "情報源",
+              "title": "Source Domain"
+            }
+          },
+          {
+            "description": "言語",
+            "in": "query",
+            "name": "language",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "言語",
+              "title": "Language"
+            }
+          },
+          {
+            "description": "登録日時の期間（下限、含む）",
+            "in": "query",
+            "name": "registered_from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "登録日時の期間（下限、含む）",
+              "title": "Registered From"
+            }
+          },
+          {
+            "description": "登録日時の期間（上限、含む）",
+            "in": "query",
+            "name": "registered_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "登録日時の期間（上限、含む）",
+              "title": "Registered To"
+            }
+          },
+          {
+            "description": "公式 / 非公式",
+            "in": "query",
+            "name": "is_primary_source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "公式 / 非公式",
+              "title": "Is Primary Source"
+            }
+          },
+          {
+            "description": "前回レスポンスの next_cursor をそのまま渡す",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "前回レスポンスの next_cursor をそのまま渡す",
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterestArticleListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Interest Articles",
+        "tags": [
+          "articles"
+        ]
+      },
       "post": {
         "description": "URL を登録し、記事取得ジョブを積む。\n\n同じ URL（正規化後）を何度も登録しても fetch ジョブを積み増さないよう、\n既存登録があればそれをそのまま返す。",
         "operationId": "create_article_registration_api_articles_post",
@@ -961,6 +1348,43 @@
         "summary": "Create Article Feedback",
         "tags": [
           "feedback"
+        ]
+      }
+    },
+    "/api/articles/{article_id}/interest": {
+      "delete": {
+        "description": "記事を関心記事一覧から除外する。\n\n`user_articles` の該当行を削除するだけで、`article_feedback` には触れない\n（Bad フィードバックも付けない）。「興味がない」（Bad）と「間違って登録した」\n（一覧からの除外）は別の意思表示のため区別する（Issue #14 ヒアリング済み決定事項）。",
+        "operationId": "delete_interest_article_api_articles__article_id__interest_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "article_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Article Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Interest Article",
+        "tags": [
+          "articles"
         ]
       }
     },
