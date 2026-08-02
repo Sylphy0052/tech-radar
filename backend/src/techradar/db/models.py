@@ -183,7 +183,22 @@ class RecommendationRun(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    __table_args__ = (Index("ix_recommendation_runs_user_id", "user_id"),)
+    # 直近 run の再利用判定（`recommendation.service.build_latest_run_select`）は
+    # user_id + mode で絞って generated_at 降順の先頭を取るため、ソート順まで
+    # 含めた複合インデックスにする。user_id 単独のインデックスはこの前方一致で
+    # 代替できるため持たない（Issue #32）。
+    # 保持期間ジョブ（`jobs.handlers.purge_recommendation_runs`）の DELETE は
+    # user_id で絞らず generated_at だけで範囲を切るため、単独のインデックスを別に持つ。
+    __table_args__ = (
+        Index(
+            "ix_recommendation_runs_user_id_mode_generated_at",
+            "user_id",
+            "mode",
+            text("generated_at DESC"),
+            text("id DESC"),
+        ),
+        Index("ix_recommendation_runs_generated_at", "generated_at"),
+    )
 
 
 class Recommendation(Base):

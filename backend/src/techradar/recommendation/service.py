@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from techradar.config import Settings
@@ -417,13 +417,24 @@ def load_recommendation_page(
     return tuple((recommendation, article) for recommendation, article in rows)
 
 
-def find_latest_run(
-    session: Session, user_id: uuid.UUID, mode: RecommendationMode
-) -> RecommendationRun | None:
-    """その user の最新 run（`generated_at` 降順、同値は `id` 降順）を返す。"""
-    return session.scalars(
+def build_latest_run_select(
+    user_id: uuid.UUID, mode: RecommendationMode
+) -> Select[tuple[RecommendationRun]]:
+    """最新 run を1件取る SELECT 文を組み立てる。
+
+    `find_latest_run` から分離しているのは、実行計画を検証するテストが実際に
+    発行される文と同じものを見られるようにするため（Issue #32）。
+    """
+    return (
         select(RecommendationRun)
         .where(RecommendationRun.user_id == user_id, RecommendationRun.mode == mode.value)
         .order_by(RecommendationRun.generated_at.desc(), RecommendationRun.id.desc())
         .limit(1)
-    ).first()
+    )
+
+
+def find_latest_run(
+    session: Session, user_id: uuid.UUID, mode: RecommendationMode
+) -> RecommendationRun | None:
+    """その user の最新 run（`generated_at` 降順、同値は `id` 降順）を返す。"""
+    return session.scalars(build_latest_run_select(user_id, mode)).first()
