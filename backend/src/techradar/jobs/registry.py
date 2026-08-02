@@ -72,7 +72,8 @@ def create_default_registry(settings: Settings | None = None) -> JobHandlerRegis
     `crawl_sources` / `fetch_article` / `analyze_article` / `embed_article` は
     巡回から URL 登録の end-to-end（Issue #9, Issue #12 T3）までを成立させる
     ハンドラを登録する。`generate_feed` / `deduplicate_articles` はまだハンドラの
-    実装がない後続タスクの担当のため、あえて登録しない。未登録種別のジョブが
+    実装がない後続タスクの担当のため、あえて登録しない。`purge_operation_logs`
+    は巡回の完了時に積まれる保守ジョブ（Issue #19）として登録する。未登録種別のジョブが
     enqueue された場合、ワーカー側で検出してリトライせず即 failed に
     できるようにするため（登録漏れを握りつぶさない）。
 
@@ -87,6 +88,7 @@ def create_default_registry(settings: Settings | None = None) -> JobHandlerRegis
         make_crawl_sources_handler,
         make_embed_article_handler,
         make_fetch_article_handler,
+        make_purge_operation_logs_handler,
     )
 
     registry = JobHandlerRegistry()
@@ -94,4 +96,7 @@ def create_default_registry(settings: Settings | None = None) -> JobHandlerRegis
     registry.register(JobType.FETCH_ARTICLE, make_fetch_article_handler(resolved_settings))
     registry.register(JobType.ANALYZE_ARTICLE, make_analyze_article_handler(resolved_settings))
     registry.register(JobType.EMBED_ARTICLE, make_embed_article_handler(resolved_settings))
+    registry.register(
+        JobType.PURGE_OPERATION_LOGS, make_purge_operation_logs_handler(resolved_settings)
+    )
     return registry
