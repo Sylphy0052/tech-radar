@@ -26,6 +26,28 @@ describe("getRequestErrorMessage", () => {
     expect(message).toBe("通信に失敗しました。しばらくしてから再度お試しください。");
   });
 
+  it("returns a rate limit message with the wait time for a 429 ApiError carrying Retry-After", () => {
+    // Arrange
+    const error = new ApiError(429, "too many requests", 30);
+
+    // Act
+    const message = getRequestErrorMessage(error);
+
+    // Assert
+    expect(message).toBe("リクエストが多すぎます。約30秒後に再度お試しください。");
+  });
+
+  it("returns a rate limit message without a wait time when Retry-After is missing", () => {
+    // Arrange
+    const error = new ApiError(429, "too many requests");
+
+    // Act
+    const message = getRequestErrorMessage(error);
+
+    // Assert
+    expect(message).toBe("リクエストが多すぎます。しばらくしてから再度お試しください。");
+  });
+
   it("returns a network error message for a non-ApiError (e.g. fetch network failure)", () => {
     // Arrange
     const error = new TypeError("Failed to fetch");
