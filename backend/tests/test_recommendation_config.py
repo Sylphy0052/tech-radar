@@ -90,6 +90,12 @@ clustering:
 interest_timeline:
   default_weeks: 12
   max_weeks: 52
+interest_summary:
+  max_genres: 20
+  max_technologies: 20
+  max_suppressed_topics: 20
+  max_content_types: 20
+  max_difficulties: 20
 """
 
 

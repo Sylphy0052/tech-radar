@@ -43,4 +43,18 @@ describe("Home", () => {
       "/articles",
     );
   });
+
+  it("renders a link to the interest analysis page", () => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null })),
+    );
+
+    // Act
+    render(<Home />);
+
+    // Assert
+    expect(screen.getByRole("link", { name: "関心分析を見る" })).toHaveAttribute("href", "/interests");
+  });
 });

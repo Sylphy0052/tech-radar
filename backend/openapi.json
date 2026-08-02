@@ -520,6 +520,208 @@
         "title": "InterestClusterListResponse",
         "type": "object"
       },
+      "InterestContentTypeItem": {
+        "description": "記事の性質（`articles.content_type`）別の件数 1 件。",
+        "properties": {
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "content_type",
+          "count"
+        ],
+        "title": "InterestContentTypeItem",
+        "type": "object"
+      },
+      "InterestDifficultyItem": {
+        "description": "難易度（`articles.difficulty`）別の件数 1 件。",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "difficulty": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Difficulty"
+          }
+        },
+        "required": [
+          "difficulty",
+          "count"
+        ],
+        "title": "InterestDifficultyItem",
+        "type": "object"
+      },
+      "InterestFeedbackRatio": {
+        "description": "action 別のフィードバック件数（`GET /api/interests/summary` 用）。",
+        "properties": {
+          "bad_count": {
+            "title": "Bad Count",
+            "type": "integer"
+          },
+          "good_count": {
+            "title": "Good Count",
+            "type": "integer"
+          },
+          "save_count": {
+            "title": "Save Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "good_count",
+          "bad_count",
+          "save_count"
+        ],
+        "title": "InterestFeedbackRatio",
+        "type": "object"
+      },
+      "InterestGenreItem": {
+        "description": "ジャンル（`articles.domain`）単位の関心度 1 件。\n\n他の内容分布系（technologies / content_types / difficulties）と異なり\ngood/save に絞らず、`negative_count`（Bad の件数）も併せて返す。「抑制中の\nジャンル」（`suppressed_topics`、topic 粒度）とは別軸で、domain 粒度でも\nGood/Bad の傾向を見たいという要求に応えるため（Issue #16）。",
+        "properties": {
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "negative_count": {
+            "title": "Negative Count",
+            "type": "integer"
+          },
+          "positive_count": {
+            "title": "Positive Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "domain",
+          "positive_count",
+          "negative_count"
+        ],
+        "title": "InterestGenreItem",
+        "type": "object"
+      },
+      "InterestPrimarySourceRatio": {
+        "description": "一次情報比率（`articles.is_primary_source`）。",
+        "properties": {
+          "primary_count": {
+            "title": "Primary Count",
+            "type": "integer"
+          },
+          "secondary_count": {
+            "title": "Secondary Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "primary_count",
+          "secondary_count"
+        ],
+        "title": "InterestPrimarySourceRatio",
+        "type": "object"
+      },
+      "InterestSummaryResponse": {
+        "description": "`GET /api/interests/summary` のレスポンス（関心分析画面向け、Issue #16）。",
+        "properties": {
+          "content_types": {
+            "items": {
+              "$ref": "#/components/schemas/InterestContentTypeItem"
+            },
+            "title": "Content Types",
+            "type": "array"
+          },
+          "difficulties": {
+            "items": {
+              "$ref": "#/components/schemas/InterestDifficultyItem"
+            },
+            "title": "Difficulties",
+            "type": "array"
+          },
+          "feedback_ratio": {
+            "$ref": "#/components/schemas/InterestFeedbackRatio"
+          },
+          "genres": {
+            "items": {
+              "$ref": "#/components/schemas/InterestGenreItem"
+            },
+            "title": "Genres",
+            "type": "array"
+          },
+          "primary_source_ratio": {
+            "$ref": "#/components/schemas/InterestPrimarySourceRatio"
+          },
+          "suppressed_topics": {
+            "items": {
+              "$ref": "#/components/schemas/SuppressedTopicItem"
+            },
+            "title": "Suppressed Topics",
+            "type": "array"
+          },
+          "technologies": {
+            "items": {
+              "$ref": "#/components/schemas/InterestTechnologyItem"
+            },
+            "title": "Technologies",
+            "type": "array"
+          }
+        },
+        "required": [
+          "genres",
+          "feedback_ratio",
+          "technologies",
+          "primary_source_ratio",
+          "content_types",
+          "difficulties",
+          "suppressed_topics"
+        ],
+        "title": "InterestSummaryResponse",
+        "type": "object"
+      },
+      "InterestTechnologyItem": {
+        "description": "技術タグ（`articles.technologies`）単位の関心記事件数 1 件。",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "technology": {
+            "title": "Technology",
+            "type": "string"
+          }
+        },
+        "required": [
+          "technology",
+          "count"
+        ],
+        "title": "InterestTechnologyItem",
+        "type": "object"
+      },
       "InterestTimelineBucket": {
         "description": "タイムラインの 1 週バケット。",
         "properties": {
@@ -1072,6 +1274,30 @@
           }
         },
         "title": "SourceUpdate",
+        "type": "object"
+      },
+      "SuppressedTopicItem": {
+        "description": "抑制中のトピック 1 件（`user_topic_preferences.negative_weight > 0`）。\n\n抑制ロジック（`interest/topics.py` の `compute_negative_weight`）は\ndomain ではなく topic 粒度で動くため、ここも topic 粒度で返す。",
+        "properties": {
+          "effective_weight": {
+            "title": "Effective Weight",
+            "type": "number"
+          },
+          "negative_weight": {
+            "title": "Negative Weight",
+            "type": "number"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "negative_weight",
+          "effective_weight"
+        ],
+        "title": "SuppressedTopicItem",
         "type": "object"
       },
       "ValidationError": {
@@ -1859,6 +2085,28 @@
           }
         },
         "summary": "List Interest Clusters",
+        "tags": [
+          "interests"
+        ]
+      }
+    },
+    "/api/interests/summary": {
+      "get": {
+        "description": "関心分析画面向けのサマリーを返す（`PROJECT_SPEC.md` §7, §8, Issue #16）。\n\n集計元は `article_feedback JOIN articles`（`user_articles` は使わない）。\nGood/Bad 比率は action 別の件数をそのまま返すが、内容分布系（技術・一次\n情報比率・content_type・難易度）は `af.action IN ('good', 'save')` に\n絞って集計する（Bad を付けた記事の属性まで「関心」として数えると実態と\nずれるため）。ジャンル別関心度だけは例外で、good/save の positive_count に\n加えて bad の negative_count も返す（`InterestGenreItem` docstring 参照）。\n\n抑制中のトピックは `user_topic_preferences.negative_weight > 0` の行を返す。\n抑制ロジック（`interest/topics.py`）が domain ではなく topic 粒度で動くため、\nここも topic 粒度で返す（`GET /api/interests` と同じ ORM クエリ）。\n\n集計は SQL 側で完結させ、Python へ全件ロードしない（`/timeline` と同じ方針）。\nデータが 1 件も無いときは各リストが空配列、`feedback_ratio` /\n`primary_source_ratio` は全項目 0 になる（GROUP BY 無しの集約クエリは\n行が無くても必ず 1 行返るため、例外にはならない）。",
+        "operationId": "get_interest_summary_api_interests_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterestSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Interest Summary",
         "tags": [
           "interests"
         ]
