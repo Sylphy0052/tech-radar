@@ -7,6 +7,7 @@ Good / Bad / 保存の意思表示を記録する。`article_feedback` は 1 ユ
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime
 from typing import Annotated
@@ -21,6 +22,8 @@ from techradar.api.deps import get_current_user_id, get_session
 from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction
 from techradar.db.errors import is_unique_violation
 from techradar.db.models import Article, ArticleFeedback, UserArticle
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/articles", tags=["feedback"])
 
@@ -128,7 +131,13 @@ def _upsert_feedback(
         # 同時リクエストで既に他方が挿入済み。既存行を読み直して更新する。
         feedback = session.get(ArticleFeedback, (user_id, article_id))
         if feedback is None:
-            # 一意制約違反の直後のため理論上ここには来ない。
+            # 一意制約違反の直後のため理論上ここには来ない。到達した場合は
+            # 元の IntegrityError のまま 500 になるので、原因を追えるように
+            # 対象を記録しておく。
+            logger.error(
+                "一意制約違反の後に対象のフィードバックを再取得できませんでした: article_id=%s",
+                article_id,
+            )
             raise
         feedback.action = payload.action.value
         feedback.reason = reason_value
@@ -180,7 +189,12 @@ def _upsert_owned_user_article(
                 )
             )
             if existing is None:
-                # 一意制約違反の直後のため理論上ここには来ない。
+                # 一意制約違反の直後のため理論上ここには来ない。`_upsert_feedback`
+                # と同じく、到達した場合に原因を追えるよう対象を記録する。
+                logger.error(
+                    "一意制約違反の後に対象の関心記事を再取得できませんでした: article_id=%s",
+                    article_id,
+                )
                 raise
         else:
             return

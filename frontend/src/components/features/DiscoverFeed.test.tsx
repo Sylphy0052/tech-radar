@@ -200,6 +200,32 @@ describe("DiscoverFeed", () => {
     );
   });
 
+  it("keeps loading the next page when a page is empty but more pages remain", async () => {
+    // Arrange — ページ内が全件 Bad だと items が空でも next_cursor は返る
+    // （バックエンドは cursor を除外前の rank から計算するため）。
+    const page2 = makeItems(2, "page2");
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("cursor=page-2")) {
+        return jsonResponse({ items: page2, next_cursor: null });
+      }
+      return jsonResponse({ items: [], next_cursor: "page-2" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<DiscoverFeed />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "さらに読み込む" })).toBeInTheDocument(),
+    );
+
+    // Assert — 空ページを「記事がありません」で打ち切らない
+    expect(screen.queryByText("表示できる記事がありません。")).not.toBeInTheDocument();
+
+    // Act — 続きを読む手段が残っている
+    fireEvent.click(screen.getByRole("button", { name: "さらに読み込む" }));
+
+    // Assert
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+  });
+
   it("marks the Good button as pressed optimistically when clicked", async () => {
     // Arrange
     const items = makeItems(1, "only");

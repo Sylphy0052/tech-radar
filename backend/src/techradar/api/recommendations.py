@@ -340,6 +340,11 @@ def get_feed(
     `cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、
     ページ間で重複が出ないようにする（受入基準）。
 
+    `next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で
+    cursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が
+    非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで
+    終端と判断せず、`next_cursor` が null になるまで辿ること。
+
     古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。
     """
     if cursor is None:

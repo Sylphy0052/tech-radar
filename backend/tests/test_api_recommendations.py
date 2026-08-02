@@ -421,6 +421,35 @@ class TestGetFeedRunReuse:
         assert run_count == 1
         assert second_response.json()["items"] == []
 
+    def test_returns_a_next_cursor_even_when_every_item_on_the_page_is_badded(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """API 契約: ページ内が全件 Bad だと items は空でも next_cursor は返る。
+
+        `next_cursor` は Bad 除外より前の行から計算する（除外の有無で cursor が
+        巻き戻らないようにするため）。クライアントは items の空だけで終端と判断
+        してはならない。
+        """
+        # Arrange — limit=1 で 2 ページぶんの候補を用意し、1 ページ目だけ Bad にする
+        for index in range(2):
+            make_article(db_session, title=f"候補{index}", embedding=make_embedding(index))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+        first_response = client.get("/api/feed", params={"limit": 1})
+        first_items = first_response.json()["items"]
+        assert len(first_items) == 1
+        assert first_response.json()["next_cursor"] is not None
+
+        # Act — 1 ページ目の記事を Bad にしてから同じページを読み直す
+        client.post(
+            f"/api/articles/{first_items[0]['article_id']}/feedback", json={"action": "bad"}
+        )
+        second_response = client.get("/api/feed", params={"limit": 1})
+
+        # Assert — items は空だが、次ページを辿るための cursor は残る
+        body = second_response.json()
+        assert body["items"] == []
+        assert body["next_cursor"] is not None
+
     def test_generates_a_new_run_after_the_reuse_window_expires(
         self, client: TestClient, db_session: Session
     ) -> None:
