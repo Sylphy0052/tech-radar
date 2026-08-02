@@ -260,6 +260,35 @@ describe("useFeed", () => {
     );
   });
 
+  it("ignores a second removeFeedback call on the same article while the request is in flight", async () => {
+    // Arrange — applyFeedback と同じ pending ガードが removeFeedback にも
+    // 効いていることを確認する。
+    const withFeedback = makeItem({
+      article_id: itemA.article_id,
+      feedback: { action: "save", reason: null, created_at: "2026-08-01T00:00:00Z" },
+    });
+    let deleteCallCount = 0;
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        deleteCallCount += 1;
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse({ items: [withFeedback], next_cursor: null });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useFeed());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act — 再レンダリングを挟まず、同じ articleId に対して連続で removeFeedback を呼ぶ
+    act(() => {
+      result.current.removeFeedback(itemA.article_id);
+      result.current.removeFeedback(itemA.article_id);
+    });
+
+    // Assert — 送信中の 2 回目は無視され、DELETE は 1 回だけ送信される
+    await waitFor(() => expect(deleteCallCount).toBe(1));
+  });
+
   it("does nothing when removeFeedback is called on an article without feedback", async () => {
     // Arrange
     const fetchMock = stubFeedPages();
@@ -300,6 +329,64 @@ describe("useFeed", () => {
     // Assert
     await waitFor(() => expect(result.current.error).not.toBeNull());
     expect(result.current.items[0]?.feedback).toEqual(withFeedback.feedback);
+  });
+
+  it("ignores a second click on the same article while a feedback request is in flight (G-1)", async () => {
+    // Arrange — 既に good が付いている記事に対し、1 回目のクリックで取り消し（DELETE）が
+    // 走っている最中に、再レンダリングを挟まず同じ Good ボタンをもう一度押す想定。
+    const withFeedback = makeItem({
+      article_id: itemA.article_id,
+      feedback: { action: "good", reason: null, created_at: "2026-08-01T00:00:00Z" },
+    });
+    let deleteCallCount = 0;
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        deleteCallCount += 1;
+        if (deleteCallCount > 1) {
+          // 既に削除済みのものへの 2 回目の DELETE はサーバー側で 404 になる想定。
+          // 修正前の実装ではこの 404 が catch のロールバックを誘発し、
+          // 消したはずの feedback が復活してしまっていた。
+          return new Response("not found", { status: 404 });
+        }
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse({ items: [withFeedback], next_cursor: null });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useFeed());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act — 再レンダリングを挟まず、同じ articleId に対して連続で applyFeedback を呼ぶ
+    act(() => {
+      result.current.applyFeedback(itemA.article_id, "good");
+      result.current.applyFeedback(itemA.article_id, "good");
+    });
+
+    // Assert — 送信中の 2 回目は無視され、DELETE は 1 回だけ送信される
+    await waitFor(() => expect(deleteCallCount).toBe(1));
+    expect(result.current.items[0]?.feedback).toBeNull();
+    expect(result.current.error).toBeNull();
+  });
+
+  it("keeps the loadMore reference stable while a fetch is in flight (G-2)", async () => {
+    // Arrange
+    stubFeedPages();
+    const { result } = renderHook(() => useFeed());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    const loadMoreBeforeFetch = result.current.loadMore;
+
+    // Act
+    act(() => {
+      result.current.loadMore();
+    });
+    const loadMoreDuringFetch = result.current.loadMore;
+    await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
+    const loadMoreAfterFetch = result.current.loadMore;
+
+    // Assert — isLoadingMore / nextCursor の変化のたびに参照が変わっていないこと
+    // （変わると呼び出し側の useEffect が毎回 IntersectionObserver を作り直してしまう）
+    expect(loadMoreDuringFetch).toBe(loadMoreBeforeFetch);
+    expect(loadMoreAfterFetch).toBe(loadMoreBeforeFetch);
   });
 
   it("does nothing when applyFeedback targets an unknown article id", async () => {

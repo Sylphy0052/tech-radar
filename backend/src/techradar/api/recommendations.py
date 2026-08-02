@@ -24,7 +24,7 @@ from techradar.api.deps import get_app_settings, get_current_user_id, get_now, g
 from techradar.api.feedback import ArticleFeedbackResponse
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, Recommendation, RecommendationRun, UserArticle
-from techradar.db.enums import RecommendationMode
+from techradar.db.enums import FeedbackAction, RecommendationMode
 from techradar.recommendation.config import get_scoring_config
 from techradar.recommendation.service import (
     READ_ORIGIN_VALUES,
@@ -185,6 +185,16 @@ def _build_items(
         ).all()
     }
 
+    # Bad 済み記事をレスポンスから除外する（PROJECT_SPEC.md §6.1「既に Bad した
+    # 記事は再表示しない」、Issue #13）。Bad による候補除外は本来
+    # `recommendation/service.py` の `load_candidates` が新規 run を作るときにしか
+    # 効かない。`GET /api/feed` の cursor 省略時は直近の DISCOVER run を最大
+    # `feed_run_reuse_seconds`（`config/scoring.yaml`）秒まで再利用するため
+    # （`_resolve_discover_run_id`）、再利用ウィンドウ内で付けた Bad は
+    # `recommendations` 行として残り続ける run には反映されない。そのため
+    # ページ組み立てのこの時点で改めて除外する。記事起点推薦
+    # （`create_article_recommendations`）は生成直後の run を読むため元々 Bad は
+    # 含まれないが、同じ組み立て関数を経由するため挙動は変わらない。
     return [
         _build_item(
             recommendation,
@@ -193,6 +203,8 @@ def _build_items(
             feedback=feedback_by_article_id.get(article.id),
         )
         for recommendation, article in rows
+        if feedback_by_article_id.get(article.id) is None
+        or feedback_by_article_id[article.id].action != FeedbackAction.BAD.value
     ]
 
 

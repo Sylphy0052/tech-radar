@@ -7,6 +7,7 @@ import { ScoreBreakdown } from "@/components/features/ScoreBreakdown";
 import { formatDateTimeJa } from "@/lib/format-date";
 import type { FeedItem } from "@/lib/feed";
 import type { BadReason, FeedbackAction } from "@/lib/feedback";
+import { isSafeHttpUrl } from "@/lib/safe-url";
 
 interface ArticleCardProps {
   item: FeedItem;
@@ -115,14 +116,22 @@ export function ArticleCard({ item, onFeedback, onRemoveFeedback }: ArticleCardP
             フィードバックを取り消す
           </button>
         )}
-        <a
-          href={item.original_url}
-          target="_blank"
-          rel="noreferrer noopener"
-          className="ml-auto text-sm underline"
-        >
-          元記事を開く
-        </a>
+        {isSafeHttpUrl(item.original_url) ? (
+          <a
+            href={item.original_url}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="ml-auto text-sm underline"
+          >
+            元記事を開く
+          </a>
+        ) : (
+          // http/https 以外のスキームはバックエンド側の検証をすり抜けない想定だが、
+          // 万一届いてもリンク化せずテキスト表示に留める（多層防御）。
+          <span className="ml-auto text-sm text-zinc-400 dark:text-zinc-500">
+            元記事のリンクを表示できません
+          </span>
+        )}
       </div>
 
       {isBadPickerOpen && (

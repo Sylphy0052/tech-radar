@@ -390,6 +390,37 @@ class TestGetFeedRunReuse:
         ]
         assert [item["rank"] for item in second_items] == list(range(1, len(second_items) + 1))
 
+    def test_excludes_an_article_badded_within_the_reuse_window(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準（Issue #13）: 再利用ウィンドウ内で Bad を付けた記事が
+
+        再読み込み後のフィードから消える。
+
+        Bad による候補除外は本来 `load_candidates` が新規 run を作るときにしか
+        効かないため、再利用ウィンドウ内はレスポンス組み立て側の除外が無いと
+        `feed_run_reuse_seconds`（最大 10 分）の間 Bad 記事が残り続けてしまう。
+        """
+        # Arrange
+        article = make_article(db_session, title="Bad対象", embedding=make_embedding(0))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+        first_response = client.get("/api/feed")
+        assert [item["article_id"] for item in first_response.json()["items"]] == [str(article.id)]
+
+        # Act — 再利用ウィンドウ内（get_now は変えない）で Bad を付けてから読み直す
+        feedback_response = client.post(
+            f"/api/articles/{article.id}/feedback", json={"action": "bad"}
+        )
+        second_response = client.get("/api/feed")
+
+        # Assert
+        assert feedback_response.status_code == 200
+        # 同じ run が再利用され続けている（新規生成なら Bad はそもそも候補に
+        # 含まれず、この挙動を検証できない）ことを確認する。
+        run_count = db_session.scalar(select(func.count()).select_from(RecommendationRun))
+        assert run_count == 1
+        assert second_response.json()["items"] == []
+
     def test_generates_a_new_run_after_the_reuse_window_expires(
         self, client: TestClient, db_session: Session
     ) -> None:
@@ -441,13 +472,20 @@ class TestGetFeedRunReuse:
 class TestRecommendationItemFeedbackAndReadState:
     """`RecommendationItem` の `feedback` / `is_read`（Issue #13 T2）を検証する。
 
-    Good/Bad/保存や既読状態は推薦生成後に追加されることが多いため、多くのケースで
+    Good/保存や既読状態は推薦生成後に追加されることが多いため、多くのケースで
     `feed_run_reuse_seconds`（`config/scoring.yaml`）の再利用ウィンドウ内に
     `get_now` を固定して同じ run を読み直す（`TestGetFeedRunReuse` と同じ手法）。
     再利用ウィンドウ内であれば `load_recommendation_page` が保存済みの
-    recommendations をそのまま返すため、Bad/Good 由来の候補除外（`load_candidates`
-    の `bad_exists` / `owned_exists`）の影響を受けずに、生成後に付いた最新の
-    feedback / is_read を反映できることを確認できる。
+    recommendations をそのまま返すため、Good 由来の候補除外（`load_candidates`
+    の `owned_exists`）の影響を受けずに、生成後に付いた最新の feedback / is_read
+    を反映できることを確認できる。
+
+    Bad は事情が異なる。再利用ウィンドウ内で Bad を付けた記事は `_build_items`
+    がレスポンス組み立て時に除外するため（`TestGetFeedRunReuse.
+    test_excludes_an_article_badded_within_the_reuse_window` 参照）、
+    フィード項目としては現れなくなる。そのため「Bad（理由付き）が正しく記録
+    されること」自体は、以下の `test_records_a_bad_feedback_with_a_reason_correctly`
+    でフィードバック登録の応答（`POST` のレスポンス）に対して検証する。
     """
 
     def test_feed_item_has_no_feedback_and_is_unread_by_default(
@@ -487,10 +525,17 @@ class TestRecommendationItemFeedbackAndReadState:
         assert item["feedback"]["reason"] is None
         assert item["is_read"] is False
 
-    def test_feed_item_reflects_bad_feedback_with_reason_added_after_generation(
+    def test_records_a_bad_feedback_with_a_reason_correctly(
         self, client: TestClient, db_session: Session
     ) -> None:
-        # Arrange — 受入基準: Bad（理由付き）がリロード後も維持される
+        """受入基準: Bad（理由付き）が正しく記録される。
+
+        以前はこの検証をフィード再取得後の item から行っていたが、Bad を
+        付けた記事は再利用ウィンドウ内であってもフィードから消える
+        （`TestGetFeedRunReuse.test_excludes_an_article_badded_within_the_reuse_window`）
+        ため、記録内容そのものはフィードバック登録の応答に対して検証する。
+        """
+        # Arrange
         article = make_article(db_session, title="候補", embedding=make_embedding(0))
         client.app.dependency_overrides[get_now] = lambda: NOW
         client.get("/api/feed")
@@ -500,13 +545,12 @@ class TestRecommendationItemFeedbackAndReadState:
             f"/api/articles/{article.id}/feedback",
             json={"action": "bad", "reason": BadReason.NOT_INTERESTED.value},
         )
-        response = client.get("/api/feed")
 
         # Assert
         assert feedback_response.status_code == 200
-        item = response.json()["items"][0]
-        assert item["feedback"]["action"] == "bad"
-        assert item["feedback"]["reason"] == BadReason.NOT_INTERESTED.value
+        body = feedback_response.json()
+        assert body["action"] == "bad"
+        assert body["reason"] == BadReason.NOT_INTERESTED.value
 
     def test_feed_item_is_read_when_user_article_origin_is_read_full(
         self, client: TestClient, db_session: Session, settings: Settings
@@ -527,7 +571,7 @@ class TestRecommendationItemFeedbackAndReadState:
     def test_feed_item_is_unread_when_user_article_origin_is_manual(
         self, client: TestClient, db_session: Session, settings: Settings
     ) -> None:
-        # Arrange — 手動登録は既読判定の対象外（`_READ_ORIGIN_VALUES` に含まれない）
+        # Arrange — 手動登録は既読判定の対象外（`READ_ORIGIN_VALUES` に含まれない）
         article = make_article(db_session, title="候補", embedding=make_embedding(0))
         client.app.dependency_overrides[get_now] = lambda: NOW
         client.get("/api/feed")

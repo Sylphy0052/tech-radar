@@ -122,6 +122,38 @@ describe("DiscoverFeed", () => {
     expect(new Set(renderedIds).size).toBe(4);
   });
 
+  it("does not recreate the IntersectionObserver after loading a page that still has more (G-2)", async () => {
+    // Arrange — 3 ページ用意し、2 ページ目を読み込んだ後も hasMore が true のまま
+    // 変化しない状況を作る（hasMore 自体の変化による observer 再生成と切り分けるため）。
+    const page1 = makeItems(2, "page1");
+    const page2 = makeItems(2, "page2");
+    const page3 = makeItems(2, "page3");
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("cursor=page-3")) {
+        return jsonResponse({ items: page3, next_cursor: null });
+      }
+      if (url.includes("cursor=page-2")) {
+        return jsonResponse({ items: page2, next_cursor: "page-3" });
+      }
+      return jsonResponse({ items: page1, next_cursor: "page-2" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<DiscoverFeed />);
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+    // 記事の描画（DOM の変化）と observer を張る effect の実行順は保証されないため、
+    // observer が張られるまで待ってから起点の件数を確定させる。
+    await waitFor(() => expect(MockIntersectionObserver.instances).toHaveLength(1));
+
+    // Act — 2 ページ目を読み込む（読み込み後も hasMore は true のまま）
+    act(() => {
+      triggerIntersection(true);
+    });
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(4));
+
+    // Assert — observer が作り直されていないこと
+    expect(MockIntersectionObserver.instances).toHaveLength(1);
+  });
+
   it("does not request another page and shows the end message once hasMore is false", async () => {
     // Arrange
     const items = makeItems(1, "only");
