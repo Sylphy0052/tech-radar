@@ -30,6 +30,7 @@ class JobType(StrEnum):
     GENERATE_FEED = "generate_feed"
     DEDUPLICATE_ARTICLES = "deduplicate_articles"
     PURGE_OPERATION_LOGS = "purge_operation_logs"
+    PURGE_RECOMMENDATION_RUNS = "purge_recommendation_runs"
 
 
 class ArticleOrigin(StrEnum):

@@ -39,6 +39,7 @@ def process_crawl_sources(session: Session, context: JobContext, settings: Setti
     """
     collect_candidates(session, settings=settings, source_domain=_source_domain(context.payload))
     _enqueue_log_purge(session)
+    _enqueue_recommendation_run_purge(session)
 
 
 def _enqueue_log_purge(session: Session) -> None:
@@ -55,6 +56,17 @@ def _enqueue_log_purge(session: Session) -> None:
     （2 回目以降は対象 0 件になる）、ここでは重複を許容する。
     """
     enqueue(session, JobType.PURGE_OPERATION_LOGS)
+
+
+def _enqueue_recommendation_run_purge(session: Session) -> None:
+    """保持期間を過ぎた `recommendation_runs` の削除ジョブを積む（Issue #28）。
+
+    `_enqueue_log_purge` と同じ理由（常駐スケジューラを置かない設計）で、
+    巡回が実際に走ったときにここで積む。候補が 0 件でも run の保持期間は
+    経過するため、収集結果に関わらず積む。重複起動時の扱いも
+    `_enqueue_log_purge` と同じで、削除は冪等なため重複を許容する。
+    """
+    enqueue(session, JobType.PURGE_RECOMMENDATION_RUNS)
 
 
 def _source_domain(payload: dict[str, Any]) -> str | None:

@@ -53,6 +53,9 @@
 | LLM 処理失敗時の再試行 | 3 回（指数バックオフ） |
 | 検索 API / LLM の月額上限 | 追加課金なし。Brave の無料枠 月 2000 クエリのみが実質的な上限 |
 | ログの保持期間 | 90 日 |
+| 推薦 run の保持期間 | 30 日。超過分は `purge_recommendation_runs` ジョブが削除する（紐づく `recommendations` は CASCADE で消える） |
+| 推薦 API のレート制限 | 利用者ごとに 60 秒あたり 30 リクエスト。`GET /api/feed` と `POST /api/articles/{id}/recommendations` は同じ枠を共有する。超過時は 429 と `Retry-After` を返す |
+| レート制限の適用範囲 | プロセス内メモリで数えるため、単一プロセス起動（`run.sh`）が前提。複数ワーカープロセス構成にすると実効上限がプロセス数倍に緩む |
 
 ## 認証
 

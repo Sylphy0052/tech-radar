@@ -640,3 +640,90 @@ class TestRecommendationItemFeedbackAndReadState:
         )
         assert item["is_read"] is True
         assert item["feedback"] is None
+
+
+class TestRecommendationRateLimit:
+    """推薦 API のレート制限（Issue #28, `api/rate_limit.py`）を検証する。"""
+
+    @pytest.fixture
+    def rate_limited_client(self, db_session: Session) -> Iterator[TestClient]:
+        """上限 2 回・ウィンドウ 60 秒に絞った設定でクライアントを組み立てる。
+
+        既定値（30 回/60 秒）のままだと、上限超過を再現するために大量の
+        リクエストを送る必要があり実時間の sleep 無しでは検証しづらい。
+        """
+        limited_settings = Settings(
+            recommendation_rate_limit_requests=2,
+            recommendation_rate_limit_window_seconds=60.0,
+            _env_file=None,
+        )
+        app = create_app(limited_settings)
+        app.dependency_overrides[get_session] = lambda: db_session
+        app.dependency_overrides[get_now] = lambda: NOW
+        with TestClient(app) as test_client:
+            yield test_client
+        app.dependency_overrides.clear()
+
+    def test_returns_429_with_retry_after_when_the_feed_limit_is_exceeded(
+        self, rate_limited_client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange
+        make_article(db_session, title="候補", embedding=make_embedding(0))
+
+        # Act — 上限（2 回）以内は通常応答、3 回目で 429
+        first_response = rate_limited_client.get("/api/feed")
+        second_response = rate_limited_client.get("/api/feed")
+        third_response = rate_limited_client.get("/api/feed")
+
+        # Assert
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        assert third_response.status_code == 429
+        assert "Retry-After" in third_response.headers
+        assert int(third_response.headers["Retry-After"]) >= 1
+
+    def test_returns_429_with_retry_after_when_the_article_recommendations_limit_is_exceeded(
+        self, rate_limited_client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange
+        article = make_article(db_session, title="候補", embedding=make_embedding(0))
+
+        # Act
+        first_response = rate_limited_client.post(f"/api/articles/{article.id}/recommendations")
+        second_response = rate_limited_client.post(f"/api/articles/{article.id}/recommendations")
+        third_response = rate_limited_client.post(f"/api/articles/{article.id}/recommendations")
+
+        # Assert
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        assert third_response.status_code == 429
+        assert "Retry-After" in third_response.headers
+
+    def test_allows_requests_within_the_limit_to_proceed_normally(
+        self, rate_limited_client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange
+        make_article(db_session, title="候補", embedding=make_embedding(0))
+
+        # Act
+        response = rate_limited_client.get("/api/feed")
+
+        # Assert
+        assert response.status_code == 200
+        assert len(response.json()["items"]) == 1
+
+    def test_allows_requests_again_after_the_window_passes(
+        self, rate_limited_client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 上限（2 回）を使い切って 429 になることを確認する
+        make_article(db_session, title="候補", embedding=make_embedding(0))
+        rate_limited_client.get("/api/feed")
+        rate_limited_client.get("/api/feed")
+        assert rate_limited_client.get("/api/feed").status_code == 429
+
+        # Act — ウィンドウ（60 秒）を過ぎてから読み直す
+        rate_limited_client.app.dependency_overrides[get_now] = lambda: NOW + timedelta(seconds=61)
+        response = rate_limited_client.get("/api/feed")
+
+        # Assert
+        assert response.status_code == 200
