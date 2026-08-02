@@ -22,10 +22,37 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** `Retry-After` の待機秒数。ヘッダが無い / 秒数として読めない場合は null。 */
+    readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+const TOO_MANY_REQUESTS_STATUS = 429;
+
+/** レート制限（`backend/src/techradar/api/rate_limit.py`）による拒否かどうか。 */
+export function isRateLimitError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.status === TOO_MANY_REQUESTS_STATUS;
+}
+
+/**
+ * `Retry-After` ヘッダを待機秒数として解釈する。
+ *
+ * 規格上は HTTP-date 形式も許容されるが、backend（`api/rate_limit.py`）は
+ * 整数秒しか返さない。delta-seconds として読めないものは、誤った待ち時間を
+ * 表示するより「待ち時間不明」に倒すため null を返す。
+ */
+function parseRetryAfterSeconds(header: string | null): number | null {
+  if (header === null || header.trim() === "") {
+    return null;
+  }
+  const seconds = Number(header);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return null;
+  }
+  return Math.ceil(seconds);
 }
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -37,7 +64,11 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   if (!response.ok) {
     // エラーは握りつぶさず、ステータスと本文を保持して呼び出し側へ渡す。
     const body = await response.text();
-    throw new ApiError(response.status, body || response.statusText);
+    throw new ApiError(
+      response.status,
+      body || response.statusText,
+      parseRetryAfterSeconds(response.headers.get("Retry-After")),
+    );
   }
 
   // 204 No Content はボディを持たないため json() を呼ぶとパースエラーになる。

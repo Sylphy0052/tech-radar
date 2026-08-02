@@ -59,6 +59,54 @@ describe("apiFetch", () => {
     });
   });
 
+  it("carries the Retry-After seconds on a 429 response", async () => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response("too many requests", { status: 429, headers: { "Retry-After": "30" } }),
+      ),
+    );
+
+    // Act / Assert
+    await expect(apiFetch("/api/feed")).rejects.toMatchObject({
+      status: 429,
+      retryAfterSeconds: 30,
+    });
+  });
+
+  it("leaves retryAfterSeconds null when the Retry-After header is absent", async () => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async () => new Response("too many requests", { status: 429 })),
+    );
+
+    // Act / Assert
+    await expect(apiFetch("/api/feed")).rejects.toMatchObject({
+      status: 429,
+      retryAfterSeconds: null,
+    });
+  });
+
+  it("leaves retryAfterSeconds null when the Retry-After header is not delta-seconds", async () => {
+    // Arrange — HTTP-date 形式（backend は返さないが、規格上は許容される）
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response("too many requests", {
+            status: 429,
+            headers: { "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT" },
+          }),
+      ),
+    );
+
+    // Act / Assert
+    await expect(apiFetch("/api/feed")).rejects.toMatchObject({ retryAfterSeconds: null });
+  });
+
   it("resolves to undefined on a 204 No Content response without parsing json", async () => {
     // Arrange — 204 はボディを持たないため、body に null を渡した Response で再現する
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
