@@ -30,6 +30,8 @@ from techradar.interest.topics import (
     TopicPreferenceSettings,
     TopicWeights,
     apply_bad_feedback,
+    compute_effective_weight,
+    compute_negative_weight,
     increase_positive_weight,
 )
 from techradar.interest.weights import (
@@ -39,7 +41,7 @@ from techradar.interest.weights import (
     compute_recency_decay,
     explicit_weight_for_origin,
 )
-from techradar.recommendation.config import get_scoring_config
+from techradar.recommendation.config import ScoringConfig, get_scoring_config
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +237,23 @@ def _upsert_topic_preference(
     事前の存在確認と INSERT の間の TOCTOU は `api/feedback.py` の
     `_upsert_feedback` と同じ理由で SAVEPOINT（`session.begin_nested`）に
     閉じ込めて吸収する。
+
+    既存行の更新（UPDATE 分岐）は「読んでから上書き」であり、同じトピックを
+    共有する別記事へのフィードバックが同時に来ると、一方の更新が他方の読み
+    取った古い値を上書きして消えうる（lost update、Issue #15 自己レビュー
+    5）。INSERT 側と異なり `SELECT ... FOR UPDATE` 等のロックは取っていない。
+
+    `negative_weight`（`interest/topics.py` の `compute_negative_weight`）は
+    「直近フィードバック集合から毎回導出し直す」設計のため、1 回分の更新が
+    失われても次にこのトピックへフィードバックが来た時点で正しい値へ収束
+    する（自己修復する）。一方 `positive_weight`（`increase_positive_weight`）
+    は単純な累積加算のため、失われた分は自己修復せず永続的に欠落する。
+
+    それでも原子的な更新（行ロック等）へは変更していない。本プロジェクトは
+    単一ユーザー・ローカル実行が前提（`CLAUDE.md` の制約）であり、同じ
+    トピックを共有する複数記事へのフィードバックが本当に同時に届く状況は
+    通常発生しない（UI からの操作は 1 リクエストずつ順に発生する）ため、
+    実害が小さいと判断した。
     """
     existing = session.get(UserTopicPreference, (user_id, topic))
     if existing is not None:
@@ -330,12 +349,14 @@ def update_topic_preferences(
     フィードバックも含めた「直近 N 件」を見るため、先に upsert しておかないと
     今回の Bad が判定に含まれない。
 
-    フィードバック取り消し（DELETE）からは呼ばない。`interest/topics.py` の
-    関数はいずれも増加方向のみで、取り消し時に「その分を差し引く」ための
-    減少関数を持たない（Bad の抑制は「一度上がったら簡単には戻らない」
-    設計、`compute_effective_weight` の docstring 参照）。取り消し時に
-    同じ関数を呼ぶと、削除したはずのフィードバックの効果を新たに加算して
-    しまい、意味が逆転する。
+    フィードバック取り消し（DELETE）からはこの関数を呼ばない。この関数は
+    「新しいフィードバックが 1 件増えた」ことを前提に、その記事自身の
+    `article_feedback` 行が既に upsert 済みの状態から差分を適用する設計
+    のため、取り消し（行の削除）には向かない。取り消し時のトピック選好の
+    再計算は `recompute_topic_preferences_after_removal` が別に担う
+    （Issue #15 自己レビュー 1）。`negative_weight` はどちらの関数も
+    `interest/topics.py` の `compute_negative_weight` を経由するため、
+    増加方向（この関数）と取り消し後の再計算とで結果が食い違うことはない。
 
     記事が見つからない、または `topics` が空の場合は何もしない。
     """
@@ -360,11 +381,7 @@ def update_topic_preferences(
     if action is not FeedbackAction.BAD:
         return
 
-    topic_preference_settings = TopicPreferenceSettings(
-        recent_window=config.topic_preference.recent_window,
-        bad_threshold=config.topic_preference.bad_threshold,
-        decay_step=config.topic_preference.decay_step,
-    )
+    topic_preference_settings = _topic_preference_settings(config)
     for topic in article.topics:
         current = _current_topic_weights(session.get(UserTopicPreference, (user_id, topic)))
         recent_actions = _load_recent_topic_actions(
@@ -373,6 +390,92 @@ def update_topic_preferences(
         updated = apply_bad_feedback(current, recent_actions, topic_preference_settings)
         if updated == current:
             continue
+        _upsert_topic_preference(session, user_id, topic, updated, now)
+
+
+def _topic_preference_settings(config: ScoringConfig) -> TopicPreferenceSettings:
+    """`get_scoring_config()` の `topic_preference` を `TopicPreferenceSettings` へ変換する。
+
+    `update_topic_preferences` と `recompute_topic_preferences_after_removal`
+    の両方が同じ変換を必要とするための共有ヘルパー（DRY）。
+    """
+    return TopicPreferenceSettings(
+        recent_window=config.topic_preference.recent_window,
+        bad_threshold=config.topic_preference.bad_threshold,
+        decay_step=config.topic_preference.decay_step,
+    )
+
+
+def recompute_topic_preferences_after_removal(
+    session: Session, user_id: uuid.UUID, article_id: uuid.UUID, now: datetime
+) -> None:
+    """フィードバック取り消し後にトピック選好を再計算する（`PROJECT_SPEC.md` §7.2）。
+
+    Issue #15 自己レビュー 1。フィードバック取り消し
+    （`DELETE /api/articles/{article_id}/feedback`）は、一度 Bad の閾値
+    （直近 `recent_window` 件中 `bad_threshold` 件以上）を
+    満たして `negative_weight` が上がった後にすべて取り消しても、それまで
+    `update_topic_preferences` が増加方向にしか更新してこなかったため抑制が
+    永続的に残ってしまう問題があった。この関数は「上がった分を差し引く」の
+    ではなく、取り消し後の直近フィードバック集合から `negative_weight` を
+    ゼロから再計算する（状態が履歴から一意に定まるようにするため、加算方式
+    にはしない）。
+
+    呼び出し側（`api/feedback.py` の `delete_article_feedback`）は、対象の
+    `article_feedback` 行を削除した **後** に呼ぶこと。`_load_recent_topic_actions`
+    が読む「直近フィードバック」から、削除対象自身が除外されている必要が
+    あるため（先に削除しておかないと、取り消したはずのフィードバックが
+    直近集合に残ったまま再計算されてしまう）。ORM の `session.delete()` は
+    autoflush により後続の SELECT 前に反映されるが、呼び出し側では
+    `session.flush()` を挟んで明示的に確定させてから呼ぶ想定にする。
+
+    対象は削除した記事の `topics`。各トピックについて、削除後の直近
+    フィードバック集合から `interest/topics.py` の `compute_negative_weight`
+    で `negative_weight` を再計算し上書きする。`apply_bad_feedback`
+    （Bad 追加時）と同じ `compute_negative_weight` を使うため、増加方向と
+    取り消し後の再計算とで結果が食い違わない。
+
+    `positive_weight` は据え置く（変更しない）。`negative_weight` は直近
+    `recent_window` 件という限られた範囲から再計算できるが、`positive_weight`
+    （`increase_positive_weight` による無制限の累積加算）を取り消し後の
+    状態から一意に復元するには、そのトピックに関する全履歴（直近 N 件では
+    なく）を洗い出して再集計する必要があり、この Issue 全体で使っている
+    「直近 N 件で打ち切る」安全弁（`order_by_recency_and_truncate` 等）の
+    設計から外れて件数無制限のクエリになってしまう。加えて Good（0.8）と
+    保存（0.5）で増分が異なるため、どの行がどちらの増分だったかまで復元
+    する必要があり、影響範囲が `negative_weight` の再計算より大きい。その
+    ため本 Issue のスコープでは `positive_weight` は取り消しても変化させ
+    ない。
+
+    そのトピックのフィードバックが（取り消しの結果）1 件も無くなった場合も
+    行は削除せず、`negative_weight` / `effective_weight` を 0 へ更新する
+    に留める。`positive_weight` を据え置く方針と一貫させるため（行ごと
+    消すと `positive_weight` の履歴も一緒に失われる）。また
+    `user_topic_preferences` には他にレコード削除の運用が無く、この関数
+    だけのために削除の分岐を新たに増やさないため。
+
+    記事が見つからない、または `topics` が空の場合は何もしない
+    （`update_topic_preferences` と同じ扱い）。
+    """
+    article = session.get(Article, article_id)
+    if article is None or not article.topics:
+        return
+
+    config = get_scoring_config()
+    topic_preference_settings = _topic_preference_settings(config)
+    for topic in article.topics:
+        current = _current_topic_weights(session.get(UserTopicPreference, (user_id, topic)))
+        recent_actions = _load_recent_topic_actions(
+            session, user_id, topic, topic_preference_settings.recent_window
+        )
+        new_negative = compute_negative_weight(recent_actions, topic_preference_settings)
+        if new_negative == current.negative:
+            continue
+        updated = TopicWeights(
+            positive=current.positive,
+            negative=new_negative,
+            effective=compute_effective_weight(current.positive, new_negative),
+        )
         _upsert_topic_preference(session, user_id, topic, updated, now)
 
 

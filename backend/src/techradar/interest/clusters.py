@@ -58,10 +58,25 @@ class ClusteringSettings:
 def _cluster_count(article_count: int, settings: ClusteringSettings) -> int:
     """記事数と設定からクラスタ数 k を決める。
 
+    `min_articles_per_cluster`（1 クラスタを成立させるのに要する記事数）を
+    `min_clusters`（クラスタ数の下限）より優先する。以前は
+    `max(min_clusters, capacity_based)` としており、既定値
+    （min_clusters=2, min_articles_per_cluster=3）で記事が 4〜5 件のときに
+    2 クラスタへ割ってしまい、1 クラスタあたりの記事数が
+    min_articles_per_cluster を割り込んでいた（Issue #15 自己レビュー 2）。
+    「記事が少ないうちは無理にクラスタを分けない」方が自然なため、記事数から
+    賄えるクラスタ数（`capacity_based = article_count // min_articles_per_cluster`）
+    を超えては分けない。
+
+    `min_clusters` は capacity_based がそれを満たせる記事数
+    （`article_count >= min_clusters * min_articles_per_cluster`）になった
+    時点で自動的に満たされる「目安の下限」であり、capacity_based を上回って
+    まで強制するものではない（capacity_based が min_clusters 未満のときは
+    capacity_based をそのまま採用する）。
+
     `min_articles_per_cluster` に満たない少数の記事しか無い場合は、複数クラスタに
     分けるだけの材料が無いため 1 クラスタに丸める（例外にしない）。それ以外は
-    記事数から賄えるクラスタ数（`article_count // min_articles_per_cluster`）を
-    `min_clusters`〜`max_clusters` に収め、記事数を超えないようにする
+    capacity_based を `max_clusters` に収め、記事数を超えないようにする
     （KMeans は `n_clusters` が標本数を超えるとエラーになるため）。
     """
     if article_count <= 0:
@@ -70,8 +85,7 @@ def _cluster_count(article_count: int, settings: ClusteringSettings) -> int:
         return 1
 
     capacity_based = article_count // settings.min_articles_per_cluster
-    bounded = max(settings.min_clusters, capacity_based)
-    bounded = min(bounded, settings.max_clusters)
+    bounded = min(capacity_based, settings.max_clusters)
     return min(bounded, article_count)
 
 

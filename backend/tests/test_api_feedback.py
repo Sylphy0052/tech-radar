@@ -622,3 +622,74 @@ class TestDeleteArticleFeedbackEnqueuesClusterRebuild:
         assert response.status_code == 204
         jobs = _rebuild_jobs(db_session)
         assert len(jobs) == 1
+
+
+class TestDeleteArticleFeedbackRecomputesTopicPreferences:
+    """受入基準: フィードバック取り消し後、トピック選好が直近集合から再計算される
+
+    （Issue #15 自己レビュー 1, 6）。
+    """
+
+    def test_lowers_negative_weight_below_the_threshold_after_removing_one_bad(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 同一トピックの記事を3件 Bad にして閾値（3/5）を満たす
+        articles = [make_article(db_session, title=f"bad-{i}", topics=["llm"]) for i in range(3)]
+        for article in articles:
+            client.post(f"/api/articles/{article.id}/feedback", json={"action": "bad"})
+        before = _get_topic_preference(db_session, settings.default_user_id, "llm")
+        assert before is not None
+        assert before.negative_weight > 0.0
+
+        # Act — 1件だけ取り消す
+        response = client.delete(f"/api/articles/{articles[0].id}/feedback")
+
+        # Assert — 残り2件は閾値未満のため negative_weight が下がる
+        assert response.status_code == 204
+        after = _get_topic_preference(db_session, settings.default_user_id, "llm")
+        assert after is not None
+        assert after.negative_weight == pytest.approx(0.0)
+
+    def test_resets_the_topic_preference_after_removing_all_feedback(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        articles = [make_article(db_session, title=f"bad-{i}", topics=["llm"]) for i in range(3)]
+        for article in articles:
+            client.post(f"/api/articles/{article.id}/feedback", json={"action": "bad"})
+        before = _get_topic_preference(db_session, settings.default_user_id, "llm")
+        assert before is not None
+        assert before.negative_weight > 0.0
+
+        # Act — 全て取り消す
+        for article in articles:
+            response = client.delete(f"/api/articles/{article.id}/feedback")
+            assert response.status_code == 204
+
+        # Assert — 行は残るが初期状態（全て 0）へ戻る
+        after = _get_topic_preference(db_session, settings.default_user_id, "llm")
+        assert after is not None
+        assert after.positive_weight == pytest.approx(0.0)
+        assert after.negative_weight == pytest.approx(0.0)
+        assert after.effective_weight == pytest.approx(0.0)
+
+    def test_deleting_good_feedback_does_not_change_the_positive_weight(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: Good を取り消しても positive_weight は据え置く。"""
+        # Arrange
+        article = make_article(db_session, topics=["llm"])
+        client.post(f"/api/articles/{article.id}/feedback", json={"action": "good"})
+        before = _get_topic_preference(db_session, settings.default_user_id, "llm")
+        assert before is not None
+        positive_before = before.positive_weight
+        assert positive_before > 0.0
+
+        # Act
+        response = client.delete(f"/api/articles/{article.id}/feedback")
+
+        # Assert
+        assert response.status_code == 204
+        after = _get_topic_preference(db_session, settings.default_user_id, "llm")
+        assert after is not None
+        assert after.positive_weight == pytest.approx(positive_before)

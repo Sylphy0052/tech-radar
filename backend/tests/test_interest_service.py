@@ -24,6 +24,7 @@ from techradar.db.models import (
 from techradar.interest.service import (
     load_weighted_interest_articles,
     rebuild_interest_clusters,
+    recompute_topic_preferences_after_removal,
     update_topic_preferences,
 )
 from techradar.recommendation.config import get_scoring_config
@@ -272,6 +273,140 @@ class TestUpdateTopicPreferencesBad:
 
         # Assert — 直近5件中 Bad は 1 件（target 自身）だけのため下がらない
         assert _get_topic_preference(db_session, user_id, "llm") is None
+
+
+class TestRecomputeTopicPreferencesAfterRemoval:
+    """`recompute_topic_preferences_after_removal`（Issue #15 自己レビュー 1）を検証する。
+
+    呼び出し側の想定どおり、対象の `article_feedback` 行を削除した「後」に
+    呼ぶ（`recompute_topic_preferences_after_removal` の docstring 参照）。
+    """
+
+    def test_lowers_negative_weight_once_removal_drops_below_the_threshold(
+        self, db_session: Session
+    ) -> None:
+        # Arrange — 直近5件中3件が Bad の状態を作り、閾値を満たして negative_weight を上げる
+        user_id = uuid.uuid4()
+        good_1 = make_article(db_session, title="good-1", topics=["llm"])
+        add_feedback(
+            db_session, user_id, good_1, FeedbackAction.GOOD, created_at=NOW - timedelta(days=4)
+        )
+        good_2 = make_article(db_session, title="good-2", topics=["llm"])
+        add_feedback(
+            db_session, user_id, good_2, FeedbackAction.GOOD, created_at=NOW - timedelta(days=3)
+        )
+        bad_1 = make_article(db_session, title="bad-1", topics=["llm"])
+        add_feedback(
+            db_session, user_id, bad_1, FeedbackAction.BAD, created_at=NOW - timedelta(days=2)
+        )
+        bad_2 = make_article(db_session, title="bad-2", topics=["llm"])
+        add_feedback(
+            db_session, user_id, bad_2, FeedbackAction.BAD, created_at=NOW - timedelta(days=1)
+        )
+        target = make_article(db_session, title="bad-3", topics=["llm"])
+        target_feedback = add_feedback(
+            db_session, user_id, target, FeedbackAction.BAD, created_at=NOW
+        )
+        update_topic_preferences(db_session, user_id, target.id, FeedbackAction.BAD, NOW)
+        before = _get_topic_preference(db_session, user_id, "llm")
+        assert before is not None
+        assert before.negative_weight > 0.0
+
+        # Act — 閾値を満たすきっかけになった target の Bad を取り消す
+        db_session.delete(target_feedback)
+        db_session.flush()
+        recompute_topic_preferences_after_removal(db_session, user_id, target.id, NOW)
+
+        # Assert — 残り4件（Good2件・Bad2件）は閾値未満のため negative_weight が下がる
+        after = _get_topic_preference(db_session, user_id, "llm")
+        assert after is not None
+        assert after.negative_weight == pytest.approx(0.0)
+        assert after.effective_weight == pytest.approx(after.positive_weight)
+
+    def test_resets_to_initial_state_once_all_feedback_is_removed(
+        self, db_session: Session
+    ) -> None:
+        # Arrange — 3件とも Bad で閾値（3/5）を満たす状態を作る
+        user_id = uuid.uuid4()
+        articles_and_feedback = []
+        for index in range(3):
+            article = make_article(db_session, title=f"bad-{index}", topics=["llm"])
+            feedback = add_feedback(
+                db_session,
+                user_id,
+                article,
+                FeedbackAction.BAD,
+                created_at=NOW - timedelta(days=2 - index),
+            )
+            articles_and_feedback.append((article, feedback))
+        last_article, _ = articles_and_feedback[-1]
+        update_topic_preferences(db_session, user_id, last_article.id, FeedbackAction.BAD, NOW)
+        before = _get_topic_preference(db_session, user_id, "llm")
+        assert before is not None
+        assert before.negative_weight > 0.0
+
+        # Act — すべての Bad を取り消す
+        for article, feedback in articles_and_feedback:
+            db_session.delete(feedback)
+            db_session.flush()
+            recompute_topic_preferences_after_removal(db_session, user_id, article.id, NOW)
+
+        # Assert — 行は残るが初期状態（全て 0）へ戻る（行の削除はしない設計）
+        after = _get_topic_preference(db_session, user_id, "llm")
+        assert after is not None
+        assert after.positive_weight == pytest.approx(0.0)
+        assert after.negative_weight == pytest.approx(0.0)
+        assert after.effective_weight == pytest.approx(0.0)
+
+    def test_leaves_positive_weight_unchanged(self, db_session: Session) -> None:
+        """受入基準: Good を取り消した場合と同様、positive_weight は据え置く。"""
+        # Arrange — Good で positive_weight を作り、別途 Bad で閾値を満たす
+        user_id = uuid.uuid4()
+        good_article = make_article(db_session, title="good", topics=["llm"])
+        update_topic_preferences(db_session, user_id, good_article.id, FeedbackAction.GOOD, NOW)
+        bad_1 = make_article(db_session, title="bad-1", topics=["llm"])
+        add_feedback(
+            db_session, user_id, bad_1, FeedbackAction.BAD, created_at=NOW - timedelta(days=2)
+        )
+        bad_2 = make_article(db_session, title="bad-2", topics=["llm"])
+        add_feedback(
+            db_session, user_id, bad_2, FeedbackAction.BAD, created_at=NOW - timedelta(days=1)
+        )
+        target = make_article(db_session, title="bad-3", topics=["llm"])
+        target_feedback = add_feedback(
+            db_session, user_id, target, FeedbackAction.BAD, created_at=NOW
+        )
+        update_topic_preferences(db_session, user_id, target.id, FeedbackAction.BAD, NOW)
+        before = _get_topic_preference(db_session, user_id, "llm")
+        assert before is not None
+        positive_before = before.positive_weight
+        assert positive_before > 0.0
+
+        # Act
+        db_session.delete(target_feedback)
+        db_session.flush()
+        recompute_topic_preferences_after_removal(db_session, user_id, target.id, NOW)
+
+        # Assert — negative_weight は下がるが positive_weight は変わらない
+        after = _get_topic_preference(db_session, user_id, "llm")
+        assert after is not None
+        assert after.positive_weight == pytest.approx(positive_before)
+        assert after.negative_weight == pytest.approx(0.0)
+
+    def test_does_nothing_when_the_article_has_no_topics(self, db_session: Session) -> None:
+        # Arrange
+        user_id = uuid.uuid4()
+        article = make_article(db_session, topics=[])
+
+        # Act / Assert — 例外にならない
+        recompute_topic_preferences_after_removal(db_session, user_id, article.id, NOW)
+
+    def test_does_nothing_when_the_article_does_not_exist(self, db_session: Session) -> None:
+        # Arrange
+        user_id = uuid.uuid4()
+
+        # Act / Assert — 例外にならない
+        recompute_topic_preferences_after_removal(db_session, user_id, uuid.uuid4(), NOW)
 
 
 class TestLoadWeightedInterestArticles:

@@ -13,6 +13,7 @@ from techradar.interest.topics import (
     TopicWeights,
     apply_bad_feedback,
     compute_effective_weight,
+    compute_negative_weight,
     increase_positive_weight,
     should_penalize_topic,
 )
@@ -121,6 +122,57 @@ class TestApplyBadFeedback:
         # Assert
         assert updated.negative == pytest.approx(0.2)
         assert updated.effective < current.effective
+
+
+class TestComputeNegativeWeight:
+    """`negative_weight` を直近フィードバック集合から一意に導出することを検証する。
+
+    「これまでの増分の累積」ではなく「今の直近集合が示す値」であることが、
+    フィードバック取り消し後の再計算（`interest/service.py` の
+    `recompute_topic_preferences_after_removal`）と整合する前提（Issue #15
+    自己レビュー 1）。
+    """
+
+    def test_returns_zero_when_below_the_threshold(self):
+        # Arrange
+        recent = (BAD, BAD, GOOD, GOOD, GOOD)
+        # Act / Assert — 直近5件中2件のBadでは抑制しない
+        assert compute_negative_weight(recent, SETTINGS) == pytest.approx(0.0)
+
+    def test_returns_one_step_at_the_exact_threshold(self):
+        # Arrange
+        recent = (BAD, BAD, BAD, GOOD, GOOD)
+        # Act / Assert — ちょうど閾値（3/5）で decay_step 1 段階分
+        assert compute_negative_weight(recent, SETTINGS) == pytest.approx(0.2)
+
+    def test_returns_more_steps_when_more_bad_than_the_threshold(self):
+        # Arrange
+        recent = (BAD, BAD, BAD, BAD, BAD)
+        # Act / Assert — 5/5 が Bad（閾値を2件超過）で decay_step 3 段階分
+        assert compute_negative_weight(recent, SETTINGS) == pytest.approx(0.6)
+
+    def test_is_not_cumulative_across_calls(self):
+        """状態が呼び出し回数ではなく「今の直近集合」だけから定まることを固定する。"""
+        # Arrange
+        below_threshold = (BAD, BAD, GOOD, GOOD, GOOD)
+        at_threshold = (BAD, BAD, BAD, GOOD, GOOD)
+        # Act — 同じ入力なら、直前に別の入力で何度呼んでいても結果は変わらない
+        compute_negative_weight(at_threshold, SETTINGS)
+        compute_negative_weight(at_threshold, SETTINGS)
+        result = compute_negative_weight(below_threshold, SETTINGS)
+        # Assert
+        assert result == pytest.approx(0.0)
+
+    def test_is_consistent_with_apply_bad_feedback(self):
+        """`apply_bad_feedback`（増加方向）と同じ値を返すことを固定する。"""
+        # Arrange
+        current = TopicWeights(positive=1.0, negative=0.0, effective=1.0)
+        recent = (BAD, BAD, BAD, GOOD, GOOD)
+        # Act
+        updated = apply_bad_feedback(current, recent, SETTINGS)
+        recomputed = compute_negative_weight(recent, SETTINGS)
+        # Assert
+        assert updated.negative == pytest.approx(recomputed)
 
 
 class TestTopicPreferenceReflectsConfigChanges:

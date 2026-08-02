@@ -83,11 +83,18 @@ export interface paths {
          *     （手動登録由来の行は残す）。関心記事の構成が変わりうるため、関心クラスタの
          *     再構築ジョブも積む。
          *
-         *     トピック単位の選好（`user_topic_preferences`）は更新しない。
-         *     `interest/topics.py` の関数はいずれも増加方向のみで、取り消し時に
-         *     「その分を差し引く」ための減少関数を持たない（`update_topic_preferences`
-         *     の docstring 参照）。取り消し時に同じ関数を呼ぶと、削除したはずの
-         *     フィードバックの効果を新たに加算してしまい、意味が逆転するため呼ばない。
+         *     トピック単位の選好（`user_topic_preferences`）は、取り消し後の直近
+         *     フィードバック集合から `negative_weight` を再計算する
+         *     （`recompute_topic_preferences_after_removal`、Issue #15 自己レビュー 1）。
+         *     `update_topic_preferences`（POST 側）が使う増加方向のみの更新関数は
+         *     取り消しには使わない（「上がった分を差し引く」処理を持たないため）。
+         *
+         *     呼び出し順序が重要: `session.delete(feedback)` の後に
+         *     `session.flush()` で DELETE を確定させてから
+         *     `recompute_topic_preferences_after_removal` を呼ぶ。先に確定させないと、
+         *     再計算が読む「直近フィードバック」に削除対象自身が残ったままになり、
+         *     取り消したはずのフィードバックが再計算結果に混入してしまう
+         *     （`recompute_topic_preferences_after_removal` の docstring 参照）。
          */
         delete: operations["delete_article_feedback_api_articles__article_id__feedback_delete"];
         options?: never;

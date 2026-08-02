@@ -201,8 +201,14 @@ class LimitsConfig(BaseModel):
 class FeedbackWeightsConfig(BaseModel):
     """フィードバック種別ごとの重み（`PROJECT_SPEC.md` §7.1, §7.2 の重み表）。
 
-    `bad` は負方向の強さの絶対値。符号は使う側（`interest/weights.py` 等）が持ち、
-    ここには負数を書かない。
+    `bad` は負方向の強さの絶対値として用意した値だが、現状はどこからも消費
+    していない。`ArticleOrigin` に Bad 相当の値が無いため
+    `interest/weights.py` の `explicit_weight_for_origin` からは呼ばれず、
+    トピック単位の Bad 抑制は `topic_preference.decay_step` が単独で強さを
+    担っている（両方を掛け合わせると二重管理になるため、意図的に未消費に
+    している。詳細は `config/scoring.yaml` の `feedback_weights.bad` の
+    コメント参照、Issue #15 自己レビュー 3）。符号は使う側が持ち、ここには
+    負数を書かない。
     """
 
     model_config = ConfigDict(extra="forbid")
