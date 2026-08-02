@@ -366,6 +366,20 @@
         "title": "JobResponse",
         "type": "object"
       },
+      "RateLimitedResponse": {
+        "description": "429 のレスポンスボディ（`HTTPException` の既定形）。",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "RateLimitedResponse",
+        "type": "object"
+      },
       "RecommendationItem": {
         "description": "推薦結果 1 件のレスポンス。\n\n記事本文（`Article.body`）は含めない（ADR 0001、外部には表示しない）。",
         "properties": {
@@ -986,6 +1000,24 @@
               }
             },
             "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitedResponse"
+                }
+              }
+            },
+            "description": "単位時間あたりのリクエスト数が上限を超えた。`Retry-After` ヘッダに再試行までの待機秒数が入る。",
+            "headers": {
+              "Retry-After": {
+                "description": "再試行までの待機秒数（整数へ切り上げ）。",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Create Article Recommendations",
@@ -1109,6 +1141,24 @@
               }
             },
             "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitedResponse"
+                }
+              }
+            },
+            "description": "単位時間あたりのリクエスト数が上限を超えた。`Retry-After` ヘッダに再試行までの待機秒数が入る。",
+            "headers": {
+              "Retry-After": {
+                "description": "再試行までの待機秒数（整数へ切り上げ）。",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Get Feed",

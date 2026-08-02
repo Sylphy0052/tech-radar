@@ -14,14 +14,44 @@ import uuid
 from collections import deque
 from datetime import datetime, timedelta
 from math import ceil
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request, status
+from pydantic import BaseModel
 
 from techradar.api.deps import get_current_user_id, get_now
 from techradar.config import Settings
 
 logger = logging.getLogger(__name__)
+
+RATE_LIMIT_DETAIL = "リクエストが多すぎます。しばらく待ってから再試行してください"
+
+
+class RateLimitedResponse(BaseModel):
+    """429 のレスポンスボディ（`HTTPException` の既定形）。"""
+
+    detail: str
+
+
+# レート制限を適用するルートの `responses` へ渡す。このリポジトリでは 404 等の
+# エラー応答を OpenAPI へ宣言していないが、429 だけは宣言する。クライアントは
+# `Retry-After` を読んで再試行を制御する必要があり、生成した型
+# （`frontend/src/lib/api-schema.d.ts`）に現れないと実装漏れに気付けないため。
+RATE_LIMITED_RESPONSES: dict[int | str, dict[str, Any]] = {
+    status.HTTP_429_TOO_MANY_REQUESTS: {
+        "model": RateLimitedResponse,
+        "description": (
+            "単位時間あたりのリクエスト数が上限を超えた。"
+            "`Retry-After` ヘッダに再試行までの待機秒数が入る。"
+        ),
+        "headers": {
+            "Retry-After": {
+                "description": "再試行までの待機秒数（整数へ切り上げ）。",
+                "schema": {"type": "integer"},
+            },
+        },
+    },
+}
 
 
 class SlidingWindowRateLimiter:
@@ -120,6 +150,6 @@ def enforce_recommendation_rate_limit(
     )
     raise HTTPException(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-        detail="リクエストが多すぎます。しばらく待ってから再試行してください",
+        detail=RATE_LIMIT_DETAIL,
         headers={"Retry-After": str(retry_after_seconds)},
     )
