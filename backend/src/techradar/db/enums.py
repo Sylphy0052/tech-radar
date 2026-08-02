@@ -31,6 +31,7 @@ class JobType(StrEnum):
     DEDUPLICATE_ARTICLES = "deduplicate_articles"
     PURGE_OPERATION_LOGS = "purge_operation_logs"
     PURGE_RECOMMENDATION_RUNS = "purge_recommendation_runs"
+    REBUILD_INTEREST_CLUSTERS = "rebuild_interest_clusters"
 
 
 class ArticleOrigin(StrEnum):

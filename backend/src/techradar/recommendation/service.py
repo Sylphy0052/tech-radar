@@ -25,28 +25,31 @@ from techradar.db import (
     UserArticle,
 )
 from techradar.db.enums import ArticleOrigin, FeedbackAction, RecommendationMode
+from techradar.interest.service import (
+    load_weighted_interest_articles,
+    order_by_recency_and_truncate,
+)
 from techradar.recommendation.composition import CompositionStats, compose_feed_with_stats
 from techradar.recommendation.config import get_scoring_config
 from techradar.recommendation.ranking import (
     CandidateSignature,
     InterestProfile,
     ScoredCandidate,
+    WeightedEmbedding,
     rank_candidates,
 )
 
 logger = logging.getLogger(__name__)
 
-# 関心プロファイル構築の対象にする origin（`PROJECT_SPEC.md` §7.1 の重み表の経路すべて）。
-_INTEREST_ORIGIN_VALUES = frozenset(
-    origin.value
-    for origin in (
-        ArticleOrigin.MANUAL,
-        ArticleOrigin.GOOD,
-        ArticleOrigin.SAVED,
-        ArticleOrigin.READ_FULL,
-        ArticleOrigin.CLICKED,
-    )
-)
+# 経過日数を求めるための秒数（`ranking.py` の同名の私有定数と同じ値、モジュールを
+# またいで private 定数を共有しないためここでも定義する）。
+_SECONDS_PER_DAY = 86400
+
+# 記事起点推薦（ARTICLE_BASED）における起点記事の重み。時間減衰やフィードバック
+# 強度といったユーザー関心プロファイル特有の重み付けは意味を持たないため固定値
+# にする（`_build_article_based_profile` のdocstring参照）。
+_SOURCE_ARTICLE_WEIGHT = 1.0
+
 # 既に自分のものになっている（Discover へ再掲する価値が無い）とみなす origin。
 _OWNED_ORIGIN_VALUES = frozenset(
     origin.value for origin in (ArticleOrigin.MANUAL, ArticleOrigin.GOOD, ArticleOrigin.SAVED)
@@ -70,77 +73,78 @@ class RecommendationResult:
     composition_stats: CompositionStats | None = None
 
 
+def _load_bad_embeddings(
+    session: Session, user_id: uuid.UUID, limit: int
+) -> tuple[tuple[float, ...], ...]:
+    """ユーザーが Bad にした記事の embedding 群を新しい順に集める。
+
+    Bad 近傍抑制（`ranking.compute_bad_similarity_penalty`）の入力になる。
+    `build_interest_profile`（Discover）・`_build_article_based_profile`
+    （記事起点推薦）の両方から使う共通処理。
+    """
+    bad_feedback_rows = session.execute(
+        select(ArticleFeedback.article_id, ArticleFeedback.created_at).where(
+            ArticleFeedback.user_id == user_id,
+            ArticleFeedback.action == FeedbackAction.BAD.value,
+        )
+    ).all()
+    created_at_by_article_id: dict[uuid.UUID, datetime] = {}
+    for article_id, created_at in bad_feedback_rows:
+        created_at_by_article_id[article_id] = created_at
+    target_article_ids = order_by_recency_and_truncate(
+        created_at_by_article_id, limit, "Bad プロファイル構築対象"
+    )
+    if not target_article_ids:
+        return ()
+
+    bad_articles = session.scalars(select(Article).where(Article.id.in_(target_article_ids))).all()
+    return tuple(
+        tuple(article.embedding) for article in bad_articles if article.embedding is not None
+    )
+
+
 def build_interest_profile(
-    session: Session, user_id: uuid.UUID, settings: Settings
+    session: Session, user_id: uuid.UUID, now: datetime, settings: Settings
 ) -> InterestProfile:
     """ユーザーの関心プロファイルを構築する（`PROJECT_SPEC.md` §8）。
 
-    `user_articles`（origin が manual/good/saved/read_full/clicked のいずれか）と
-    `article_feedback`（action='good'）を突き合わせ、対象記事の embedding と
-    topics を集める。`settings` は他の DB 連携関数と揃えた引数だが、この関数は
-    現時点では `Settings` の値を参照しない（将来 Settings 側にプロファイル関連の
-    項目が増えた場合に備えて残す）。
+    対象記事の抽出・重み計算は `interest.service.load_weighted_interest_articles`
+    に委ねる（`rebuild_interest_clusters` と同じ対象・同じ重み計算を共有する
+    ための共通化、DRY）。ここでは Discover の関心プロファイル
+    （`InterestProfile`）へ組み立て直すことだけを行う。`settings` は他の DB
+    連携関数と揃えた引数だが、この関数は現時点では `Settings` の値を参照しない
+    （将来 Settings 側にプロファイル関連の項目が増えた場合に備えて残す）。
 
-    origin ごとの重み（`user_articles.interest_weight`）と時間減衰は Phase 5
-    （#15）のスコープであり、本実装ではどちらも適用せず全記事を均等に扱う。
+    重み計算の詳細（`effective_interest` の各項の採用値）は
+    `load_weighted_interest_articles` の docstring を参照。
+
+    Bad 済み記事（`article_feedback.action='bad'`）の embedding は
+    `InterestProfile.bad_embeddings` へ別途集める（`_load_bad_embeddings`）。
+    件数上限は `config/scoring.yaml` の `interest.max_bad_profile_articles`
+    で管理し、新しい順に打ち切る。
     """
     del settings  # 現時点では未使用（呼び出し側との引数統一のために残す）。
 
-    config = get_scoring_config()
-    max_articles = config.interest.max_profile_articles
+    weighted_articles = load_weighted_interest_articles(session, user_id, now)
 
-    user_article_rows = session.execute(
-        select(UserArticle.article_id, UserArticle.created_at).where(
-            UserArticle.user_id == user_id,
-            UserArticle.origin.in_(_INTEREST_ORIGIN_VALUES),
-        )
-    ).all()
-    feedback_rows = session.execute(
-        select(ArticleFeedback.article_id, ArticleFeedback.created_at).where(
-            ArticleFeedback.user_id == user_id,
-            ArticleFeedback.action == FeedbackAction.GOOD.value,
-        )
-    ).all()
-
-    # article_feedback の action='good' は §7.1 手順 1 で user_articles にも
-    # 追加されるため、通常は両方に同じ記事が現れる。user_articles 側の記録が
-    # 優先されるよう後から上書きし、article_feedback にしか記録が無い場合の
-    # 取りこぼしだけを補う。
-    created_at_by_article_id: dict[uuid.UUID, datetime] = {}
-    for article_id, created_at in feedback_rows:
-        created_at_by_article_id[article_id] = created_at
-    for article_id, created_at in user_article_rows:
-        created_at_by_article_id[article_id] = created_at
-
-    if not created_at_by_article_id:
-        return InterestProfile(embeddings=(), known_topics=frozenset())
-
-    ordered_article_ids = sorted(
-        created_at_by_article_id,
-        key=lambda article_id: (-created_at_by_article_id[article_id].timestamp(), article_id),
-    )
-
-    truncated_count = len(ordered_article_ids) - max_articles
-    if truncated_count > 0:
-        logger.warning(
-            "関心プロファイル構築対象の記事数が上限を超えたため切り捨てました: "
-            "total=%s limit=%s truncated_count=%s",
-            len(ordered_article_ids),
-            max_articles,
-            truncated_count,
-        )
-    target_article_ids = ordered_article_ids[:max_articles]
-
-    articles = session.scalars(select(Article).where(Article.id.in_(target_article_ids))).all()
-
-    embeddings = tuple(
-        tuple(article.embedding) for article in articles if article.embedding is not None
-    )
+    weighted_embeddings: list[WeightedEmbedding] = []
     known_topics: set[str] = set()
-    for article in articles:
-        known_topics.update(article.topics)
+    for record in weighted_articles:
+        known_topics.update(record.topics)
+        if record.embedding is None:
+            continue
+        weighted_embeddings.append(WeightedEmbedding(vector=record.embedding, weight=record.weight))
 
-    return InterestProfile(embeddings=embeddings, known_topics=frozenset(known_topics))
+    config = get_scoring_config()
+    bad_embeddings = _load_bad_embeddings(
+        session, user_id, config.interest.max_bad_profile_articles
+    )
+
+    return InterestProfile(
+        embeddings=tuple(weighted_embeddings),
+        known_topics=frozenset(known_topics),
+        bad_embeddings=bad_embeddings,
+    )
 
 
 def load_candidates(
@@ -287,13 +291,25 @@ def _to_candidate_signature(
     )
 
 
-def _build_article_based_profile(session: Session, source_article_id: uuid.UUID) -> InterestProfile:
+def _build_article_based_profile(
+    session: Session, user_id: uuid.UUID, source_article_id: uuid.UUID
+) -> InterestProfile:
     """起点記事から記事起点推薦用の関心プロファイルを作る（`PROJECT_SPEC.md` §13.1）。
 
     起点記事に embedding が無ければ空プロファイルのまま返す。
     `compute_interest_similarity` は候補に embedding が無い、またはプロファイルが
     空なら 0.0 を返す仕様のため、これは例外にはならず「一致度で差が付かない」
     挙動になる。
+
+    起点記事の重み（`WeightedEmbedding.weight`）は `_SOURCE_ARTICLE_WEIGHT`
+    （1.0）に固定する。記事起点推薦は「この記事に近い記事」を探す用途で、
+    起点は単一記事しか無く比較対象の候補が近いかどうかだけが問題になるため、
+    時間減衰やフィードバック強度といったユーザーの関心プロファイル全体を
+    要約するための重み付けはそもそも意味を持たない。
+
+    `bad_embeddings` は記事起点推薦でも取得し、Bad 近傍抑制を効かせる。
+    起点記事を経由した推薦であっても、ユーザーが明示的に Bad と判断した
+    記事に近い候補を勧めるべきではないのは Discover と共通の要件のため。
 
     記事起点推薦では `known_topics` が起点記事自身の topics になるため、
     `compute_novelty`（新規性）は「起点記事とどれだけトピックを共有していないか」
@@ -305,8 +321,20 @@ def _build_article_based_profile(session: Session, source_article_id: uuid.UUID)
         message = f"起点記事が見つかりません: {source_article_id}"
         raise ValueError(message)
 
-    embeddings = (tuple(source_article.embedding),) if source_article.embedding is not None else ()
-    return InterestProfile(embeddings=embeddings, known_topics=frozenset(source_article.topics))
+    embeddings = (
+        (WeightedEmbedding(vector=tuple(source_article.embedding), weight=_SOURCE_ARTICLE_WEIGHT),)
+        if source_article.embedding is not None
+        else ()
+    )
+    config = get_scoring_config()
+    bad_embeddings = _load_bad_embeddings(
+        session, user_id, config.interest.max_bad_profile_articles
+    )
+    return InterestProfile(
+        embeddings=embeddings,
+        known_topics=frozenset(source_article.topics),
+        bad_embeddings=bad_embeddings,
+    )
 
 
 def generate_recommendations(
@@ -335,7 +363,7 @@ def generate_recommendations(
     scoring_settings = config.to_settings()
 
     if mode is RecommendationMode.DISCOVER:
-        profile = build_interest_profile(session, user_id, settings)
+        profile = build_interest_profile(session, user_id, now, settings)
         candidates = load_candidates(session, user_id, now, settings)
         scored = rank_candidates(candidates, profile, scoring_settings, now)
         composed = compose_feed_with_stats(scored, scoring_settings, config.limits.feed_run_size)
@@ -346,7 +374,7 @@ def generate_recommendations(
         if source_article_id is None:
             message = "article_based モードには source_article_id が必要です"
             raise ValueError(message)
-        profile = _build_article_based_profile(session, source_article_id)
+        profile = _build_article_based_profile(session, user_id, source_article_id)
         candidates = load_candidates(
             session, user_id, now, settings, source_article_id=source_article_id
         )

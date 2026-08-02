@@ -118,6 +118,19 @@ class Article(Base):
             postgresql_using="hnsw",
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        # トピック単位の選好更新（`interest.service._load_recent_topic_actions`）が
+        # `Article.topics.contains([topic])`（JSONB `@>`）で記事を絞り込む。この関数は
+        # フィードバックのたびに記事のトピック数だけ実行されるホットパスのため、
+        # インデックス無しでは記事が増えるほど全件スキャンのコストが線形に増える
+        # （Issue #15 自己レビュー 4）。`@>` の containment 演算子は等価判定
+        # （キーの存在・値の一致）だけを使い、範囲検索や存在演算子（`?`）は使わない
+        # ため、汎用の `jsonb_ops` より軽量な `jsonb_path_ops` を選ぶ。
+        Index(
+            "ix_articles_topics_gin",
+            "topics",
+            postgresql_using="gin",
+            postgresql_ops={"topics": "jsonb_path_ops"},
+        ),
     )
 
 

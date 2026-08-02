@@ -15,6 +15,7 @@ from techradar.recommendation.config import (
 )
 from techradar.recommendation.ranking import (
     AuthorityGate,
+    BadSimilaritySettings,
     FeedComposition,
     FreshnessSettings,
     InterestSettings,
@@ -45,6 +46,7 @@ freshness:
 interest:
   top_k: 3
   max_profile_articles: 200
+  max_bad_profile_articles: 100
 source_match:
   partial_match_score: 0.5
 novelty:
@@ -63,6 +65,31 @@ limits:
   feed_run_size: 100
   article_based_run_size: 20
   feed_run_reuse_seconds: 600
+feedback_weights:
+  manual: 1.0
+  good: 0.8
+  save: 0.5
+  read_full: 0.2
+  clicked: 0.1
+  bad: 0.8
+interest_decay:
+  half_life_days: 30
+topic_preference:
+  recent_window: 5
+  bad_threshold: 3
+  decay_step: 0.2
+bad_similarity:
+  min_similarity: 0.7
+  max_penalty: 0.5
+clustering:
+  min_clusters: 2
+  max_clusters: 8
+  min_articles_per_cluster: 3
+  label_topic_count: 3
+  random_state: 0
+interest_timeline:
+  default_weeks: 12
+  max_weeks: 52
 """
 
 
@@ -101,6 +128,10 @@ class TestLoading:
     def test_loads_the_bundled_limits(self, config: ScoringConfig):
         # Arrange / Act / Assert
         assert config.limits.default_page_size <= config.limits.max_page_size
+
+    def test_loads_the_bundled_max_bad_profile_articles(self, config: ScoringConfig):
+        # Arrange / Act / Assert — Bad 近傍抑制用の embedding 数上限（Issue #15 段階 2）
+        assert config.interest.max_bad_profile_articles > 0
 
     def test_rejects_weights_that_do_not_sum_to_one(self, tmp_path: Path):
         # Arrange
@@ -203,6 +234,56 @@ class TestLoading:
         # Assert — 同梱ファイルをキャッシュ付きで読み込む
         assert cached == config
 
+    def test_loads_the_bundled_feedback_weights(self, config: ScoringConfig):
+        # Arrange / Act / Assert — PROJECT_SPEC.md §7.1, §7.2 の重み表
+        assert config.feedback_weights.manual == 1.0
+        assert config.feedback_weights.good == 0.8
+        assert config.feedback_weights.save == 0.5
+        assert config.feedback_weights.read_full == 0.2
+        assert config.feedback_weights.clicked == 0.1
+        assert config.feedback_weights.bad == 0.8
+
+    def test_loads_the_bundled_interest_decay(self, config: ScoringConfig):
+        # Arrange / Act / Assert
+        assert config.interest_decay.half_life_days == 30
+
+    def test_loads_the_bundled_topic_preference(self, config: ScoringConfig):
+        # Arrange / Act / Assert — PROJECT_SPEC.md §7.2 の例（直近5件中3件以上）
+        assert config.topic_preference.recent_window == 5
+        assert config.topic_preference.bad_threshold == 3
+        assert config.topic_preference.decay_step == 0.2
+
+    def test_loads_the_bundled_bad_similarity(self, config: ScoringConfig):
+        # Arrange / Act / Assert
+        assert config.bad_similarity.min_similarity == 0.7
+        assert config.bad_similarity.max_penalty == 0.5
+
+    def test_loads_the_bundled_clustering(self, config: ScoringConfig):
+        # Arrange / Act / Assert
+        assert config.clustering.min_clusters <= config.clustering.max_clusters
+        assert config.clustering.min_articles_per_cluster == 3
+        assert config.clustering.label_topic_count == 3
+        assert config.clustering.random_state == 0
+
+    def test_rejects_a_bad_threshold_larger_than_the_recent_window(self, tmp_path: Path):
+        # Arrange — 「一件のBadだけでジャンル全体を抑制しない」判定が
+        # recent_window 件を超えて Bad を数えることは矛盾しているため弾く
+        broken = VALID_YAML.replace("bad_threshold: 3", "bad_threshold: 6")
+        path = write_config(tmp_path, broken)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="bad_threshold"):
+            load_scoring_config(path)
+
+    def test_rejects_a_min_clusters_larger_than_max_clusters(self, tmp_path: Path):
+        # Arrange
+        broken = VALID_YAML.replace("min_clusters: 2", "min_clusters: 9")
+        path = write_config(tmp_path, broken)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="min_clusters"):
+            load_scoring_config(path)
+
 
 class TestConversionToRankingDataclasses:
     """`ranking.py` は Pydantic に依存させないため、専用の frozen dataclass へ変換する。"""
@@ -222,6 +303,7 @@ class TestConversionToRankingDataclasses:
         assert isinstance(settings.novelty, NoveltySettings)
         assert isinstance(settings.feed_composition, FeedComposition)
         assert isinstance(settings.limits, RankingLimits)
+        assert isinstance(settings.bad_similarity, BadSimilaritySettings)
 
     def test_preserves_values_through_the_conversion(self, config: ScoringConfig):
         # Arrange / Act
@@ -237,6 +319,8 @@ class TestConversionToRankingDataclasses:
         assert settings.novelty.default_when_no_topics == 0.5
         assert settings.feed_composition.strong_interest == 0.55
         assert settings.limits.max_candidates_per_run == 500
+        assert settings.bad_similarity.min_similarity == 0.7
+        assert settings.bad_similarity.max_penalty == 0.5
 
 
 class TestWeightsSumToOneAcrossConfig:

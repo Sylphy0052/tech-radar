@@ -18,6 +18,7 @@ from techradar import __version__
 from techradar.api.articles import router as articles_router
 from techradar.api.crawl import router as crawl_router
 from techradar.api.feedback import router as feedback_router
+from techradar.api.interests import router as interests_router
 from techradar.api.jobs import router as jobs_router
 from techradar.api.rate_limit import create_recommendation_rate_limiter
 from techradar.api.recommendations import router as recommendations_router
@@ -106,6 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(crawl_router)
     app.include_router(articles_router)
     app.include_router(feedback_router)
+    app.include_router(interests_router)
     app.include_router(recommendations_router)
 
     @app.get("/api/health", response_model=HealthResponse)
