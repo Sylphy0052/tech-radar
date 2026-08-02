@@ -153,7 +153,8 @@ export interface paths {
          *     非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで
          *     終端と判断せず、`next_cursor` が null になるまで辿ること。
          *
-         *     古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。
+         *     古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を
+         *     削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。
          */
         get: operations["get_feed_api_feed_get"];
         put?: never;
@@ -444,6 +445,14 @@ export interface components {
             status: string;
             /** Type */
             type: string;
+        };
+        /**
+         * RateLimitedResponse
+         * @description 429 のレスポンスボディ（`HTTPException` の既定形）。
+         */
+        RateLimitedResponse: {
+            /** Detail */
+            detail: string;
         };
         /**
          * RecommendationItem
@@ -752,6 +761,17 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
+            /** @description 単位時間あたりのリクエスト数が上限を超えた。`Retry-After` ヘッダに再試行までの待機秒数が入る。 */
+            429: {
+                headers: {
+                    /** @description 再試行までの待機秒数（整数へ切り上げ）。 */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RateLimitedResponse"];
+                };
+            };
         };
     };
     create_crawl_run_api_crawl_runs_post: {
@@ -825,6 +845,17 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 単位時間あたりのリクエスト数が上限を超えた。`Retry-After` ヘッダに再試行までの待機秒数が入る。 */
+            429: {
+                headers: {
+                    /** @description 再試行までの待機秒数（整数へ切り上げ）。 */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RateLimitedResponse"];
                 };
             };
         };

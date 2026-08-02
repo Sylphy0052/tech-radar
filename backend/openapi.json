@@ -366,6 +366,20 @@
         "title": "JobResponse",
         "type": "object"
       },
+      "RateLimitedResponse": {
+        "description": "429 のレスポンスボディ（`HTTPException` の既定形）。",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "RateLimitedResponse",
+        "type": "object"
+      },
       "RecommendationItem": {
         "description": "推薦結果 1 件のレスポンス。\n\n記事本文（`Article.body`）は含めない（ADR 0001、外部には表示しない）。",
         "properties": {
@@ -986,6 +1000,24 @@
               }
             },
             "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitedResponse"
+                }
+              }
+            },
+            "description": "単位時間あたりのリクエスト数が上限を超えた。`Retry-After` ヘッダに再試行までの待機秒数が入る。",
+            "headers": {
+              "Retry-After": {
+                "description": "再試行までの待機秒数（整数へ切り上げ）。",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Create Article Recommendations",
@@ -1055,7 +1087,7 @@
     },
     "/api/feed": {
       "get": {
-        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。\n\n`cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ\n新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。\n`cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、\nページ間で重複が出ないようにする（受入基準）。\n\n`next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で\ncursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が\n非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで\n終端と判断せず、`next_cursor` が null になるまで辿ること。\n\n古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。",
+        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。\n\n`cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ\n新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。\n`cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、\nページ間で重複が出ないようにする（受入基準）。\n\n`next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で\ncursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が\n非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで\n終端と判断せず、`next_cursor` が null になるまで辿ること。\n\n古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を\n削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。",
         "operationId": "get_feed_api_feed_get",
         "parameters": [
           {
@@ -1109,6 +1141,24 @@
               }
             },
             "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitedResponse"
+                }
+              }
+            },
+            "description": "単位時間あたりのリクエスト数が上限を超えた。`Retry-After` ヘッダに再試行までの待機秒数が入る。",
+            "headers": {
+              "Retry-After": {
+                "description": "再試行までの待機秒数（整数へ切り上げ）。",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Get Feed",

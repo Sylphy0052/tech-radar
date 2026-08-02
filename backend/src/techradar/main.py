@@ -19,6 +19,7 @@ from techradar.api.articles import router as articles_router
 from techradar.api.crawl import router as crawl_router
 from techradar.api.feedback import router as feedback_router
 from techradar.api.jobs import router as jobs_router
+from techradar.api.rate_limit import create_recommendation_rate_limiter
 from techradar.api.recommendations import router as recommendations_router
 from techradar.api.sources import router as sources_router
 from techradar.config import Settings, get_settings
@@ -85,6 +86,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = resolved
+    # 推薦 API のレート制限器（`api/rate_limit.py`）はアプリ単位で 1 つ保持する。
+    # `settings` と同じくここで app.state に注入することで、`create_app` を
+    # 都度呼ぶテストごとに独立したインスタンスになり、リクエスト回数の
+    # カウントがテスト間で漏れない。
+    app.state.recommendation_rate_limiter = create_recommendation_rate_limiter(resolved)
 
     # フロントエンド（Next.js dev server）からの呼び出しを許可する。
     app.add_middleware(
