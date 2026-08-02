@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from techradar.config import Settings
 from techradar.db.enums import ArticleOrigin, JobStatus, JobType
-from techradar.db.models import ArticleRegistration, Job, UserArticle
+from techradar.db.models import Article, ArticleRegistration, Job, UserArticle
 from techradar.fetcher import http as fetcher_http
 from techradar.fetcher.errors import ExtractionError, TooManyRedirectsError
 from techradar.fetcher.url import normalize_url
@@ -262,3 +262,97 @@ class TestProcessFetchArticleMissingRegistration:
 
         # Act / Assert — 例外を出さずに終了する
         process_fetch_article(db_session, context, settings)
+
+
+class TestProcessFetchArticleWithoutRegistration:
+    """`registration_id` を持たない（巡回由来の）payload を検証する（Issue #9 T15）。"""
+
+    def _make_context(self, url: str = "https://example.com/posts/1") -> JobContext:
+        return JobContext(
+            job_id=uuid.uuid4(),
+            job_type=JobType.FETCH_ARTICLE,
+            payload={"url": url, "origin": "crawl_sources"},
+            attempts=0,
+        )
+
+    def test_saves_the_article_without_raising_a_key_error(
+        self, db_session: Session, public_dns, fetch_transport, settings: Settings
+    ) -> None:
+        # Arrange
+        context = self._make_context()
+
+        # Act — registration_id が無くても KeyError にならない
+        process_fetch_article(db_session, context, settings)
+
+        # Assert
+        article = db_session.scalars(
+            select(Article).where(Article.canonical_url == normalize_url(context.payload["url"]))
+        ).one()
+        assert article is not None
+
+    def test_does_not_add_a_user_article(
+        self, db_session: Session, public_dns, fetch_transport, settings: Settings
+    ) -> None:
+        """受入基準: 巡回由来の候補は手動登録と同じ関心の重みを与えないため
+        `user_articles` へは追加しない。
+        """
+        # Arrange
+        context = self._make_context()
+
+        # Act
+        process_fetch_article(db_session, context, settings)
+
+        # Assert
+        article = db_session.scalars(
+            select(Article).where(Article.canonical_url == normalize_url(context.payload["url"]))
+        ).one()
+        user_articles = db_session.scalars(
+            select(UserArticle).where(UserArticle.article_id == article.id)
+        ).all()
+        assert user_articles == []
+
+    def test_enqueues_an_analyze_article_job_without_a_registration_id(
+        self, db_session: Session, public_dns, fetch_transport, settings: Settings
+    ) -> None:
+        # Arrange
+        context = self._make_context()
+
+        # Act
+        process_fetch_article(db_session, context, settings)
+
+        # Assert
+        article = db_session.scalars(
+            select(Article).where(Article.canonical_url == normalize_url(context.payload["url"]))
+        ).one()
+        jobs = db_session.scalars(
+            select(Job).where(Job.type == JobType.ANALYZE_ARTICLE.value)
+        ).all()
+        assert len(jobs) == 1
+        assert jobs[0].payload == {"article_id": str(article.id)}
+
+    def test_does_not_call_record_registration_failure_safely_on_error(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """失敗記録先の登録行が無いため、記録処理を呼ばず例外をそのまま送出する。"""
+        # Arrange
+        context = self._make_context()
+
+        def _raise_extraction_error(*_args: object, **_kwargs: object) -> None:
+            raise ExtractionError("boom")
+
+        monkeypatch.setattr(fetch_article_handler, "ingest_article", _raise_extraction_error)
+
+        was_called = False
+
+        def _fail_if_called(*_args: object, **_kwargs: object) -> None:
+            nonlocal was_called
+            was_called = True
+
+        monkeypatch.setattr(
+            fetch_article_handler, "record_registration_failure_safely", _fail_if_called
+        )
+
+        # Act / Assert
+        with pytest.raises(ExtractionError):
+            process_fetch_article(db_session, context, settings)
+        assert was_called is False

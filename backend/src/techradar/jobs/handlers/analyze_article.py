@@ -1,6 +1,8 @@
-"""`analyze_article` ジョブハンドラ（`PROJECT_SPEC.md` §6.2, Issue #12 T3）。
+"""`analyze_article` ジョブハンドラ（`PROJECT_SPEC.md` §6.2, Issue #12 T3, Issue #9 T15）。
 
-記事を解析して構造化データを保存し、`embed_article` を積む。
+記事を解析して構造化データを保存し、`embed_article` を積む。payload に
+`registration_id` が無い場合（巡回由来のジョブ）は登録行の更新・失敗記録を
+すべて省略する（`techradar.jobs.handlers.fetch_article` と同じ設計）。
 """
 
 from __future__ import annotations
@@ -17,7 +19,8 @@ from techradar.config import Settings, get_settings
 from techradar.db.enums import JobType
 from techradar.db.models import Article
 from techradar.jobs.handlers._shared import (
-    load_registration,
+    load_registration_if_present,
+    optional_registration_id,
     record_registration_failure_safely,
     run_job_in_thread,
     start_registration_step,
@@ -37,14 +40,16 @@ def process_analyze_article(
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """`analyze_article` ジョブ 1 件分の処理。"""
-    registration_id = uuid.UUID(context.payload["registration_id"])
+    registration_id = optional_registration_id(context.payload)
     article_id = uuid.UUID(context.payload["article_id"])
 
-    registration = load_registration(session, registration_id)
-    if registration is None:
+    registration = load_registration_if_present(session, registration_id)
+    if registration_id is not None and registration is None:
+        # 登録行が既に削除されている。リトライしても解決しないため打ち切る。
         return
 
-    start_registration_step(session, registration, JobType.ANALYZE_ARTICLE)
+    if registration is not None:
+        start_registration_step(session, registration, JobType.ANALYZE_ARTICLE)
 
     article = session.get(Article, article_id)
     if article is None:
@@ -57,21 +62,22 @@ def process_analyze_article(
         if needs_analysis(article):
             run_analysis(session, provider, article, job_id=context.job_id, sleep=sleep)
 
-        next_job = enqueue(
-            session,
-            JobType.EMBED_ARTICLE,
-            {"registration_id": str(registration.id), "article_id": str(article.id)},
-        )
-        registration.job_id = next_job.id
+        next_payload = {"article_id": str(article.id)}
+        if registration is not None:
+            next_payload["registration_id"] = str(registration.id)
+        next_job = enqueue(session, JobType.EMBED_ARTICLE, next_payload)
+        if registration is not None:
+            registration.job_id = next_job.id
         session.flush()
     except Exception as exc:
-        record_registration_failure_safely(
-            session,
-            registration_id,
-            classify_analysis_error(exc),
-            context=context,
-            settings=settings,
-        )
+        if registration_id is not None:
+            record_registration_failure_safely(
+                session,
+                registration_id,
+                classify_analysis_error(exc),
+                context=context,
+                settings=settings,
+            )
         raise
 
 

@@ -1,7 +1,9 @@
-"""`embed_article` ジョブハンドラ（`PROJECT_SPEC.md` §6.2, Issue #12 T3）。
+"""`embed_article` ジョブハンドラ（`PROJECT_SPEC.md` §6.2, Issue #12 T3, Issue #9 T15）。
 
-記事へ Embedding を付与し、URL 登録の状態を `completed` にする
-（登録の状態遷移における最終段階）。
+記事へ Embedding を付与し、登録行があれば URL 登録の状態を `completed` にする
+（登録の状態遷移における最終段階）。payload に `registration_id` が無い場合
+（巡回由来のジョブ）は登録行の更新・失敗記録をすべて省略する
+（`techradar.jobs.handlers.fetch_article` と同じ設計）。
 """
 
 from __future__ import annotations
@@ -20,7 +22,8 @@ from techradar.embedding import (
     needs_embedding,
 )
 from techradar.jobs.handlers._shared import (
-    load_registration,
+    load_registration_if_present,
+    optional_registration_id,
     record_registration_failure_safely,
     run_job_in_thread,
     start_registration_step,
@@ -36,17 +39,18 @@ def process_embed_article(
     provider: EmbeddingProvider,
 ) -> None:
     """`embed_article` ジョブ 1 件分の処理。"""
-    registration_id = uuid.UUID(context.payload["registration_id"])
+    registration_id = optional_registration_id(context.payload)
     article_id = uuid.UUID(context.payload["article_id"])
 
-    registration = load_registration(session, registration_id)
-    if registration is None:
+    registration = load_registration_if_present(session, registration_id)
+    if registration_id is not None and registration is None:
         return
 
-    # embed_article の実行中 status は `analyzing` に集約される
-    # （`techradar.jobs.status.running_status_for`）。embedding 専用の
-    # 実行中 status は無いため、ここで設定される値も analyzing になる。
-    start_registration_step(session, registration, JobType.EMBED_ARTICLE)
+    if registration is not None:
+        # embed_article の実行中 status は `analyzing` に集約される
+        # （`techradar.jobs.status.running_status_for`）。embedding 専用の
+        # 実行中 status は無いため、ここで設定される値も analyzing になる。
+        start_registration_step(session, registration, JobType.EMBED_ARTICLE)
 
     article = session.get(Article, article_id)
     if article is None:
@@ -59,17 +63,19 @@ def process_embed_article(
         if needs_embedding(article):
             embed_articles(session, provider, [article])
 
-        # URL 登録の状態遷移（`PROJECT_SPEC.md` §6.2）の終端。
-        registration.status = JobStatus.COMPLETED.value
+        if registration is not None:
+            # URL 登録の状態遷移（`PROJECT_SPEC.md` §6.2）の終端。
+            registration.status = JobStatus.COMPLETED.value
         session.flush()
     except Exception as exc:
-        record_registration_failure_safely(
-            session,
-            registration_id,
-            classify_embedding_error(exc),
-            context=context,
-            settings=settings,
-        )
+        if registration_id is not None:
+            record_registration_failure_safely(
+                session,
+                registration_id,
+                classify_embedding_error(exc),
+                context=context,
+                settings=settings,
+            )
         raise
 
 

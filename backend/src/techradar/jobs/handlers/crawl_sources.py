@@ -1,0 +1,65 @@
+"""`crawl_sources` ジョブハンドラ（`PROJECT_SPEC.md` §12, Issue #9 T14）。
+
+巡回設定に従ってコレクター群を実行し、見つかった候補記事を `fetch_article`
+ジョブとして積む。実際の収集・絞り込みロジックは
+`techradar.collectors.service.collect_candidates` に委ね、ここではジョブと
+しての配線（別スレッドへ逃がす・payload の解釈）だけを担う。
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from techradar.collectors.service import collect_candidates
+from techradar.config import Settings, get_settings
+from techradar.jobs.handlers._shared import run_job_in_thread
+from techradar.jobs.registry import JobContext, JobHandler
+
+logger = logging.getLogger(__name__)
+
+
+def process_crawl_sources(session: Session, context: JobContext, settings: Settings) -> None:
+    """`crawl_sources` ジョブ 1 件分の処理。
+
+    セキュリティ上の設計判断（MR !9 のレビュー申し送りに対する受入基準）:
+    `payload["source_domain"]` は API 側（`techradar.api.crawl`）では形式検証しか
+    行っておらず、`169.254.169.254` のような IP リテラルやリンクローカル
+    アドレスが入りうる。この値から URL を組み立てて直接リクエストを送る経路は
+    絶対に作らない。ここでは `source_domain` を
+    `techradar.collectors.service.collect_candidates` へそのまま渡し、
+    「巡回結果を後から絞り込むフィルタ条件」としてのみ使う。実際の HTTP
+    通信は各コレクターが既定の巡回先（設定済みフィード・API）に対して
+    `techradar.fetcher.fetch_resource` / `fetch_page` 経由でのみ行うため、
+    `source_domain` の値が SSRF の入力として使われることはない。
+    """
+    collect_candidates(session, settings=settings, source_domain=_source_domain(context.payload))
+
+
+def _source_domain(payload: dict[str, Any]) -> str | None:
+    """payload から `source_domain` を取り出す。
+
+    `Job.payload` は JSONB のため、API を経ずに積まれたジョブでは文字列以外
+    （list / int / dict）が入りうる。そのまま渡すと絞り込み側の文字列操作が
+    `AttributeError` で落ち、原因の分からない失敗としてジョブに記録される。
+    境界は API 層だけでなくジョブ実行層にも置き、型が違えば「絞り込み指定なし」
+    として扱う（巡回自体は続行してよいため、例外にはしない）。
+    """
+    raw = payload.get("source_domain")
+    if not isinstance(raw, str):
+        if raw is not None:
+            logger.warning("crawl_sources.invalid_source_domain type=%s", type(raw).__name__)
+        return None
+    return raw
+
+
+def make_crawl_sources_handler(settings: Settings | None = None) -> JobHandler:
+    """`JobHandlerRegistry` へ登録する `crawl_sources` ハンドラを作る。"""
+    resolved_settings = settings or get_settings()
+
+    async def _handle(context: JobContext) -> None:
+        await run_job_in_thread(context, resolved_settings, process_crawl_sources)
+
+    return _handle

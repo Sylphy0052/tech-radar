@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 
 from techradar.config import Settings
@@ -69,17 +67,3 @@ def test_create_default_registry_registers_url_registration_and_crawl_handlers()
             assert registry.get(job_type) is not None
         else:
             assert registry.get(job_type) is None
-
-
-async def test_create_default_registry_crawl_sources_handler_is_a_noop() -> None:
-    """`crawl_sources` は Issue #9 が実装するまでのプレースホルダ（no-op）である。"""
-    # Arrange
-    registry = create_default_registry(Settings(_env_file=None))
-    handler = registry.get(JobType.CRAWL_SOURCES)
-    assert handler is not None
-    context = JobContext(
-        job_id=uuid.uuid4(), job_type=JobType.CRAWL_SOURCES, payload={}, attempts=0
-    )
-
-    # Act / Assert: 例外を出さずに終了する
-    assert await handler(context) is None
