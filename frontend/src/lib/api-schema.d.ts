@@ -447,6 +447,14 @@ export interface components {
             type: string;
         };
         /**
+         * RateLimitedResponse
+         * @description 429 のレスポンスボディ（`HTTPException` の既定形）。
+         */
+        RateLimitedResponse: {
+            /** Detail */
+            detail: string;
+        };
+        /**
          * RecommendationItem
          * @description 推薦結果 1 件のレスポンス。
          *
@@ -753,6 +761,17 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
+            /** @description 単位時間あたりのリクエスト数が上限を超えた。`Retry-After` ヘッダに再試行までの待機秒数が入る。 */
+            429: {
+                headers: {
+                    /** @description 再試行までの待機秒数（整数へ切り上げ）。 */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RateLimitedResponse"];
+                };
+            };
         };
     };
     create_crawl_run_api_crawl_runs_post: {
@@ -826,6 +845,17 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 単位時間あたりのリクエスト数が上限を超えた。`Retry-After` ヘッダに再試行までの待機秒数が入る。 */
+            429: {
+                headers: {
+                    /** @description 再試行までの待機秒数（整数へ切り上げ）。 */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RateLimitedResponse"];
                 };
             };
         };

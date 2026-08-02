@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_app_settings, get_current_user_id, get_now, get_session
 from techradar.api.feedback import ArticleFeedbackResponse
-from techradar.api.rate_limit import enforce_recommendation_rate_limit
+from techradar.api.rate_limit import RATE_LIMITED_RESPONSES, enforce_recommendation_rate_limit
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, Recommendation, RecommendationRun, UserArticle
 from techradar.db.enums import FeedbackAction, RecommendationMode
@@ -282,6 +282,7 @@ def _resolve_discover_run_id(
     "/articles/{article_id}/recommendations",
     response_model=ArticleRecommendationsResponse,
     dependencies=[Depends(enforce_recommendation_rate_limit)],
+    responses=RATE_LIMITED_RESPONSES,
 )
 def create_article_recommendations(
     article_id: uuid.UUID,
@@ -328,6 +329,7 @@ def create_article_recommendations(
     "/feed",
     response_model=FeedResponse,
     dependencies=[Depends(enforce_recommendation_rate_limit)],
+    responses=RATE_LIMITED_RESPONSES,
 )
 def get_feed(
     session: SessionDep,
