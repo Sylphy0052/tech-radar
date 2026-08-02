@@ -83,6 +83,15 @@ class Settings(BaseSettings):
     # にこの値を使う。`api.deps.get_current_user_id` から参照する。
     default_user_id: uuid.UUID = Field(default=_DEFAULT_USER_ID)
     log_retention_days: int = Field(default=90, gt=0)
+    # `recommendation_runs` の保持期間（Issue #28）。`GET /api/feed` は呼ばれる
+    # たびに run を作りうるため、`operation_logs` と同じ発想で古い run を削除する。
+    # cursor ページングの途中で対象 run が消えると以降のページ要求が 400 になるが、
+    # 既定の 30 日はページング所要時間より十分長いため実害はない。
+    recommendation_run_retention_days: int = Field(default=30, gt=0)
+    # 推薦 API のレート制限（Issue #28、`PROJECT_SPEC.md` §24）。
+    # ウィンドウ内でこの回数を超えたら 429 を返す。
+    recommendation_rate_limit_requests: int = Field(default=30, gt=0)
+    recommendation_rate_limit_window_seconds: float = Field(default=60.0, gt=0)
     worker_concurrency: int = Field(default=2, gt=0)
     # False ならジョブワーカーを起動しない。テストのたびに実ワーカーが DB を
     # ポーリングすると、テストが不安定になりテスト用 DB のトランザクションとも

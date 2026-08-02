@@ -109,6 +109,7 @@ limits:
   article_based_run_size: 20
   # cursor 無しで GET /api/feed を呼んだとき、直近の DISCOVER run をこの秒数
   # 以内なら新規生成せず再利用する（api/recommendations.py の get_feed）。
-  # 0 は「常に新規生成する」（無効化）を意味する。古い run の削除ジョブと
-  # API のレート制限自体は別スコープ（Issue #28）
+  # 0 は「常に新規生成する」（無効化）を意味する。古い run の削除ジョブは
+  # jobs/handlers/purge_recommendation_runs.py、API のレート制限は
+  # api/rate_limit.py がそれぞれ担う（Issue #28）
   feed_run_reuse_seconds: 600

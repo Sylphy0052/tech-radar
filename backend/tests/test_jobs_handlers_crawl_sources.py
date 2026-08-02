@@ -258,3 +258,52 @@ class TestPurgeJobIsEnqueuedAfterCrawling:
         ).all()
         assert fetch_jobs == []
         assert len(purge_jobs) == 1
+
+
+class TestRecommendationRunPurgeJobIsEnqueuedAfterCrawling:
+    """`recommendation_runs` の削除も巡回に便乗させる（Issue #28）。
+
+    `TestPurgeJobIsEnqueuedAfterCrawling`（Issue #19）と同じ理由（常駐
+    スケジューラを置かない設計）で、巡回が実際に走ったときにだけ
+    `purge_recommendation_runs` を積む。
+    """
+
+    def test_enqueues_a_purge_recommendation_runs_job_alongside_the_collected_candidates(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """候補が集まった通常の巡回でも、削除ジョブは 1 件だけ積まれる。"""
+        # Arrange
+        candidate = CandidateArticle(
+            url="https://example.com/articles/found",
+            title="タイトル",
+            published_at=datetime.now(UTC),
+            collector_name="fake",
+        )
+        _patch_collect_candidates_with_collectors(
+            monkeypatch, [_FakeCollector("fake", [candidate])]
+        )
+
+        # Act
+        process_crawl_sources(db_session, make_context(), settings)
+
+        # Assert
+        purge_jobs = db_session.scalars(
+            select(Job).where(Job.type == JobType.PURGE_RECOMMENDATION_RUNS.value)
+        ).all()
+        assert len(purge_jobs) == 1
+
+    def test_enqueues_the_purge_job_even_when_no_candidate_is_collected(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """候補がゼロでも run の保持期間は経過するため、削除ジョブは積む。"""
+        # Arrange
+        _patch_collect_candidates_with_collectors(monkeypatch, [])
+
+        # Act
+        process_crawl_sources(db_session, make_context(), settings)
+
+        # Assert
+        purge_jobs = db_session.scalars(
+            select(Job).where(Job.type == JobType.PURGE_RECOMMENDATION_RUNS.value)
+        ).all()
+        assert len(purge_jobs) == 1

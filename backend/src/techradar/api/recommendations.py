@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_app_settings, get_current_user_id, get_now, get_session
 from techradar.api.feedback import ArticleFeedbackResponse
+from techradar.api.rate_limit import enforce_recommendation_rate_limit
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, Recommendation, RecommendationRun, UserArticle
 from techradar.db.enums import FeedbackAction, RecommendationMode
@@ -261,8 +262,9 @@ def _resolve_discover_run_id(
     直近 run の読み取りと生成の間に排他制御は掛けないため、ほぼ同時に届いた
     cursor 無しのリクエストは、いずれも「再利用できる run が無い」と判断して
     それぞれ run を作りうる。単一ユーザー・ローカル実行の前提では実害が小さい
-    ため許容する。古い run の削除ジョブと API のレート制限も本 MR のスコープ外
-    （いずれも Issue #28）。
+    ため許容する。古い run は `jobs/handlers/purge_recommendation_runs.py` が
+    保持期間超過分を削除し、この関数自体の呼び出し過多は `rate_limit.py` の
+    レート制限（Issue #28）が抑える。
     """
     reuse_seconds = get_scoring_config().limits.feed_run_reuse_seconds
     if reuse_seconds > 0:
@@ -279,6 +281,7 @@ def _resolve_discover_run_id(
 @router.post(
     "/articles/{article_id}/recommendations",
     response_model=ArticleRecommendationsResponse,
+    dependencies=[Depends(enforce_recommendation_rate_limit)],
 )
 def create_article_recommendations(
     article_id: uuid.UUID,
@@ -321,7 +324,11 @@ def create_article_recommendations(
     )
 
 
-@router.get("/feed", response_model=FeedResponse)
+@router.get(
+    "/feed",
+    response_model=FeedResponse,
+    dependencies=[Depends(enforce_recommendation_rate_limit)],
+)
 def get_feed(
     session: SessionDep,
     settings: SettingsDep,
@@ -345,7 +352,8 @@ def get_feed(
     非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで
     終端と判断せず、`next_cursor` が null になるまで辿ること。
 
-    古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。
+    古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を
+    削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。
     """
     if cursor is None:
         run_id = _resolve_discover_run_id(session, settings, user_id, now)
