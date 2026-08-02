@@ -15,7 +15,9 @@ from sqlalchemy.orm import Session
 
 from techradar.collectors.service import collect_candidates
 from techradar.config import Settings, get_settings
+from techradar.db.enums import JobType
 from techradar.jobs.handlers._shared import run_job_in_thread
+from techradar.jobs.queue import enqueue
 from techradar.jobs.registry import JobContext, JobHandler
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,23 @@ def process_crawl_sources(session: Session, context: JobContext, settings: Setti
     `source_domain` の値が SSRF の入力として使われることはない。
     """
     collect_candidates(session, settings=settings, source_domain=_source_domain(context.payload))
+    _enqueue_log_purge(session)
+
+
+def _enqueue_log_purge(session: Session) -> None:
+    """保持期間を過ぎた `operation_logs` の削除ジョブを積む（Issue #19）。
+
+    常駐スケジューラを置かない設計のため、定期実行の契機は UI の巡回ボタンしか
+    ない。巡回が実際に走ったときにここで積むことで、保持期間 90 日
+    （`PROJECT_SPEC.md` §24）に実行主体を与える。
+
+    候補が 0 件でもログの保持期間は経過するため、収集結果に関わらず積む。
+    API 側の重複起動抑制（`api/crawl.py`）が防ぐのは巡回ジョブの同時起動までで、
+    `reclaim_stale` による巡回自体の再実行までは防げない。その場合は削除ジョブが
+    重複して積まれるが、削除は同じ条件の DELETE を繰り返すだけで冪等なため
+    （2 回目以降は対象 0 件になる）、ここでは重複を許容する。
+    """
+    enqueue(session, JobType.PURGE_OPERATION_LOGS)
 
 
 def _source_domain(payload: dict[str, Any]) -> str | None:
