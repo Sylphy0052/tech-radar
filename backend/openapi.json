@@ -971,6 +971,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "maxLength": 256,
                   "type": "string"
                 },
                 {
@@ -989,6 +990,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "maxLength": 256,
                   "type": "string"
                 },
                 {
@@ -1007,6 +1009,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "maxLength": 256,
                   "type": "string"
                 },
                 {
@@ -1025,6 +1028,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "maxLength": 256,
                   "type": "string"
                 },
                 {

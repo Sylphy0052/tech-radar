@@ -12,7 +12,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from techradar.api.articles import INTEREST_CURSOR_MAX_LENGTH
+from techradar.api.articles import (
+    INTEREST_CURSOR_MAX_LENGTH,
+    INTEREST_LIST_TEXT_FILTER_MAX_LENGTH,
+)
 from techradar.api.deps import get_session
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, UserArticle
@@ -440,6 +443,21 @@ class TestListInterestArticlesFilters:
         items = response.json()["items"]
         assert [item["article_id"] for item in items] == [str(matching.id)]
 
+    def test_returns_200_with_empty_items_for_an_origin_outside_the_interest_list(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """設計判断: read_full/clicked のみを指定しても 422 ではなく 200 + 空配列を返す。"""
+        # Arrange
+        article = make_article(db_session, title="全文閲覧記事")
+        add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.READ_FULL)
+
+        # Act
+        response = client.get("/api/articles", params={"origin": "read_full"})
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json()["items"] == []
+
     def test_rejects_an_undefined_origin_value(self, client: TestClient) -> None:
         # Act
         response = client.get("/api/articles", params={"origin": "not_a_real_origin"})
@@ -456,6 +474,32 @@ class TestListInterestArticlesFilters:
                 "registered_to": NOW.isoformat(),
             },
         )
+
+        # Assert
+        assert response.status_code == 422
+
+    def test_rejects_a_naive_registered_from(self, client: TestClient) -> None:
+        """受入基準: タイムゾーン無しの registered_from は 422 で拒否する。"""
+        # Act — オフセット無し（naive）の日時文字列
+        response = client.get("/api/articles", params={"registered_from": "2026-08-01T00:00:00"})
+
+        # Assert
+        assert response.status_code == 422
+
+    def test_rejects_a_naive_registered_to(self, client: TestClient) -> None:
+        """受入基準: タイムゾーン無しの registered_to は 422 で拒否する。"""
+        # Act
+        response = client.get("/api/articles", params={"registered_to": "2026-08-01T00:00:00"})
+
+        # Assert
+        assert response.status_code == 422
+
+    def test_rejects_a_domain_exceeding_the_max_length(self, client: TestClient) -> None:
+        # Arrange
+        oversized_domain = "a" * (INTEREST_LIST_TEXT_FILTER_MAX_LENGTH + 1)
+
+        # Act
+        response = client.get("/api/articles", params={"domain": oversized_domain})
 
         # Assert
         assert response.status_code == 422
@@ -494,6 +538,81 @@ class TestListInterestArticlesPaging:
         expected_ids = [str(article.id) for article in reversed(articles)]
         assert collected_ids == expected_ids
         assert len(set(collected_ids)) == len(collected_ids)
+
+    def test_paginates_correctly_when_created_at_is_identical_for_multiple_rows(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: created_at が同一でも user_articles.id でタイブレークし、重複・欠落が無い。"""
+        # Arrange — 5 件すべて同一の created_at にする
+        # （分単位でずらすと id によるタイブレークが検証できない）
+        articles = [make_article(db_session, title=f"同時刻記事{index}") for index in range(5)]
+        for article in articles:
+            add_user_article(
+                db_session, settings.default_user_id, article, ArticleOrigin.MANUAL, created_at=NOW
+            )
+
+        # Act
+        collected_ids: list[str] = []
+        cursor: str | None = None
+        for _ in range(10):
+            params = {"limit": 2}
+            if cursor is not None:
+                params["cursor"] = cursor
+            response = client.get("/api/articles", params=params)
+            body = response.json()
+            collected_ids.extend(item["article_id"] for item in body["items"])
+            cursor = body["next_cursor"]
+            if cursor is None:
+                break
+
+        # Assert
+        expected_ids = {str(article.id) for article in articles}
+        assert set(collected_ids) == expected_ids
+        assert len(collected_ids) == len(expected_ids)
+
+    def test_paginates_correctly_when_a_filter_is_combined_with_cursor_and_limit(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: フィルター（domain）と cursor/limit を併用しても正しく分割・復元される。"""
+        # Arrange — domain=ai の5件だけをページングで回収する。domain=web は紛れ込まない
+        ai_articles = [
+            make_article(db_session, title=f"AI記事{index}", domain="ai") for index in range(5)
+        ]
+        web_article = make_article(db_session, title="Web記事", domain="web")
+        for index, article in enumerate(ai_articles):
+            add_user_article(
+                db_session,
+                settings.default_user_id,
+                article,
+                ArticleOrigin.MANUAL,
+                created_at=NOW + timedelta(minutes=index),
+            )
+        add_user_article(
+            db_session,
+            settings.default_user_id,
+            web_article,
+            ArticleOrigin.MANUAL,
+            created_at=NOW + timedelta(minutes=10),
+        )
+
+        # Act
+        collected_ids: list[str] = []
+        cursor: str | None = None
+        for _ in range(10):
+            params: dict[str, str | int] = {"limit": 2, "domain": "ai"}
+            if cursor is not None:
+                params["cursor"] = cursor
+            response = client.get("/api/articles", params=params)
+            body = response.json()
+            collected_ids.extend(item["article_id"] for item in body["items"])
+            cursor = body["next_cursor"]
+            if cursor is None:
+                break
+
+        # Assert
+        expected_ids = [str(article.id) for article in reversed(ai_articles)]
+        assert collected_ids == expected_ids
+        assert str(web_article.id) not in collected_ids
 
     def test_returns_a_null_next_cursor_when_there_is_no_more_data(
         self, client: TestClient, db_session: Session, settings: Settings

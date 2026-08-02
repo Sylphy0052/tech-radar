@@ -104,6 +104,14 @@ describe("ArticleFilterPanel", () => {
     expect(query.get("registered_to")).toBe("2026-08-01T14:59:59.999Z");
   });
 
+  it("does not crash when registered_from in the URL is not a valid date", () => {
+    // Arrange & Act — 不正な日付クエリ（共有リンク/手動編集で容易に到達しうる）
+    renderPanel("registered_from=not-a-date");
+
+    // Assert — レンダーが完了し、開始日フィールドは空欄にフォールバックする
+    expect(screen.getByLabelText("登録日時（開始）")).toHaveValue("");
+  });
+
   it("clears every filter from the URL when the clear button is pressed", () => {
     // Arrange
     render(

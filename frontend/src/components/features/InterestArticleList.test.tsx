@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InterestArticleList } from "@/components/features/InterestArticleList";
@@ -108,8 +108,8 @@ describe("InterestArticleList", () => {
     renderList();
     await waitFor(() => expect(screen.getByText("除外対象")).toBeInTheDocument());
 
-    // Act
-    screen.getByRole("button", { name: "関心対象から除外" }).click();
+    // Act — 素の DOM の click() は act の外で状態更新が走り、負荷時に反映を取りこぼす。
+    fireEvent.click(screen.getByRole("button", { name: "関心対象から除外" }));
 
     // Assert
     await waitFor(() => expect(screen.queryByText("除外対象")).not.toBeInTheDocument());

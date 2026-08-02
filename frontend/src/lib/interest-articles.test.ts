@@ -64,6 +64,28 @@ describe("parseArticleFiltersFromSearchParams", () => {
     expect(parseArticleFiltersFromSearchParams(new URLSearchParams("")).isPrimarySource).toBeNull();
   });
 
+  it("falls back to null when registered_from is not a valid date", () => {
+    // Arrange — 共有リンク/手動編集/ブラウザ履歴経由で容易に到達しうる不正値
+    const searchParams = new URLSearchParams("registered_from=not-a-date");
+
+    // Act
+    const filters = parseArticleFiltersFromSearchParams(searchParams);
+
+    // Assert — バックエンドへ不正値を送らないよう、ここで落とす
+    expect(filters.registeredFrom).toBeNull();
+  });
+
+  it("falls back to null when registered_to is not a valid date", () => {
+    // Arrange
+    const searchParams = new URLSearchParams("registered_to=also-not-a-date");
+
+    // Act
+    const filters = parseArticleFiltersFromSearchParams(searchParams);
+
+    // Assert
+    expect(filters.registeredTo).toBeNull();
+  });
+
   it("reads the remaining text and date filters", () => {
     // Arrange
     const searchParams = new URLSearchParams(
@@ -168,6 +190,13 @@ describe("JST date conversion helpers", () => {
 
   it("converts a UTC instant back to the JST calendar date", () => {
     expect(isoToJstDateInputValue("2026-07-31T15:00:00.000Z")).toBe("2026-08-01");
+  });
+
+  it("returns an empty string instead of throwing for an unparseable ISO string", () => {
+    // Arrange — `?registered_from=not-a-date` のような URL から到達しうる値
+    // Act & Assert — RangeError を送出せず、安全側（空欄）にフォールバックする
+    expect(() => isoToJstDateInputValue("not-a-date")).not.toThrow();
+    expect(isoToJstDateInputValue("not-a-date")).toBe("");
   });
 });
 

@@ -146,6 +146,58 @@ describe("useInterestArticles", () => {
     expect(result.current.hasMore).toBe(false);
   });
 
+  it("discards a stale loadMore response that resolves after the filters changed", async () => {
+    // Arrange — フィルターA の loadMore を発行した直後（レスポンス到達前）にフィルターを B へ切り替える
+    const filtersA: ArticleFilters = { ...EMPTY_ARTICLE_FILTERS, domain: "a" };
+    const filtersB: ArticleFilters = { ...EMPTY_ARTICLE_FILTERS, domain: "b" };
+    const itemA1 = makeItem({ article_id: "10000000-0000-0000-0000-000000000001" });
+    const itemA2 = makeItem({ article_id: "10000000-0000-0000-0000-000000000002" });
+    const itemB1 = makeItem({ article_id: "20000000-0000-0000-0000-000000000001" });
+
+    let resolveStaleLoadMore!: (response: Response) => void;
+    const staleLoadMorePromise = new Promise<Response>((resolve) => {
+      resolveStaleLoadMore = resolve;
+    });
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      const searchParams = new URL(url).searchParams;
+      const domain = searchParams.get("domain");
+      const cursor = searchParams.get("cursor");
+      if (domain === "a" && cursor === "page-a-2") {
+        // フィルターA の loadMore 分だけ、あえて解決を保留する
+        return staleLoadMorePromise;
+      }
+      if (domain === "a") {
+        return jsonResponse({ items: [itemA1], next_cursor: "page-a-2" });
+      }
+      return jsonResponse({ items: [itemB1], next_cursor: null });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, rerender } = renderHook(({ filters }) => useInterestArticles(filters), {
+      initialProps: { filters: filtersA },
+    });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.items).toEqual([itemA1]);
+
+    // Act
+    act(() => {
+      result.current.loadMore();
+    });
+    rerender({ filters: filtersB });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.items).toEqual([itemB1]);
+
+    // フィルターA 向けの loadMore レスポンスが、フィルター切替の後から解決する
+    await act(async () => {
+      resolveStaleLoadMore(jsonResponse({ items: [itemA2], next_cursor: null }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // Assert — 旧フィルターの記事が新フィルターの結果へ混ざらない
+    expect(result.current.items.map((item) => item.article_id)).toEqual([itemB1.article_id]);
+  });
+
   it("does not call the API again once next_cursor is null", async () => {
     // Arrange
     const fetchMock = stubListPages();
