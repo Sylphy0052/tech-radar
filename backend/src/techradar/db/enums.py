@@ -29,6 +29,7 @@ class JobType(StrEnum):
     CRAWL_SOURCES = "crawl_sources"
     GENERATE_FEED = "generate_feed"
     DEDUPLICATE_ARTICLES = "deduplicate_articles"
+    PURGE_OPERATION_LOGS = "purge_operation_logs"
 
 
 class ArticleOrigin(StrEnum):

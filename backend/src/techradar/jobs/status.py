@@ -19,6 +19,10 @@ _RUNNING_STATUS_BY_JOB_TYPE: dict[JobType, JobStatus] = {
     # 重複排除は記事単体の解析ではなく、推薦候補どうしの関係を見て絞り込む処理
     # （`PROJECT_SPEC.md` §17）のため、候補を探す段階と同じ searching に対応させる。
     JobType.DEDUPLICATE_ARTICLES: JobStatus.SEARCHING,
+    # ログ削除は記事の取得でも解析でもない保守処理だが、実行中 status を 3 種類に
+    # 集約する方針（このモジュールの冒頭）を崩さないため、fetching / analyzing の
+    # どちらでもない残りの searching に対応させる。
+    JobType.PURGE_OPERATION_LOGS: JobStatus.SEARCHING,
 }
 
 # claim_next で遷移しうる実行中 status の集合。reclaim_stale が

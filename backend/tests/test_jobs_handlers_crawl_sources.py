@@ -201,3 +201,60 @@ class TestInvalidSourceDomainPayload:
         # Assert — 絞り込みなしとして扱われ、候補がそのまま enqueue される
         jobs = db_session.scalars(select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)).all()
         assert [job.payload["url"] for job in jobs] == ["https://example.com/a"]
+
+
+class TestPurgeJobIsEnqueuedAfterCrawling:
+    """常駐スケジューラを置かない設計のため、ログ削除は巡回に便乗させる（Issue #19）。
+
+    UI の実行ボタンが唯一の定期実行の契機であり、巡回が実際に走ったときにだけ
+    `purge_operation_logs` を積むことで、保持期間 90 日の適用を実行主体のある
+    処理にする。
+    """
+
+    def test_enqueues_a_purge_operation_logs_job_alongside_the_collected_candidates(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """候補が集まった通常の巡回でも、削除ジョブは 1 件だけ積まれる。"""
+        # Arrange
+        candidate = CandidateArticle(
+            url="https://example.com/articles/found",
+            title="タイトル",
+            published_at=datetime.now(UTC),
+            collector_name="fake",
+        )
+        _patch_collect_candidates_with_collectors(
+            monkeypatch, [_FakeCollector("fake", [candidate])]
+        )
+
+        # Act
+        process_crawl_sources(db_session, make_context(), settings)
+
+        # Assert
+        fetch_jobs = db_session.scalars(
+            select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)
+        ).all()
+        purge_jobs = db_session.scalars(
+            select(Job).where(Job.type == JobType.PURGE_OPERATION_LOGS.value)
+        ).all()
+        assert len(fetch_jobs) == 1
+        assert len(purge_jobs) == 1
+
+    def test_enqueues_the_purge_job_even_when_no_candidate_is_collected(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """候補がゼロでもログの保持期間は経過するため、削除ジョブは積む。"""
+        # Arrange
+        _patch_collect_candidates_with_collectors(monkeypatch, [])
+
+        # Act
+        process_crawl_sources(db_session, make_context(), settings)
+
+        # Assert
+        fetch_jobs = db_session.scalars(
+            select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)
+        ).all()
+        purge_jobs = db_session.scalars(
+            select(Job).where(Job.type == JobType.PURGE_OPERATION_LOGS.value)
+        ).all()
+        assert fetch_jobs == []
+        assert len(purge_jobs) == 1
