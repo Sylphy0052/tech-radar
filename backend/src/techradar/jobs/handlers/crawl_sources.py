@@ -49,8 +49,10 @@ def _enqueue_log_purge(session: Session) -> None:
     （`PROJECT_SPEC.md` §24）に実行主体を与える。
 
     候補が 0 件でもログの保持期間は経過するため、収集結果に関わらず積む。
-    API 側の重複起動抑制（`api/crawl.py`）により巡回自体が積み上がらないため、
-    削除ジョブも巡回1回につき1件で済む。
+    API 側の重複起動抑制（`api/crawl.py`）が防ぐのは巡回ジョブの同時起動までで、
+    `reclaim_stale` による巡回自体の再実行までは防げない。その場合は削除ジョブが
+    重複して積まれるが、削除は同じ条件の DELETE を繰り返すだけで冪等なため
+    （2 回目以降は対象 0 件になる）、ここでは重複を許容する。
     """
     enqueue(session, JobType.PURGE_OPERATION_LOGS)
 
