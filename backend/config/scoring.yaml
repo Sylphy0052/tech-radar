@@ -20,6 +20,7 @@
 #   bad_similarity : Bad 記事と意味的に近い記事を抑制する設定（§7.2）
 #   clustering     : 関心クラスタ構築（KMeans）の設定（§8）
 #   interest_timeline: 関心タイムライン（GET /api/interests/timeline）の週数の既定値・上限値
+#   interest_summary: 関心サマリー（GET /api/interests/summary）が返す各リストの上限件数
 
 weights:
   # 関心プロファイルとの一致を最も重視する（PROJECT_SPEC.md §14 の式）
@@ -196,3 +197,11 @@ interest_timeline:
   default_weeks: 12
   # クライアントが要求できる最大週数。過大なレスポンス・集計コストを防ぐ。
   max_weeks: 52
+
+interest_summary:
+  # GET /api/interests/summary が返す各リストの上限件数。ジャンル・技術タグの
+  # 語彙数はユーザーの読書量に応じて増え続けるため、レスポンス肥大化を防ぐ
+  # 安全弁として設ける（目安。運用しながら調整する）。
+  max_genres: 20
+  max_technologies: 20
+  max_suppressed_topics: 20

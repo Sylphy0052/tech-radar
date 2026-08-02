@@ -77,6 +77,12 @@ MIN_RANDOM_STATE = 0
 # 0 以下だと集計期間を表せない。
 MIN_TIMELINE_WEEKS = 1
 
+# 関心サマリー（`GET /api/interests/summary`）の各リスト上限件数の下限。
+# 0 以下だと一覧を返せない。genres/technologies/suppressed_topics の 3 項目は
+# いずれも「上限件数の下限」という同じ意味のため、`LimitsConfig` の
+# `MIN_PAGE_SIZE`（複数フィールドで共有）と同じ発想で 1 つの定数にまとめる。
+MIN_SUMMARY_LIMIT = 1
+
 
 class ScoringConfigError(Exception):
     """設定ファイルを読み込めなかった場合のエラー。"""
@@ -309,6 +315,16 @@ class InterestTimelineConfig(BaseModel):
         return self
 
 
+class InterestSummaryConfig(BaseModel):
+    """関心サマリー（`GET /api/interests/summary`）が返す各リストの上限件数。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_genres: int = Field(ge=MIN_SUMMARY_LIMIT)
+    max_technologies: int = Field(ge=MIN_SUMMARY_LIMIT)
+    max_suppressed_topics: int = Field(ge=MIN_SUMMARY_LIMIT)
+
+
 class ScoringConfig(BaseModel):
     """`config/scoring.yaml` 全体。"""
 
@@ -329,6 +345,7 @@ class ScoringConfig(BaseModel):
     bad_similarity: BadSimilarityConfig
     clustering: ClusteringConfig
     interest_timeline: InterestTimelineConfig
+    interest_summary: InterestSummaryConfig
 
     @model_validator(mode="after")
     def _validate_weights_sum_to_one(self) -> ScoringConfig:
