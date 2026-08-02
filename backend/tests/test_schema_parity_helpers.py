@@ -43,6 +43,14 @@ class _DummyModel(_DummyDeclarativeBase):
     secret: Mapped[str] = mapped_column(String(50))
 
 
+class _DummyOtherModel(_DummyDeclarativeBase):
+    """二重 exposed 宣言の検出テスト専用の、もう1つの使い捨てモデル。"""
+
+    __tablename__ = "dummy_other_models_for_parity_test"
+
+    alias: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+
 class _DummySchema(BaseModel):
     """検証対象にする使い捨ての Pydantic スキーマ。"""
 
@@ -195,6 +203,29 @@ class TestVerifySchemaFieldCoverage:
         errors = verify_schema_field_coverage(_DummySchemaWithComputedField, (spec,), derived)
         # Assert
         assert errors == []
+
+    def test_fails_when_two_different_columns_declare_the_same_schema_field(self) -> None:
+        """異なる (モデル, 列) が同じスキーマフィールド名へ二重に exposed 宣言された
+        状況を再現する。単純な `set[str]` の covered だと、追加が冪等なため
+        この誤りは素通りしてしまう（そのためのRED）。
+        """
+        # Arrange: _DummyModel.name と _DummyOtherModel.alias の両方が
+        # 誤って _DummySchema.name を指している。
+        spec_a = _complete_dummy_spec()
+        spec_b = ModelParitySpec(
+            model=_DummyOtherModel,
+            exposed={"alias": (ExposedField(_DummySchema, "name"),)},
+            internal={},
+        )
+        # Act
+        errors = verify_schema_field_coverage(_DummySchema, (spec_a, spec_b), derived=())
+        # Assert
+        assert any(
+            "二重に exposed 宣言" in error
+            and "_DummyModel" in error
+            and "_DummyOtherModel" in error
+            for error in errors
+        )
 
 
 # =============================================================================

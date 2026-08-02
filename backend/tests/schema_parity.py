@@ -5,6 +5,19 @@ parity 宣言へ反映し忘れる」の両方を機械的に検出するため�
 `test_` プレフィックスを付けていないため pytest には収集されない
 （実宣言・テストは `tests/test_schema_model_parity.py`、ヘルパー自体のテストは
 `tests/test_schema_parity_helpers.py` に分離する）。
+
+**このテスト機構が保証する範囲（限界）**:
+
+- green であることが保証するのは「モデルの列が exposed/internal のどちらかに
+  分類されている」「スキーマのフィールドがモデル列/派生フィールドのいずれかに
+  紐付いている」という**構造的な宣言の完全性**のみ。その分類・公開判断が
+  セキュリティ上妥当かどうかは検証しない。`embedding` / `payload` / `user_id` の
+  ような機微な列を `internal` から `exposed` へ移し、対応する Pydantic
+  フィールドを追加するだけでこのテストは green のまま通る。機微な列を
+  `exposed` へ追加・移動する差分は security-auditor によるレビューを必須とする
+- 検証するのは列とフィールドの「存在対応」のみで、実際の値の詰め替えロジックの
+  正しさ（例: `canonical_url` と `original_url` を取り違えて代入している等）は
+  検証しない。値レベルの整合は API 統合テスト（`test_api_*.py`）の責務とする
 """
 
 from __future__ import annotations
@@ -12,11 +25,13 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Any
+from typing import Any, get_args, get_origin
 
+from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from sqlalchemy.orm import DeclarativeBase
 
@@ -52,9 +67,14 @@ class ModelParitySpec:
 
     `exposed` と `internal` のキー和集合が、モデルの実際の列名集合と
     完全一致していなければならない（過不足・重複いずれも不正）。
+
+    **限界**: この宣言と `verify_model_parity` が保証するのは列の分類漏れが
+    無いことだけであり、`exposed` への分類そのものが安全かどうかは判定しない。
+    機微な列を `internal` から `exposed` へ移す変更は、この宣言を更新すれば
+    テストは通ってしまうため、必ず security-auditor によるレビューを経ること。
     """
 
-    model: type[Any]
+    model: type[DeclarativeBase]
     exposed: Mapping[str, Sequence[ExposedField]]
     internal: Mapping[str, str]
 
@@ -64,7 +84,7 @@ class ModelParitySpec:
 # =============================================================================
 
 
-def _model_columns(model: type[Any]) -> set[str]:
+def _model_columns(model: type[DeclarativeBase]) -> set[str]:
     """SQLAlchemy declarative モデルの実際の列名集合を返す。"""
     return set(model.__table__.columns.keys())
 
@@ -132,16 +152,25 @@ def verify_schema_field_coverage(
     検出する不整合:
     - モデル列にも派生フィールド宣言にも紐付いていないスキーマフィールド（宣言漏れ）
     - スキーマに実在しないフィールド名が exposed / derived から参照されている
+    - 異なる (モデル, 列) から同じスキーマフィールドへ二重に exposed 宣言されている
+
+    最後の項目のため、`covered` はフィールド名の単純な集合ではなく
+    「フィールド名 → 寄与元 (モデル名, 列名) のリスト」として持つ。set への
+    追加は冪等なため、単純な `set[str]` では別モデルの別列が誤って同じ
+    フィールド名を指しても素通りしてしまう。
     """
-    covered: set[str] = set()
+    contributors: dict[str, list[tuple[str, str]]] = {}
     for spec in specs:
-        for refs in spec.exposed.values():
+        model_name = spec.model.__name__
+        for column, refs in spec.exposed.items():
             for ref in refs:
                 if ref.schema is schema:
-                    covered.add(ref.field)
-    for derived_field in derived:
-        if derived_field.schema is schema:
-            covered.add(derived_field.field)
+                    contributors.setdefault(ref.field, []).append((model_name, column))
+
+    derived_fields = {
+        derived_field.field for derived_field in derived if derived_field.schema is schema
+    }
+    covered = set(contributors) | derived_fields
 
     actual_fields = set(schema.model_fields)
     schema_name = schema.__name__
@@ -160,6 +189,14 @@ def verify_schema_field_coverage(
             f"{schema_name}: 実在しないフィールドが exposed/derived に宣言されています: "
             f"{sorted(stale)}"
         )
+
+    for field, sources in contributors.items():
+        distinct_sources = sorted(set(sources))
+        if len(distinct_sources) > 1:
+            errors.append(
+                f"{schema_name}.{field}: 異なる列から二重に exposed 宣言されています: "
+                f"{distinct_sources}"
+            )
 
     return errors
 
@@ -186,6 +223,8 @@ def verify_all_classified(
     """`all_items` の全クラスが `declared` か `excluded` のどちらかに属するか検証する。
 
     新しいモデル/スキーマを追加してどちらにも分類し忘れると、ここで検出される。
+    モデル（`DeclarativeBase` 派生）と API スキーマ（`BaseModel` 派生）の両方で
+    使う汎用ヘルパーのため、型は意図的に `type[Any]` のままにしている。
     """
     classified = set(declared) | set(excluded)
     unclassified = set(all_items) - classified
@@ -217,8 +256,14 @@ def verify_all_models_classified(
 
 
 def basemodel_subclasses_defined_in(module: ModuleType) -> set[type[BaseModel]]:
-    """`module` 自身で定義された（他モジュールから import しただけではない）
-    BaseModel サブクラスを返す。
+    """`module` 自身で定義された BaseModel サブクラスを返す。
+
+    `inspect.getmembers` はモジュールのトップレベル属性（モジュール名前空間に
+    束縛された名前）だけを見るため、対象はモジュールのトップレベルで定義された
+    クラスに限られる。他モジュールから import しただけのクラス（`obj.__module__`
+    がこのモジュールと一致しないもの）や、関数内でローカルに定義され
+    モジュール属性として束縛されていないクラスは、そもそも `getmembers` の
+    走査対象に現れないため拾わない。
     """
     return {
         obj
@@ -230,15 +275,21 @@ def basemodel_subclasses_defined_in(module: ModuleType) -> set[type[BaseModel]]:
 def basemodel_subclasses_in_package(
     package: ModuleType, extra_modules: Sequence[ModuleType] = ()
 ) -> set[type[BaseModel]]:
-    """`package` 配下の全サブモジュールと `extra_modules` で定義された
-    BaseModel サブクラスを集める。
+    """`package` 配下の全サブモジュール（サブパッケージを含め再帰的に）と
+    `extra_modules` で定義された BaseModel サブクラスを集める。
 
-    `techradar.api` のようなパッケージに新しいモジュールを追加しても、この関数は
-    `pkgutil.iter_modules` で自動的に拾う（呼び出し側でモジュール名を列挙し直す必要が無い）。
+    `pkgutil.walk_packages` を使うため、`techradar.api.v2` のようなサブ
+    パッケージを将来追加しても、この関数は自動的に配下まで辿って拾う
+    （呼び出し側でモジュール名を列挙し直す必要が無い）。
+
+    **前提**: `importlib.import_module` で対象モジュールを動的 import する。
+    走査対象のパッケージ配下には信頼できる自前コードのみを置くこと
+    （import 時に副作用を持つ外部/生成コードを置くと、このテストの実行時に
+    その副作用が発生する）。
     """
     schemas = basemodel_subclasses_defined_in(package)
     package_path = package.__path__
-    for module_info in pkgutil.iter_modules(package_path, prefix=f"{package.__name__}."):
+    for module_info in pkgutil.walk_packages(package_path, prefix=f"{package.__name__}."):
         submodule = importlib.import_module(module_info.name)
         schemas |= basemodel_subclasses_defined_in(submodule)
     for module in extra_modules:
@@ -260,3 +311,85 @@ def verify_all_api_schemas_classified(
         excluded=excluded,
         label="APIスキーマ",
     )
+
+
+# =============================================================================
+# FastAPI ルーティングから実参照されているスキーマの収集
+# =============================================================================
+#
+# パッケージ配下の走査（basemodel_subclasses_in_package）はモジュール配置に
+# 依存するため、新しいエンドポイントのスキーマを techradar.api / techradar.main
+# 以外のモジュール（別パッケージの router、共通 DTO モジュール等）へ置くと
+# 静かにすり抜ける。ここでは FastAPI アプリの実際のルーティング情報
+# （response_model・リクエストボディ・responses=）から辿ることで、
+# モジュール配置に依存しない網羅性を提供する。
+
+
+def _iter_api_routes(app: FastAPI) -> Iterator[APIRoute]:
+    """`app` に登録された全 `APIRoute` を辿る。
+
+    このプロジェクトの FastAPI（0.141 系）は `include_router()` したルーターを
+    `_IncludedRouter`（実体は `original_router` 属性に持つ）として
+    `app.routes` へ積む遅延合成方式になっており、標準的な
+    `isinstance(route, APIRoute)` による平坦な走査だけでは `/api/sources` 等の
+    サブルーター配下を拾えない（`backend/AGENTS.md` 相当の非互換、実機で確認
+    済み）。`original_router.routes` と通常の `routes` 属性（Starlette の
+    `Mount` 等）の両方を再帰的に辿ることで両ケースに対応する。
+    """
+    pending: list[Any] = list(app.routes)
+    while pending:
+        route = pending.pop()
+        if isinstance(route, APIRoute):
+            yield route
+            continue
+        original_router = getattr(route, "original_router", None)
+        if original_router is not None:
+            pending.extend(original_router.routes)
+            continue
+        nested_routes = getattr(route, "routes", None)
+        if nested_routes is not None:
+            pending.extend(nested_routes)
+
+
+def _unwrap_basemodel_types(annotation: Any) -> set[type[BaseModel]]:
+    """型注釈から参照されている BaseModel サブクラスを再帰的に取り出す。
+
+    `list[X]` / `X | None` / `dict[str, X]` のようなジェネリックを
+    `typing.get_origin` / `get_args` で分解し、内側の型引数も再帰的に見る。
+    """
+    if annotation is None:
+        return set()
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return {annotation}
+    origin = get_origin(annotation)
+    if origin is None:
+        return set()
+    result: set[type[BaseModel]] = set()
+    for arg in get_args(annotation):
+        result |= _unwrap_basemodel_types(arg)
+    return result
+
+
+def schemas_reachable_from_app(app: FastAPI) -> set[type[BaseModel]]:
+    """`app` の全ルートから実際に参照されている BaseModel を集める。
+
+    対象は `response_model`、リクエストボディの型、`responses=` に指定された
+    追加スキーマ（429 応答の `RateLimitedResponse` 等）。
+
+    **ネストしたモデルは辿らない**（例: `RecommendationItem.feedback` が持つ
+    `ArticleFeedbackResponse`）。ネスト先のフィールドはそのスキーマ自身が
+    `TARGET_SCHEMAS` に個別登録されていれば `verify_schema_field_coverage` が
+    検証するため、ここでは「ルートから直接参照されるトップレベルスキーマ」の
+    網羅性だけを見れば、モジュール配置に依存しない検証という目的には十分と判断した。
+    """
+    schemas: set[type[BaseModel]] = set()
+    for route in _iter_api_routes(app):
+        if route.response_model is not None:
+            schemas |= _unwrap_basemodel_types(route.response_model)
+        if route.body_field is not None:
+            schemas |= _unwrap_basemodel_types(route.body_field.field_info.annotation)
+        for response_spec in route.responses.values():
+            model = response_spec.get("model")
+            if model is not None:
+                schemas |= _unwrap_basemodel_types(model)
+    return schemas
