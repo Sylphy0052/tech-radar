@@ -470,6 +470,177 @@
         "title": "InterestArticleListResponse",
         "type": "object"
       },
+      "InterestClusterItem": {
+        "description": "関心クラスタ 1 件のレスポンス。\n\n`centroid_embedding` は 1024 次元でレスポンスが肥大化するため返さない\n（閲覧用途では不要な内部表現のため）。",
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "topics": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "weight": {
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "label",
+          "weight",
+          "topics",
+          "updated_at"
+        ],
+        "title": "InterestClusterItem",
+        "type": "object"
+      },
+      "InterestClusterListResponse": {
+        "description": "`GET /api/interests/clusters` のレスポンス。",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InterestClusterItem"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "InterestClusterListResponse",
+        "type": "object"
+      },
+      "InterestTimelineBucket": {
+        "description": "タイムラインの 1 週バケット。",
+        "properties": {
+          "interest_article_count": {
+            "title": "Interest Article Count",
+            "type": "integer"
+          },
+          "topics": {
+            "items": {
+              "$ref": "#/components/schemas/InterestTimelineTopicStats"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "week_start": {
+            "format": "date-time",
+            "title": "Week Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "week_start",
+          "interest_article_count",
+          "topics"
+        ],
+        "title": "InterestTimelineBucket",
+        "type": "object"
+      },
+      "InterestTimelineResponse": {
+        "description": "`GET /api/interests/timeline` のレスポンス。",
+        "properties": {
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/InterestTimelineBucket"
+            },
+            "title": "Buckets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "buckets"
+        ],
+        "title": "InterestTimelineResponse",
+        "type": "object"
+      },
+      "InterestTimelineTopicStats": {
+        "description": "タイムラインの 1 週バケット内、1 トピックぶんの集計。",
+        "properties": {
+          "negative_count": {
+            "title": "Negative Count",
+            "type": "integer"
+          },
+          "positive_count": {
+            "title": "Positive Count",
+            "type": "integer"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "positive_count",
+          "negative_count"
+        ],
+        "title": "InterestTimelineTopicStats",
+        "type": "object"
+      },
+      "InterestTopicItem": {
+        "description": "トピック単位の関心 1 件（`user_topic_preferences` 1 行）のレスポンス。",
+        "properties": {
+          "effective_weight": {
+            "title": "Effective Weight",
+            "type": "number"
+          },
+          "negative_weight": {
+            "title": "Negative Weight",
+            "type": "number"
+          },
+          "positive_weight": {
+            "title": "Positive Weight",
+            "type": "number"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "positive_weight",
+          "negative_weight",
+          "effective_weight",
+          "updated_at"
+        ],
+        "title": "InterestTopicItem",
+        "type": "object"
+      },
+      "InterestTopicListResponse": {
+        "description": "`GET /api/interests` のレスポンス。",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InterestTopicItem"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "InterestTopicListResponse",
+        "type": "object"
+      },
       "JobResponse": {
         "description": "ジョブ 1 件の進捗レスポンス。\n\n`payload` は含めない。ジョブの投入内容には将来 URL など内部情報が\n入りうるため、進捗確認 API で無条件に露出させない。\n\n`last_error` も同様の理由で含めない。失敗理由は例外メッセージそのものであり、\n今後 fetch_article などが外部 HTTP を叩くハンドラを持つと、アクセス先 URL や\nクエリパラメータ（API キーを含みうる）がそのまま入りうる。この進捗確認 API は\n無認証で叩けるため、ここで露出させると内部情報の漏洩経路になる。失敗理由は\n`operation_logs.error_reason`（非公開経路）に別途記録される。",
         "properties": {
@@ -1264,7 +1435,7 @@
     },
     "/api/articles/{article_id}/feedback": {
       "delete": {
-        "description": "記事へのフィードバックを取り消す。\n\nGood / 保存に由来する `user_articles` 行も合わせて削除する\n（手動登録由来の行は残す）。",
+        "description": "記事へのフィードバックを取り消す。\n\nGood / 保存に由来する `user_articles` 行も合わせて削除する\n（手動登録由来の行は残す）。関心記事の構成が変わりうるため、関心クラスタの\n再構築ジョブも積む。\n\nトピック単位の選好（`user_topic_preferences`）は更新しない。\n`interest/topics.py` の関数はいずれも増加方向のみで、取り消し時に\n「その分を差し引く」ための減少関数を持たない（`update_topic_preferences`\nの docstring 参照）。取り消し時に同じ関数を呼ぶと、削除したはずの\nフィードバックの効果を新たに加算してしまい、意味が逆転するため呼ばない。",
         "operationId": "delete_article_feedback_api_articles__article_id__feedback_delete",
         "parameters": [
           {
@@ -1299,7 +1470,7 @@
         ]
       },
       "post": {
-        "description": "記事へ Good / Bad / 保存を記録する（`PROJECT_SPEC.md` §7）。",
+        "description": "記事へ Good / Bad / 保存を記録する（`PROJECT_SPEC.md` §7）。\n\n合わせてトピック単位の選好（`user_topic_preferences`）を同期更新し\n（`update_topic_preferences`）、関心クラスタの再構築ジョブを積む\n（`_enqueue_interest_cluster_rebuild`、Issue #15）。",
         "operationId": "create_article_feedback_api_articles__article_id__feedback_post",
         "parameters": [
           {
@@ -1608,6 +1779,137 @@
           }
         },
         "summary": "Health"
+      }
+    },
+    "/api/interests": {
+      "get": {
+        "description": "トピック単位の関心一覧を返す（`PROJECT_SPEC.md` §7.1, §7.2）。\n\n`effective_weight` 降順（同値は `topic` 昇順）で返す。並び順を安定させる\nためにタイブレークを必ず付ける（`recommendation/service.py` の他の並び順と\n同じ方針）。件数はトピックの語彙数に比例し高々数百件程度に収まる見込み\nのため、`cursor` ではなく単純な `offset`/`limit` にする（`api/articles.py`\nの関心記事一覧のような無限スクロール想定の cursor ページングは過剰）。",
+        "operationId": "list_interest_topics_api_interests_get",
+        "parameters": [
+          {
+            "description": "取得件数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "description": "取得件数",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "スキップする件数",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "スキップする件数",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterestTopicListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Interest Topics",
+        "tags": [
+          "interests"
+        ]
+      }
+    },
+    "/api/interests/clusters": {
+      "get": {
+        "description": "関心クラスタ一覧を返す（`PROJECT_SPEC.md` §8）。\n\n`weight` 降順（同値は `label` 昇順）で返す。クラスタ数は\n`config/scoring.yaml` の `clustering.max_clusters` で上限が付いており\n（既定 8）小規模なため、ページングは設けない。",
+        "operationId": "list_interest_clusters_api_interests_clusters_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterestClusterListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Interest Clusters",
+        "tags": [
+          "interests"
+        ]
+      }
+    },
+    "/api/interests/timeline": {
+      "get": {
+        "description": "関心の推移を週単位のバケットへ集計して返す。\n\n履歴テーブルは新設せず、`user_articles.created_at` と\n`article_feedback.created_at` を集計元にする。`weeks` は `now` から\n`weeks * 7日` 遡った時刻以降を対象にする目安であり、境界週は部分週に\nなりうる（ちょうど週の途中から `since` が始まるため）。\n\nデータが1件も無い週はバケットを作らない（0 件のバケットを並べても\n情報量が無いため）。トピック別集計とは独立に、関心記事の追加件数\n（`user_articles`）も同じ週バケットへ載せて返す。",
+        "operationId": "get_interest_timeline_api_interests_timeline_get",
+        "parameters": [
+          {
+            "description": "遡って集計する週数",
+            "in": "query",
+            "name": "weeks",
+            "required": false,
+            "schema": {
+              "default": 12,
+              "description": "遡って集計する週数",
+              "maximum": 52,
+              "minimum": 1,
+              "title": "Weeks",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterestTimelineResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Interest Timeline",
+        "tags": [
+          "interests"
+        ]
       }
     },
     "/api/jobs/{job_id}": {

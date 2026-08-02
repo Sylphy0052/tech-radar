@@ -62,6 +62,7 @@ def test_create_default_registry_registers_url_registration_and_crawl_handlers()
         JobType.EMBED_ARTICLE,
         JobType.PURGE_OPERATION_LOGS,
         JobType.PURGE_RECOMMENDATION_RUNS,
+        JobType.REBUILD_INTEREST_CLUSTERS,
     }
     assert registry.registered_types == frozenset(registered)
     for job_type in JobType:

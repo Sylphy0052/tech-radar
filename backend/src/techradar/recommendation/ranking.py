@@ -52,16 +52,36 @@ class CandidateSignature:
 
 
 @dataclass(frozen=True)
+class WeightedEmbedding:
+    """重み付きの関心記事 embedding。
+
+    `weight` は `interest/weights.py` の `compute_effective_interest` が返す
+    `effective_interest`（explicit_weight × feedback_weight × recency_decay ×
+    confidence、`PROJECT_SPEC.md` §8）。`compute_interest_similarity` の
+    加重平均に使う。
+    """
+
+    vector: tuple[float, ...]
+    weight: float
+
+
+@dataclass(frozen=True)
 class InterestProfile:
     """ユーザーの関心プロファイル（`PROJECT_SPEC.md` §8）。
 
-    関心記事の embedding 群と、既知トピックの集合を持つ。単一の平均 embedding
-    ではなく複数の embedding を保持し、上位 k 件の平均で類似度を求める
-    （`compute_interest_similarity`）。
+    関心記事の重み付き embedding 群（`embeddings`）と、既知トピックの集合
+    （`known_topics`）、Bad 済み記事の embedding 群（`bad_embeddings`）を持つ。
+    単一の平均 embedding ではなく複数の embedding を保持し、上位 k 件の
+    加重平均で類似度を求める（`compute_interest_similarity`）。
+
+    `bad_embeddings` は Bad 近傍抑制（`compute_bad_similarity_penalty`）専用
+    で、関心一致度の計算には使わない。Bad は「関心の逆」ではなく「意味的に
+    近い記事を抑制する」対象のため重みを持たせない（`PROJECT_SPEC.md` §7.2）。
     """
 
-    embeddings: tuple[tuple[float, ...], ...]
+    embeddings: tuple[WeightedEmbedding, ...]
     known_topics: frozenset[str]
+    bad_embeddings: tuple[tuple[float, ...], ...]
 
 
 @dataclass(frozen=True)
@@ -152,6 +172,21 @@ class FeedComposition:
 
 
 @dataclass(frozen=True)
+class BadSimilaritySettings:
+    """Bad 記事と意味的に近い記事を抑制する設定（`PROJECT_SPEC.md` §7.2）。
+
+    採点の純粋関数（`score_candidate`）は本 Issue（#15 段階 1）では未対応で、
+    Bad 記事との類似度に応じた減点の適用は次段階で行う。この dataclass は
+    `ScoringSettings` へ先行して組み込み、`config.py` 側の変換だけを先に揃える。
+    """
+
+    # Bad 記事とのコサイン類似度がこれ以上なら抑制対象にする閾値。
+    min_similarity: float
+    # 類似度 1.0（Bad 記事とほぼ同一）のときの最大減点。
+    max_penalty: float
+
+
+@dataclass(frozen=True)
 class RankingLimits:
     """ランキング処理の安全弁とページングの既定値。"""
 
@@ -176,6 +211,7 @@ class ScoringSettings:
     novelty: NoveltySettings
     feed_composition: FeedComposition
     limits: RankingLimits
+    bad_similarity: BadSimilaritySettings
 
 
 # 寄与項目名と、理由文に使う言い回し（`build_reason_summary`）。
@@ -219,6 +255,9 @@ class ScoreBreakdown:
     bad_penalty: float
     duplicate_penalty: float
     read_penalty: float
+    # Bad 済み記事と意味的に近い候補への減点（`compute_bad_similarity_penalty`）。
+    # `bad_penalty`（候補自身が Bad 済みかどうかの固定減点）とは別物。
+    bad_similarity_penalty: float
     # 寄与の合計から減点を引いた最終スコア。
     total: float
 
@@ -245,6 +284,7 @@ class ScoreBreakdown:
             "bad_penalty": self.bad_penalty,
             "duplicate_penalty": self.duplicate_penalty,
             "read_penalty": self.read_penalty,
+            "bad_similarity_penalty": self.bad_similarity_penalty,
             "total": self.total,
             "summary": build_reason_summary(self),
         }
@@ -290,19 +330,36 @@ def compute_interest_similarity(
 ) -> float:
     """関心プロファイルと候補の類似度を返す。
 
-    関心記事群の embedding それぞれとのコサイン類似度のうち、上位 `top_k` 件の
-    平均を返す。候補に embedding が無い、または関心プロファイルが空なら
-    比較できないため 0.0 とする。
+    関心記事群の embedding それぞれとのコサイン類似度のうち、上位 `top_k` 件を
+    `WeightedEmbedding.weight` で加重平均する（`PROJECT_SPEC.md` §8）。上位
+    `top_k` 件の選び方自体は従来どおり類似度の降順（weight では選ばない）。
+    同順位の並びは安定ソートにより入力 `profile.embeddings` の並び順で決まる
+    ため、実行のたびに変わらない。
+
+    weight の合計が 0（正負の weight が打ち消し合った場合など）だと加重平均が
+    0 除算になるため、その場合は単純平均へフォールバックする。全ての weight
+    が等しいときは常にこの単純平均と一致する（退行テストで固定）。
+
+    候補に embedding が無い、または関心プロファイルが空なら比較できないため
+    0.0 とする。
     """
     if candidate.embedding is None or not profile.embeddings:
         return 0.0
 
-    similarities = sorted(
-        (cosine_similarity(candidate.embedding, embedding) for embedding in profile.embeddings),
+    scored = sorted(
+        (
+            (cosine_similarity(candidate.embedding, item.vector), item.weight)
+            for item in profile.embeddings
+        ),
+        key=lambda pair: pair[0],
         reverse=True,
     )
-    top = similarities[: settings.top_k]
-    return sum(top) / len(top)
+    top = scored[: settings.top_k]
+    weight_sum = sum(weight for _, weight in top)
+    if weight_sum == 0.0:
+        similarities = [similarity for similarity, _ in top]
+        return sum(similarities) / len(similarities)
+    return sum(similarity * weight for similarity, weight in top) / weight_sum
 
 
 def compute_source_article_match(candidate: CandidateSignature, settings: MatchSettings) -> float:
@@ -373,6 +430,41 @@ def compute_novelty(
     return unknown_count / len(candidate.topics)
 
 
+def compute_bad_similarity_penalty(
+    candidate: CandidateSignature, profile: InterestProfile, settings: BadSimilaritySettings
+) -> float:
+    """Bad 済み記事と意味的に近い候補への減点を返す（`PROJECT_SPEC.md` §7.2）。
+
+    候補の embedding と `profile.bad_embeddings` それぞれとのコサイン類似度の
+    うち最大値 s を求める。「1 件の Bad でジャンル全体を抑制しない」ため、s が
+    `min_similarity` 未満なら近さが十分ではないとみなし 0.0。s が
+    `min_similarity` 以上なら、`min_similarity` で 0、s=1.0（Bad 記事とほぼ
+    同一）で `max_penalty` になるよう線形に減点する。
+
+    候補に embedding が無い、`bad_embeddings` が空なら比較できないため 0.0。
+
+    既存の `ScorePenalties.bad`（候補自身が Bad 済みかどうかの二値による固定
+    減点）とは別物。こちらは候補自身は Bad ではなくても、Bad にした「別の」
+    記事と意味的に近い場合に働く抑制であり、両者は独立して減点されうる。
+    """
+    if candidate.embedding is None or not profile.bad_embeddings:
+        return 0.0
+
+    max_similarity = max(
+        cosine_similarity(candidate.embedding, bad_embedding)
+        for bad_embedding in profile.bad_embeddings
+    )
+    if max_similarity < settings.min_similarity:
+        return 0.0
+
+    span = _RATIO_MAX - settings.min_similarity
+    if span <= 0.0:
+        return settings.max_penalty
+
+    ratio = _clamp01((max_similarity - settings.min_similarity) / span)
+    return settings.max_penalty * ratio
+
+
 def _authority_gate_factor(interest_similarity: float, gate: AuthorityGate) -> float:
     """`source_authority` の寄与に掛けるゲート係数を返す。
 
@@ -418,6 +510,9 @@ def score_candidate(
     bad_penalty = settings.penalties.bad if candidate.is_bad else 0.0
     duplicate_penalty = candidate.duplicate_penalty
     read_penalty = settings.penalties.read if candidate.is_read else 0.0
+    bad_similarity_penalty = compute_bad_similarity_penalty(
+        candidate, profile, settings.bad_similarity
+    )
 
     total = (
         interest_similarity_contribution
@@ -429,6 +524,7 @@ def score_candidate(
         - bad_penalty
         - duplicate_penalty
         - read_penalty
+        - bad_similarity_penalty
     )
 
     return ScoreBreakdown(
@@ -448,6 +544,7 @@ def score_candidate(
         bad_penalty=bad_penalty,
         duplicate_penalty=duplicate_penalty,
         read_penalty=read_penalty,
+        bad_similarity_penalty=bad_similarity_penalty,
         total=total,
     )
 
