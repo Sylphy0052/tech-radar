@@ -94,6 +94,8 @@ interest_summary:
   max_genres: 20
   max_technologies: 20
   max_suppressed_topics: 20
+  max_content_types: 20
+  max_difficulties: 20
 """
 
 

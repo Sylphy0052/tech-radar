@@ -618,3 +618,51 @@ class TestInterestSummary:
 
         # Assert
         assert len(response.json()["suppressed_topics"]) == max_suppressed_topics
+
+    def test_max_content_types_caps_the_response(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — DB 列は制約の無い text のため、列挙外の content_type も入りうる
+        user_id = settings.default_user_id
+        max_content_types = get_scoring_config().interest_summary.max_content_types
+        for index in range(max_content_types + 5):
+            article = make_article(db_session, content_type=f"content-type-{index:03d}")
+            add_feedback(db_session, user_id, article, "good", created_at=NOW)
+
+        # Act
+        response = client.get("/api/interests/summary")
+
+        # Assert
+        assert len(response.json()["content_types"]) == max_content_types
+
+    def test_max_difficulties_caps_the_response(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — difficulty も content_type と同じく DB 側に制約が無い
+        user_id = settings.default_user_id
+        max_difficulties = get_scoring_config().interest_summary.max_difficulties
+        for index in range(max_difficulties + 5):
+            article = make_article(db_session, difficulty=f"difficulty-{index:03d}")
+            add_feedback(db_session, user_id, article, "good", created_at=NOW)
+
+        # Act
+        response = client.get("/api/interests/summary")
+
+        # Assert
+        assert len(response.json()["difficulties"]) == max_difficulties
+
+    def test_suppressed_topics_are_ordered_by_negative_weight_desc_then_topic(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 抑制度が同値のトピックを含めて並び順のタイブレークまで見る
+        user_id = settings.default_user_id
+        add_topic_preference(db_session, user_id, "zeta", negative=0.2, effective=0.1)
+        add_topic_preference(db_session, user_id, "alpha", negative=0.2, effective=0.1)
+        add_topic_preference(db_session, user_id, "beta", negative=0.6, effective=0.1)
+
+        # Act
+        response = client.get("/api/interests/summary")
+
+        # Assert
+        topics = [item["topic"] for item in response.json()["suppressed_topics"]]
+        assert topics == ["beta", "alpha", "zeta"]

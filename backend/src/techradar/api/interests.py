@@ -43,6 +43,8 @@ _summary_limits = get_scoring_config().interest_summary
 MAX_SUMMARY_GENRES = _summary_limits.max_genres
 MAX_SUMMARY_TECHNOLOGIES = _summary_limits.max_technologies
 MAX_SUMMARY_SUPPRESSED_TOPICS = _summary_limits.max_suppressed_topics
+MAX_SUMMARY_CONTENT_TYPES = _summary_limits.max_content_types
+MAX_SUMMARY_DIFFICULTIES = _summary_limits.max_difficulties
 
 
 class InterestTopicItem(BaseModel):
@@ -413,7 +415,9 @@ _PRIMARY_SOURCE_RATIO_QUERY = text(
 )
 
 # 記事の性質（articles.content_type）別の件数。内容分布系のため good/save に絞る。
-# content_type は列挙の語彙数が小さく肥大化しないため上限は設けない。
+# content_type は列挙（analysis/prompt.py の分類）に対応するため通常は数件だが、
+# DB 列自体は CHECK 制約の無い text で想定外の値が入りうるため、他のリストと
+# 同じく設定由来の上限を掛けておく。
 _CONTENT_TYPE_QUERY = text(
     """
     SELECT
@@ -425,11 +429,12 @@ _CONTENT_TYPE_QUERY = text(
       AND af.action IN ('good', 'save')
     GROUP BY a.content_type
     ORDER BY count DESC, a.content_type ASC NULLS LAST
+    LIMIT :limit
     """
 )
 
 # 難易度（articles.difficulty）別の件数。内容分布系のため good/save に絞る。
-# difficulty も content_type と同様に語彙数が小さいため上限は設けない。
+# difficulty も content_type と同じ理由で設定由来の上限を掛ける。
 _DIFFICULTY_QUERY = text(
     """
     SELECT
@@ -441,6 +446,7 @@ _DIFFICULTY_QUERY = text(
       AND af.action IN ('good', 'save')
     GROUP BY a.difficulty
     ORDER BY count DESC, a.difficulty ASC NULLS LAST
+    LIMIT :limit
     """
 )
 
@@ -476,8 +482,12 @@ def get_interest_summary(
         _TECHNOLOGY_QUERY, {"user_id": user_id, "limit": MAX_SUMMARY_TECHNOLOGIES}
     ).all()
     primary_source_row = session.execute(_PRIMARY_SOURCE_RATIO_QUERY, {"user_id": user_id}).one()
-    content_type_rows = session.execute(_CONTENT_TYPE_QUERY, {"user_id": user_id}).all()
-    difficulty_rows = session.execute(_DIFFICULTY_QUERY, {"user_id": user_id}).all()
+    content_type_rows = session.execute(
+        _CONTENT_TYPE_QUERY, {"user_id": user_id, "limit": MAX_SUMMARY_CONTENT_TYPES}
+    ).all()
+    difficulty_rows = session.execute(
+        _DIFFICULTY_QUERY, {"user_id": user_id, "limit": MAX_SUMMARY_DIFFICULTIES}
+    ).all()
     suppressed_rows = session.scalars(
         select(UserTopicPreference)
         .where(
