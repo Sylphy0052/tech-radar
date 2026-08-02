@@ -50,6 +50,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/articles/{article_id}/feedback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Article Feedback
+         * @description 記事へ Good / Bad / 保存を記録する（`PROJECT_SPEC.md` §7）。
+         */
+        post: operations["create_article_feedback_api_articles__article_id__feedback_post"];
+        /**
+         * Delete Article Feedback
+         * @description 記事へのフィードバックを取り消す。
+         *
+         *     Good / 保存に由来する `user_articles` 行も合わせて削除する
+         *     （手動登録由来の行は残す）。
+         */
+        delete: operations["delete_article_feedback_api_articles__article_id__feedback_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/articles/{article_id}/recommendations": {
         parameters: {
             query?: never;
@@ -120,6 +147,11 @@ export interface paths {
          *     新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。
          *     `cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、
          *     ページ間で重複が出ないようにする（受入基準）。
+         *
+         *     `next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で
+         *     cursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が
+         *     非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで
+         *     終端と判断せず、`next_cursor` が null になるまで辿ること。
          *
          *     古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。
          */
@@ -223,6 +255,33 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * ArticleFeedbackCreate
+         * @description フィードバック登録リクエスト。
+         */
+        ArticleFeedbackCreate: {
+            action: components["schemas"]["FeedbackAction"];
+            reason?: components["schemas"]["BadReason"] | null;
+        };
+        /**
+         * ArticleFeedbackResponse
+         * @description フィードバックの公開表現。
+         *
+         *     `action` / `reason` は enum 型にする。`str` のままだと OpenAPI に enum が出ず、
+         *     生成される `frontend/src/lib/api-schema.d.ts` でも単なる `string` になり、
+         *     フロント側の文字列リテラル比較が型で守られない（Issue #13 自己レビュー B）。
+         *     DB の `action` / `reason` 列は text 型だが、`from_attributes=True` により
+         *     pydantic がその文字列値から enum メンバーへ変換する。
+         */
+        ArticleFeedbackResponse: {
+            action: components["schemas"]["FeedbackAction"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            reason: components["schemas"]["BadReason"] | null;
+        };
+        /**
          * ArticleRecommendationsResponse
          * @description 記事起点推薦（`POST /api/articles/{article_id}/recommendations`）のレスポンス。
          */
@@ -287,6 +346,12 @@ export interface components {
             url: string;
         };
         /**
+         * BadReason
+         * @description Bad の理由（`PROJECT_SPEC.md` §7.2）。任意項目。
+         * @enum {string}
+         */
+        BadReason: "not_interested" | "too_shallow" | "already_known" | "promotional" | "untrusted_source" | "too_repetitive";
+        /**
          * CrawlRunCreate
          * @description 巡回ジョブの起動リクエスト。省略可能。
          */
@@ -317,6 +382,12 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
         };
+        /**
+         * FeedbackAction
+         * @description 記事へのフィードバック種別。
+         * @enum {string}
+         */
+        FeedbackAction: "good" | "bad" | "save";
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -388,8 +459,11 @@ export interface components {
             article_id: string;
             /** Canonical Url */
             canonical_url: string;
+            feedback: components["schemas"]["ArticleFeedbackResponse"] | null;
             /** Is Primary Source */
             is_primary_source: boolean;
+            /** Is Read */
+            is_read: boolean;
             /** Language */
             language: string | null;
             /** Original Url */
@@ -573,6 +647,70 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ArticleRegistrationResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_article_feedback_api_articles__article_id__feedback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                article_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArticleFeedbackCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArticleFeedbackResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_article_feedback_api_articles__article_id__feedback_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                article_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
