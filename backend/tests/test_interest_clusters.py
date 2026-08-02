@@ -10,6 +10,7 @@ import pytest
 from techradar.interest.clusters import (
     ClusteringSettings,
     ClusterSource,
+    _cluster_count,
     build_interest_clusters,
 )
 
@@ -27,6 +28,41 @@ def make_source(
 ) -> ClusterSource:
     """テスト用の `ClusterSource` を作る。"""
     return ClusterSource(embedding=embedding, topics=topics, weight=weight)
+
+
+class TestClusterCountPrioritizesCapacity:
+    """`min_articles_per_cluster` を `min_clusters` より優先することを固定する。
+
+    既定値（min_clusters=2, min_articles_per_cluster=3）で記事が 4〜5 件のとき、
+    以前は `max(min_clusters, capacity_based)` で 2 クラスタに割ってしまい、
+    1 クラスタあたりの記事数が min_articles_per_cluster を割り込んでいた
+    （Issue #15 自己レビュー 2）。
+    """
+
+    def test_does_not_reach_min_clusters_when_capacity_is_insufficient(self):
+        # Arrange — capacity_based = 4 // 3 = 1 < min_clusters(2)
+        # Act / Assert — min_clusters を無理に満たさず 1 クラスタのまま
+        assert _cluster_count(4, SETTINGS) == 1
+        assert _cluster_count(5, SETTINGS) == 1
+
+    def test_reaches_min_clusters_once_capacity_allows(self):
+        # Arrange — capacity_based = 6 // 3 = 2 == min_clusters(2)
+        # Act / Assert — capacity が満たせるようになった時点で min_clusters に届く
+        assert _cluster_count(6, SETTINGS) == 2
+
+    def test_build_interest_clusters_keeps_a_single_cluster_below_capacity(self):
+        """`build_interest_clusters` 経由でも 1 クラスタのまま分割されないことを確認する。"""
+        # Arrange — 明確に離れた2群でも記事数（4件）が capacity を満たさない
+        sources = (
+            make_source(embedding=(10.0, 10.0, 10.0), topics=("AI",)),
+            make_source(embedding=(10.0, 10.0, 10.0), topics=("AI",)),
+            make_source(embedding=(-10.0, -10.0, -10.0), topics=("DevOps",)),
+            make_source(embedding=(-10.0, -10.0, -10.0), topics=("DevOps",)),
+        )
+        # Act
+        clusters = build_interest_clusters(sources, SETTINGS)
+        # Assert
+        assert len(clusters) == 1
 
 
 class TestEmptyAndSmallInputs:

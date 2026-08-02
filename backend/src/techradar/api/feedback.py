@@ -27,7 +27,10 @@ from techradar.api.deps import get_current_user_id, get_now, get_session
 from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction, JobType
 from techradar.db.errors import is_unique_violation
 from techradar.db.models import Article, ArticleFeedback, UserArticle
-from techradar.interest.service import update_topic_preferences
+from techradar.interest.service import (
+    recompute_topic_preferences_after_removal,
+    update_topic_preferences,
+)
 from techradar.jobs.queue import enqueue
 
 logger = logging.getLogger(__name__)
@@ -308,6 +311,7 @@ def delete_article_feedback(
     article_id: uuid.UUID,
     session: SessionDep,
     user_id: UserIdDep,
+    now: NowDep,
 ) -> Response:
     """記事へのフィードバックを取り消す。
 
@@ -315,11 +319,18 @@ def delete_article_feedback(
     （手動登録由来の行は残す）。関心記事の構成が変わりうるため、関心クラスタの
     再構築ジョブも積む。
 
-    トピック単位の選好（`user_topic_preferences`）は更新しない。
-    `interest/topics.py` の関数はいずれも増加方向のみで、取り消し時に
-    「その分を差し引く」ための減少関数を持たない（`update_topic_preferences`
-    の docstring 参照）。取り消し時に同じ関数を呼ぶと、削除したはずの
-    フィードバックの効果を新たに加算してしまい、意味が逆転するため呼ばない。
+    トピック単位の選好（`user_topic_preferences`）は、取り消し後の直近
+    フィードバック集合から `negative_weight` を再計算する
+    （`recompute_topic_preferences_after_removal`、Issue #15 自己レビュー 1）。
+    `update_topic_preferences`（POST 側）が使う増加方向のみの更新関数は
+    取り消しには使わない（「上がった分を差し引く」処理を持たないため）。
+
+    呼び出し順序が重要: `session.delete(feedback)` の後に
+    `session.flush()` で DELETE を確定させてから
+    `recompute_topic_preferences_after_removal` を呼ぶ。先に確定させないと、
+    再計算が読む「直近フィードバック」に削除対象自身が残ったままになり、
+    取り消したはずのフィードバックが再計算結果に混入してしまう
+    （`recompute_topic_preferences_after_removal` の docstring 参照）。
     """
     feedback = session.get(ArticleFeedback, (user_id, article_id))
     if feedback is None:
@@ -328,6 +339,8 @@ def delete_article_feedback(
         )
 
     session.delete(feedback)
+    session.flush()
+    recompute_topic_preferences_after_removal(session, user_id, article_id, now)
     _remove_feedback_derived_user_article(session, user_id, article_id)
     _enqueue_interest_cluster_rebuild(session, user_id)
     session.commit()

@@ -1,10 +1,15 @@
 """トピック単位の選好更新（`user_topic_preferences` の計算、`PROJECT_SPEC.md` §7.1, §7.2）。
 
-Good 系フィードバックはトピックの `positive_weight` を増やす。Bad は「1 件では
-効かせない」ため、直近フィードバック履歴のうち一定割合が Bad のときだけ
-`negative_weight` を段階的に増やす。判定・更新はいずれも副作用を持たない純粋関数
-として実装し、DB モデルには依存させない（`techradar.recommendation.ranking` と
-同じ方針）。
+Good 系フィードバックはトピックの `positive_weight` を増やす（累積加算）。Bad は
+「1 件では効かせない」ため、`negative_weight` を「直近フィードバック履歴の
+累積加算」ではなく「直近フィードバック集合から一意に導出する値」として扱う
+（`compute_negative_weight`）。加算方式にしないのは、フィードバックの取り消し
+（`interest/service.py` の `recompute_topic_preferences_after_removal`）でも
+同じ関数を使って再計算できるようにするため。取り消しで直近集合が変われば
+`negative_weight` もその集合が示す値へ一致し、取り消しても抑制が残り続ける
+ことがない（Issue #15 自己レビュー 1）。判定・更新はいずれも副作用を持たない
+純粋関数として実装し、DB モデルには依存させない（`techradar.recommendation.ranking`
+と同じ方針）。
 """
 
 from __future__ import annotations
@@ -84,6 +89,40 @@ def increase_positive_weight(current: TopicWeights, increment: float) -> TopicWe
     )
 
 
+def compute_negative_weight(
+    recent_actions: Sequence[FeedbackAction], settings: TopicPreferenceSettings
+) -> float:
+    """直近フィードバック集合から `negative_weight` を導出する（`PROJECT_SPEC.md` §7.2）。
+
+    「これまでの増分の累積」ではなく、「直近フィードバック集合が示す値」として
+    毎回導出し直す。こうすることで、フィードバックの追加（`apply_bad_feedback`）
+    と取り消し後の再計算（`interest/service.py` の
+    `recompute_topic_preferences_after_removal`）の両方で同じ関数を呼べば、
+    どちらの経路でも「その時点の直近集合」に対応する一意な値になる
+    （状態が過去のイベント回数ではなく現在の履歴だけから定まる）。
+
+    `should_penalize_topic` の条件（直近 `recent_window` 件中 `bad_threshold`
+    件以上が Bad）を満たさない場合は 0（抑制なし）。満たす場合は、閾値を
+    何段階超えているか（`bad_count - bad_threshold + 1`。ちょうど閾値で
+    1 段階、Bad が 1 件増えるごとに 1 段階ずつ強まる）に `decay_step` を
+    掛けた値を返す。
+
+    `recent_actions` は新しい順（直近のフィードバックが先頭）で受け取る前提と
+    する（`should_penalize_topic` と同じ）。
+    """
+    if not should_penalize_topic(
+        recent_actions,
+        recent_window=settings.recent_window,
+        bad_threshold=settings.bad_threshold,
+    ):
+        return 0.0
+
+    window = recent_actions[: settings.recent_window]
+    bad_count = sum(1 for action in window if action == FeedbackAction.BAD)
+    steps = bad_count - settings.bad_threshold + 1
+    return steps * settings.decay_step
+
+
 def apply_bad_feedback(
     current: TopicWeights,
     recent_actions: Sequence[FeedbackAction],
@@ -91,19 +130,19 @@ def apply_bad_feedback(
 ) -> TopicWeights:
     """Bad フィードバックを反映する（`PROJECT_SPEC.md` §7.2）。
 
-    `should_penalize_topic` の条件を満たしたときだけ `negative_weight` を
-    `decay_step` 分だけ増やす。条件を満たさない場合は `current` をそのまま返す
-    （1 件の Bad だけではトピック全体を抑制しない）。
+    `negative_weight` は `compute_negative_weight` が直近フィードバック集合
+    から導出する値へ置き換える（`current.negative` への加算ではない）。値が
+    変わらない場合（条件未達のまま、または既に同じ値）は `current` をそのまま
+    返す（1 件の Bad だけではトピック全体を抑制しない。無用な更新もしない）。
+
+    取り消し後の再計算（`recompute_topic_preferences_after_removal`）も同じ
+    `compute_negative_weight` を使うため、増加方向（この関数）と取り消し後の
+    再計算とで結果が食い違わない。
     """
-    penalize = should_penalize_topic(
-        recent_actions,
-        recent_window=settings.recent_window,
-        bad_threshold=settings.bad_threshold,
-    )
-    if not penalize:
+    new_negative = compute_negative_weight(recent_actions, settings)
+    if new_negative == current.negative:
         return current
 
-    new_negative = current.negative + settings.decay_step
     return TopicWeights(
         positive=current.positive,
         negative=new_negative,

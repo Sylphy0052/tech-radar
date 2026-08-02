@@ -134,9 +134,18 @@ feedback_weights:
   save: 0.5
   read_full: 0.2
   clicked: 0.1
-  # Bad は負方向の強さの絶対値。Good（0.8）と同じ大きさにすることで、
-  # 「強い興味」と「強い忌避」を対称に扱う。符号は使う側（interest/weights.py 等）
-  # が持ち、ここには負数を書かない（設定ファイルの値は常に非負という前提を保つ）
+  # Bad は負方向の強さの絶対値として用意した値だが、現状はどこからも消費して
+  # いない（Issue #15 自己レビュー 3）。`ArticleOrigin` に Bad 相当の値が無い
+  # ため `interest/weights.py` の `explicit_weight_for_origin` からは呼ばれず、
+  # トピック単位の Bad 抑制（`interest/topics.py` の `compute_negative_weight`）
+  # は下の `topic_preference.decay_step`（Bad 閾値を超えるたびの段階的な
+  # 低下量）が単独で強さを担っている。ここへ feedback_weights.bad も掛け
+  # 合わせると「Bad の強さ」を decay_step とここの 2 箇所で二重管理する
+  # ことになるため、意図的に未消費のままにしている。将来 Bad 1 件あたりの
+  # 重みを Good/保存と対称に即時反映する設計に変える場合（現状は §7.2 の
+  # 「一件のBadだけでは抑制しない」方針のため、単純な即時反映はしていない）
+  # に使う候補として値だけ残す。値は Good（0.8）と対称の 0.8 のまま、符号は
+  # 使う側が持つ（設定ファイルの値は常に非負という前提を保つ）
   bad: 0.8
 
 interest_decay:
