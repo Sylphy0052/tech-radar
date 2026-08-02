@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete
+from sqlalchemy import Delete, delete
 from sqlalchemy.orm import Session
 
 from techradar.config import Settings, get_settings
@@ -20,6 +20,15 @@ from techradar.jobs.handlers._shared import run_job_in_thread
 from techradar.jobs.registry import JobContext, JobHandler
 
 logger = logging.getLogger(__name__)
+
+
+def build_expired_runs_delete(cutoff: datetime) -> Delete:
+    """`cutoff` より古い `recommendation_runs` を消す DELETE 文を組み立てる。
+
+    `purge_expired_recommendation_runs` から分離しているのは、実行計画を検証する
+    テストが実際に発行される文と同じものを見られるようにするため（Issue #32）。
+    """
+    return delete(RecommendationRun).where(RecommendationRun.generated_at < cutoff)
 
 
 def purge_expired_recommendation_runs(
@@ -37,7 +46,7 @@ def purge_expired_recommendation_runs(
     1本で処理する（`techradar.jobs.queue.reclaim_stale` と同じ方針）。
     """
     cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
-    stmt = delete(RecommendationRun).where(RecommendationRun.generated_at < cutoff)
+    stmt = build_expired_runs_delete(cutoff)
     # DELETE は ORM の Unit of Work を経由しないため、未送信の変更があると
     # それを取りこぼす。先に flush して DB 側の状態を揃えてから削除する。
     session.flush()

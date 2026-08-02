@@ -34,6 +34,11 @@ from techradar.db.enums import (
     RecommendationMode,
     SourceType,
 )
+from techradar.jobs.handlers.purge_recommendation_runs import build_expired_runs_delete
+from techradar.recommendation.service import build_latest_run_select
+
+COMPOSITE_INDEX_NAME = "ix_recommendation_runs_user_id_mode_generated_at"
+GENERATED_AT_INDEX_NAME = "ix_recommendation_runs_generated_at"
 
 
 def make_article(**overrides) -> Article:
@@ -866,3 +871,73 @@ class TestSchema:
 
         # Assert
         assert extension == "vector"
+
+
+def find_indexdef(engine: Engine, indexname: str) -> str | None:
+    """`pg_indexes` からインデックス定義を引く（存在しなければ None）。"""
+    with engine.connect() as connection:
+        return connection.execute(
+            text("SELECT indexdef FROM pg_indexes WHERE indexname = :name"),
+            {"name": indexname},
+        ).scalar_one_or_none()
+
+
+def explain(session: Session, statement) -> str:
+    """SELECT/DELETE 文の実行計画を文字列で返す。
+
+    テスト DB は行数が少なくプランナが Seq Scan を選ぶため、`enable_seqscan`
+    を切ってインデックスが使える形になっているかどうかだけを見る。
+    """
+    session.execute(text("SET LOCAL enable_seqscan = off"))
+    compiled = statement.compile(dialect=session.get_bind().dialect)
+    rows = session.connection().exec_driver_sql(f"EXPLAIN {compiled}", compiled.params).fetchall()
+    return "\n".join(row[0] for row in rows)
+
+
+class TestRecommendationRunIndexes:
+    """Issue #32: 保持期間削除と直近 run 取得がインデックスを使うことを検証する。"""
+
+    def test_defines_composite_index_for_latest_run_lookup(self, migrated_engine: Engine):
+        # Arrange / Act
+        indexdef = find_indexdef(migrated_engine, COMPOSITE_INDEX_NAME)
+
+        # Assert
+        assert indexdef is not None
+        assert "(user_id, mode, generated_at DESC, id DESC)" in indexdef
+
+    def test_defines_generated_at_index_for_retention_purge(self, migrated_engine: Engine):
+        # Arrange / Act
+        indexdef = find_indexdef(migrated_engine, GENERATED_AT_INDEX_NAME)
+
+        # Assert
+        assert indexdef is not None
+        assert "(generated_at)" in indexdef
+
+    def test_drops_redundant_user_id_only_index(self, migrated_engine: Engine):
+        """複合インデックスの前方一致で代替できる単独インデックスは残さない。"""
+        # Arrange / Act
+        indexdef = find_indexdef(migrated_engine, "ix_recommendation_runs_user_id")
+
+        # Assert
+        assert indexdef is None
+
+    def test_retention_delete_uses_generated_at_index(self, db_session: Session):
+        # Arrange
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        statement = build_expired_runs_delete(cutoff)
+
+        # Act
+        plan = explain(db_session, statement)
+
+        # Assert
+        assert GENERATED_AT_INDEX_NAME in plan
+
+    def test_latest_run_lookup_uses_composite_index(self, db_session: Session):
+        # Arrange
+        statement = build_latest_run_select(uuid.uuid4(), RecommendationMode.DISCOVER)
+
+        # Act
+        plan = explain(db_session, statement)
+
+        # Assert
+        assert COMPOSITE_INDEX_NAME in plan
