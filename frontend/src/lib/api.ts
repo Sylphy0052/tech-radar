@@ -37,6 +37,15 @@ export function isRateLimitError(error: unknown): error is ApiError {
   return error instanceof ApiError && error.status === TOO_MANY_REQUESTS_STATUS;
 }
 
+/** delta-seconds（RFC 9110）は 10 進整数のみ。16 進や指数表記は受け付けない。 */
+const DELTA_SECONDS_PATTERN = /^\d+$/;
+
+/**
+ * 受け入れる待機秒数の上限。これを超える値は「待ち時間不明」として扱い、
+ * 改ざんや設定ミスで極端な値が返っても画面側が無期限に待ち続けないようにする。
+ */
+const MAX_RETRY_AFTER_SECONDS = 300;
+
 /**
  * `Retry-After` ヘッダを待機秒数として解釈する。
  *
@@ -45,14 +54,15 @@ export function isRateLimitError(error: unknown): error is ApiError {
  * 表示するより「待ち時間不明」に倒すため null を返す。
  */
 function parseRetryAfterSeconds(header: string | null): number | null {
-  if (header === null || header.trim() === "") {
+  if (header === null) {
     return null;
   }
-  const seconds = Number(header);
-  if (!Number.isFinite(seconds) || seconds < 0) {
+  const trimmed = header.trim();
+  if (!DELTA_SECONDS_PATTERN.test(trimmed)) {
     return null;
   }
-  return Math.ceil(seconds);
+  const seconds = Number(trimmed);
+  return seconds <= MAX_RETRY_AFTER_SECONDS ? seconds : null;
 }
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {

@@ -229,6 +229,69 @@ describe("DiscoverFeed", () => {
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
   });
 
+  it("shows only the rate limit message when the initial fetch is rejected with 429", async () => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response("too many requests", {
+            status: 429,
+            headers: { "Retry-After": "30" },
+          }),
+      ),
+    );
+
+    // Act
+    render(<DiscoverFeed />);
+
+    // Assert — 一時的な制限を「記事が無い」と誤って伝えない
+    await waitFor(() =>
+      expect(
+        screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("表示できる記事がありません。")).not.toBeInTheDocument();
+  });
+
+  it("stops loading more pages while the sentinel keeps intersecting after a 429", async () => {
+    // Arrange
+    const page1 = makeItems(2, "page1");
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("cursor=page-2")) {
+        return new Response("too many requests", {
+          status: 429,
+          headers: { "Retry-After": "30" },
+        });
+      }
+      return jsonResponse({ items: page1, next_cursor: "page-2" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<DiscoverFeed />);
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+
+    // Act — センチネルが可視になり続ける（スクロール中の再通知）
+    act(() => {
+      triggerIntersection(true);
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
+      ).toBeInTheDocument(),
+    );
+    const callCountAfterRateLimit = fetchMock.mock.calls.length;
+    act(() => {
+      triggerIntersection(true);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "さらに読み込む" }));
+
+    // Assert — 再試行せず、待機中である旨の表示は残る
+    expect(fetchMock).toHaveBeenCalledTimes(callCountAfterRateLimit);
+    expect(
+      screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
+    ).toBeInTheDocument();
+  });
+
   it("marks the Good button as pressed optimistically when clicked", async () => {
     // Arrange
     const items = makeItems(1, "only");
