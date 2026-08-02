@@ -10,9 +10,14 @@ export default function Home() {
       <div className="flex flex-col gap-4">
         <div className="flex items-center justify-between gap-4">
           <h1 className="text-3xl font-bold">TechRadar</h1>
-          <Link href="/articles" className="text-sm underline">
-            関心記事一覧を見る
-          </Link>
+          <div className="flex items-center gap-4">
+            <Link href="/articles" className="text-sm underline">
+              関心記事一覧を見る
+            </Link>
+            <Link href="/interests" className="text-sm underline">
+              関心分析を見る
+            </Link>
+          </div>
         </div>
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
           技術記事に特化したパーソナライズド・フィード。一次情報を優先して新着記事を推薦します。

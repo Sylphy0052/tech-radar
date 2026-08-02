@@ -36,11 +36,19 @@ from techradar.api.feedback import ArticleFeedbackCreate, ArticleFeedbackRespons
 from techradar.api.interests import (
     InterestClusterItem,
     InterestClusterListResponse,
+    InterestContentTypeItem,
+    InterestDifficultyItem,
+    InterestFeedbackRatio,
+    InterestGenreItem,
+    InterestPrimarySourceRatio,
+    InterestSummaryResponse,
+    InterestTechnologyItem,
     InterestTimelineBucket,
     InterestTimelineResponse,
     InterestTimelineTopicStats,
     InterestTopicItem,
     InterestTopicListResponse,
+    SuppressedTopicItem,
 )
 from techradar.api.jobs import JobResponse
 from techradar.api.rate_limit import RateLimitedResponse
@@ -319,10 +327,23 @@ JOB_SPEC = ModelParitySpec(
 USER_TOPIC_PREFERENCE_SPEC = ModelParitySpec(
     model=UserTopicPreference,
     exposed={
-        "topic": (ExposedField(InterestTopicItem, "topic"),),
+        # topic/negative_weight/effective_weight は GET /api/interests/summary の
+        # suppressed_topics でも公開する（ORM の単純な filter+order+limit で
+        # 取得した行の列をそのまま詰めるだけの直接対応のため、DerivedField
+        # ではなく ExposedField として二重登録する）。
+        "topic": (
+            ExposedField(InterestTopicItem, "topic"),
+            ExposedField(SuppressedTopicItem, "topic"),
+        ),
         "positive_weight": (ExposedField(InterestTopicItem, "positive_weight"),),
-        "negative_weight": (ExposedField(InterestTopicItem, "negative_weight"),),
-        "effective_weight": (ExposedField(InterestTopicItem, "effective_weight"),),
+        "negative_weight": (
+            ExposedField(InterestTopicItem, "negative_weight"),
+            ExposedField(SuppressedTopicItem, "negative_weight"),
+        ),
+        "effective_weight": (
+            ExposedField(InterestTopicItem, "effective_weight"),
+            ExposedField(SuppressedTopicItem, "effective_weight"),
+        ),
         "updated_at": (ExposedField(InterestTopicItem, "updated_at"),),
     },
     internal={
@@ -480,6 +501,129 @@ DERIVED_FIELDS: tuple[DerivedField, ...] = (
         "InterestTimelineBucketのリスト。article_feedback/user_articlesの日時から"
         "週単位で集計した派生データであり、単一のモデル列由来ではない構造フィールド",
     ),
+    # GET /api/interests/summary（Issue #16）。集計値は article_feedback と
+    # articles をJOINしたSQL集約クエリの結果であり、InterestTimelineTopicStats/
+    # InterestTimelineBucketと同じ理由でDerivedFieldに分類する
+    # （suppressed_topicsだけはuser_topic_preferencesの単純な行読み出しのため、
+    # USER_TOPIC_PREFERENCE_SPEC側にExposedFieldとして登録済み）。
+    DerivedField(
+        InterestGenreItem,
+        "domain",
+        "article_feedbackとarticlesをJOINし、domainでGROUP BYした集計結果のグループキー。"
+        "単一行のArticleの列読み出しではなく複数行の集計結果のため、"
+        "単一モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestGenreItem,
+        "positive_count",
+        "ジャンル別にaction が good/save のarticle_feedback件数を集計したSQL集計値。"
+        "モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestGenreItem,
+        "negative_count",
+        "ジャンル別にaction が badのarticle_feedback件数を集計したSQL集計値。"
+        "モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestFeedbackRatio,
+        "good_count",
+        "action別にarticle_feedback件数を集計したSQL集計値。モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestFeedbackRatio,
+        "bad_count",
+        "action別にarticle_feedback件数を集計したSQL集計値。モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestFeedbackRatio,
+        "save_count",
+        "action別にarticle_feedback件数を集計したSQL集計値。モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestTechnologyItem,
+        "technology",
+        "articles.technologies（JSONB配列）をjsonb_array_elements_textで行展開した1要素。"
+        "articles.technologies列の値そのものではなく展開結果のため、"
+        "単一モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestTechnologyItem,
+        "count",
+        "技術タグ別にaction が good/save のarticle_feedback件数を集計したSQL集計値。"
+        "モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestPrimarySourceRatio,
+        "primary_count",
+        "is_primary_source別にaction が good/save のarticle_feedback件数を"
+        "集計したSQL集計値。モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestPrimarySourceRatio,
+        "secondary_count",
+        "is_primary_source別にaction が good/save のarticle_feedback件数を"
+        "集計したSQL集計値。モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestContentTypeItem,
+        "content_type",
+        "article_feedbackとarticlesをJOINし、content_typeでGROUP BYした集計結果の"
+        "グループキー。DerivedField扱いの理由はInterestGenreItem.domainと同じ",
+    ),
+    DerivedField(
+        InterestContentTypeItem,
+        "count",
+        "content_type別にaction が good/save のarticle_feedback件数を集計したSQL集計値。"
+        "モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestDifficultyItem,
+        "difficulty",
+        "article_feedbackとarticlesをJOINし、difficultyでGROUP BYした集計結果の"
+        "グループキー。DerivedField扱いの理由はInterestGenreItem.domainと同じ",
+    ),
+    DerivedField(
+        InterestDifficultyItem,
+        "count",
+        "difficulty別にaction が good/save のarticle_feedback件数を集計したSQL集計値。"
+        "モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestSummaryResponse,
+        "genres",
+        "InterestGenreItemのリスト。単一のモデル列由来ではない構造フィールド",
+    ),
+    DerivedField(
+        InterestSummaryResponse,
+        "feedback_ratio",
+        "InterestFeedbackRatioのネスト表現。単一のモデル列由来ではない構造フィールド",
+    ),
+    DerivedField(
+        InterestSummaryResponse,
+        "technologies",
+        "InterestTechnologyItemのリスト。単一のモデル列由来ではない構造フィールド",
+    ),
+    DerivedField(
+        InterestSummaryResponse,
+        "primary_source_ratio",
+        "InterestPrimarySourceRatioのネスト表現。単一のモデル列由来ではない構造フィールド",
+    ),
+    DerivedField(
+        InterestSummaryResponse,
+        "content_types",
+        "InterestContentTypeItemのリスト。単一のモデル列由来ではない構造フィールド",
+    ),
+    DerivedField(
+        InterestSummaryResponse,
+        "difficulties",
+        "InterestDifficultyItemのリスト。単一のモデル列由来ではない構造フィールド",
+    ),
+    DerivedField(
+        InterestSummaryResponse,
+        "suppressed_topics",
+        "SuppressedTopicItemのリスト。単一のモデル列由来ではない構造フィールド",
+    ),
 )
 
 # 対象 API スキーマ。個別の parity 宣言（exposed/derived）で網羅する。
@@ -508,6 +652,14 @@ TARGET_SCHEMAS: tuple[type[BaseModel], ...] = (
     InterestTimelineTopicStats,
     InterestTimelineBucket,
     InterestTimelineResponse,
+    InterestGenreItem,
+    InterestFeedbackRatio,
+    InterestTechnologyItem,
+    InterestPrimarySourceRatio,
+    InterestContentTypeItem,
+    InterestDifficultyItem,
+    SuppressedTopicItem,
+    InterestSummaryResponse,
 )
 
 # API 入出力スキーマではないため TARGET_SCHEMAS の対象外とするクラス（現状は無し）。
