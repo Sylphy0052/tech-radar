@@ -11,7 +11,14 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List Interest Articles
+         * @description 関心記事一覧を返す（`PROJECT_SPEC.md` §6.3）。
+         *
+         *     手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）
+         *     降順で返す。タイブレークに `user_articles.id` を使い、cursor はこの2つの組から作る。
+         */
+        get: operations["list_interest_articles_api_articles_get"];
         put?: never;
         /**
          * Create Article Registration
@@ -72,6 +79,30 @@ export interface paths {
          *     （手動登録由来の行は残す）。
          */
         delete: operations["delete_article_feedback_api_articles__article_id__feedback_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/articles/{article_id}/interest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Interest Article
+         * @description 記事を関心記事一覧から除外する。
+         *
+         *     `user_articles` の該当行を削除するだけで、`article_feedback` には触れない
+         *     （Bad フィードバックも付けない）。「興味がない」（Bad）と「間違って登録した」
+         *     （一覧からの除外）は別の意思表示のため区別する（Issue #14 ヒアリング済み決定事項）。
+         */
+        delete: operations["delete_interest_article_api_articles__article_id__interest_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -283,6 +314,12 @@ export interface components {
             reason: components["schemas"]["BadReason"] | null;
         };
         /**
+         * ArticleOrigin
+         * @description 関心記事に追加された経路（`PROJECT_SPEC.md` §7.1 の重み表に対応）。
+         * @enum {string}
+         */
+        ArticleOrigin: "manual" | "good" | "saved" | "read_full" | "clicked";
+        /**
          * ArticleRecommendationsResponse
          * @description 記事起点推薦（`POST /api/articles/{article_id}/recommendations`）のレスポンス。
          */
@@ -405,6 +442,57 @@ export interface components {
             status: string;
             /** Version */
             version: string;
+        };
+        /**
+         * InterestArticleItem
+         * @description 関心記事一覧（`GET /api/articles`）1 件のレスポンス（`PROJECT_SPEC.md` §6.3）。
+         */
+        InterestArticleItem: {
+            /**
+             * Article Id
+             * Format: uuid
+             */
+            article_id: string;
+            /** Canonical Url */
+            canonical_url: string;
+            /** Category */
+            category: string | null;
+            /** Content Type */
+            content_type: string | null;
+            /** Domain */
+            domain: string | null;
+            /** Is Primary Source */
+            is_primary_source: boolean;
+            /** Language */
+            language: string | null;
+            origin: components["schemas"]["ArticleOrigin"];
+            /** Original Url */
+            original_url: string;
+            /** Published At */
+            published_at: string | null;
+            /**
+             * Registered At
+             * Format: date-time
+             */
+            registered_at: string;
+            /** Source Domain */
+            source_domain: string;
+            /** Title */
+            title: string;
+            /** Topics */
+            topics: string[];
+            /** Translated Title */
+            translated_title: string | null;
+        };
+        /**
+         * InterestArticleListResponse
+         * @description 関心記事一覧のレスポンス。
+         */
+        InterestArticleListResponse: {
+            /** Items */
+            items: components["schemas"]["InterestArticleItem"][];
+            /** Next Cursor */
+            next_cursor: string | null;
         };
         /**
          * JobResponse
@@ -595,6 +683,55 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_interest_articles_api_articles_get: {
+        parameters: {
+            query?: {
+                /** @description 登録方法。複数指定可 */
+                origin?: components["schemas"]["ArticleOrigin"][] | null;
+                /** @description ジャンル大分類 */
+                domain?: string | null;
+                /** @description ジャンル中分類 */
+                category?: string | null;
+                /** @description 情報源 */
+                source_domain?: string | null;
+                /** @description 言語 */
+                language?: string | null;
+                /** @description 登録日時の期間（下限、含む） */
+                registered_from?: string | null;
+                /** @description 登録日時の期間（上限、含む） */
+                registered_to?: string | null;
+                /** @description 公式 / 非公式 */
+                is_primary_source?: boolean | null;
+                /** @description 前回レスポンスの next_cursor をそのまま渡す */
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InterestArticleListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     create_article_registration_api_articles_post: {
         parameters: {
             query?: never;
@@ -704,6 +841,35 @@ export interface operations {
         };
     };
     delete_article_feedback_api_articles__article_id__feedback_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                article_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_interest_article_api_articles__article_id__interest_delete: {
         parameters: {
             query?: never;
             header?: never;
