@@ -323,6 +323,12 @@ class InterestSummaryConfig(BaseModel):
     max_genres: int = Field(ge=MIN_SUMMARY_LIMIT)
     max_technologies: int = Field(ge=MIN_SUMMARY_LIMIT)
     max_suppressed_topics: int = Field(ge=MIN_SUMMARY_LIMIT)
+    # content_type / difficulty は語彙が LLM の分類（`analysis/prompt.py`）に
+    # 由来し、DB 列（`articles.content_type` / `difficulty`）自体は CHECK 制約の
+    # 無い text のため、想定外の値が入っても集計が際限なく増えないよう他の
+    # リストと同じ安全弁を掛ける。
+    max_content_types: int = Field(ge=MIN_SUMMARY_LIMIT)
+    max_difficulties: int = Field(ge=MIN_SUMMARY_LIMIT)
 
 
 class ScoringConfig(BaseModel):
