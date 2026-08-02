@@ -11,19 +11,23 @@ import binascii
 import logging
 import math
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_app_settings, get_current_user_id, get_now, get_session
+from techradar.api.feedback import ArticleFeedbackResponse
 from techradar.config import Settings
-from techradar.db import Article, Recommendation, RecommendationRun
-from techradar.db.enums import RecommendationMode
+from techradar.db import Article, ArticleFeedback, Recommendation, RecommendationRun, UserArticle
+from techradar.db.enums import FeedbackAction, RecommendationMode
 from techradar.recommendation.config import get_scoring_config
 from techradar.recommendation.service import (
+    READ_ORIGIN_VALUES,
     find_latest_run,
     generate_recommendations,
     load_recommendation_page,
@@ -85,6 +89,12 @@ class RecommendationItem(BaseModel):
     # `recommendations.reasons`（JSONB）をそのまま返す。スコア内訳全項目と
     # 機械生成の `summary` を含む（`ranking.ScoreBreakdown.to_reasons`）。
     reasons: dict[str, float | str]
+    # `user_articles` の origin が read_full/clicked のいずれかなら true
+    # （`recommendation/service.py` の `READ_ORIGIN_VALUES` と同一基準、
+    # `PROJECT_SPEC.md` §6.1「既読記事の再表示は抑制する」）。
+    is_read: bool
+    # `article_feedback` の現在行（Good/Bad/保存の最新の意思表示）。未設定なら null。
+    feedback: ArticleFeedbackResponse | None
 
 
 class ArticleRecommendationsResponse(BaseModel):
@@ -108,8 +118,18 @@ class InvalidCursorError(Exception):
     """壊れた cursor 文字列を検出したときの例外。"""
 
 
-def _build_item(recommendation: Recommendation, article: Article) -> RecommendationItem:
-    """DB から読み出した `Recommendation` / `Article` を API レスポンス項目にする。"""
+def _build_item(
+    recommendation: Recommendation,
+    article: Article,
+    *,
+    is_read: bool,
+    feedback: ArticleFeedback | None,
+) -> RecommendationItem:
+    """DB から読み出した `Recommendation` / `Article` を API レスポンス項目にする。
+
+    `is_read` / `feedback` はページ内の全記事ぶんをまとめて 1 回ずつのクエリで
+    引いた辞書から呼び出し側（`_build_items`）が渡す。ここではその組み立てだけを行う。
+    """
     return RecommendationItem(
         article_id=article.id,
         canonical_url=article.canonical_url,
@@ -126,7 +146,66 @@ def _build_item(recommendation: Recommendation, article: Article) -> Recommendat
         score=recommendation.score,
         rank=recommendation.rank,
         reasons=recommendation.reasons,
+        is_read=is_read,
+        feedback=(
+            ArticleFeedbackResponse.model_validate(feedback) if feedback is not None else None
+        ),
     )
+
+
+def _build_items(
+    session: Session,
+    user_id: uuid.UUID,
+    rows: Sequence[tuple[Recommendation, Article]],
+) -> list[RecommendationItem]:
+    """ページ内の `Recommendation` / `Article` 行から API レスポンス項目一覧を組み立てる。
+
+    `user_articles`（is_read 判定）と `article_feedback`（feedback）を、記事ごとに
+    クエリを撒く N+1 にせず、対象記事 ID をまとめて 1 回ずつのクエリで引く。
+    """
+    if not rows:
+        return []
+
+    article_ids = [article.id for _, article in rows]
+
+    origins_by_article_id: dict[uuid.UUID, set[str]] = {}
+    for article_id, origin in session.execute(
+        select(UserArticle.article_id, UserArticle.origin).where(
+            UserArticle.user_id == user_id, UserArticle.article_id.in_(article_ids)
+        )
+    ).all():
+        origins_by_article_id.setdefault(article_id, set()).add(origin)
+
+    feedback_by_article_id = {
+        feedback.article_id: feedback
+        for feedback in session.scalars(
+            select(ArticleFeedback).where(
+                ArticleFeedback.user_id == user_id, ArticleFeedback.article_id.in_(article_ids)
+            )
+        ).all()
+    }
+
+    # Bad 済み記事をレスポンスから除外する（PROJECT_SPEC.md §6.1「既に Bad した
+    # 記事は再表示しない」、Issue #13）。Bad による候補除外は本来
+    # `recommendation/service.py` の `load_candidates` が新規 run を作るときにしか
+    # 効かない。`GET /api/feed` の cursor 省略時は直近の DISCOVER run を最大
+    # `feed_run_reuse_seconds`（`config/scoring.yaml`）秒まで再利用するため
+    # （`_resolve_discover_run_id`）、再利用ウィンドウ内で付けた Bad は
+    # `recommendations` 行として残り続ける run には反映されない。そのため
+    # ページ組み立てのこの時点で改めて除外する。記事起点推薦
+    # （`create_article_recommendations`）は生成直後の run を読むため元々 Bad は
+    # 含まれないが、同じ組み立て関数を経由するため挙動は変わらない。
+    return [
+        _build_item(
+            recommendation,
+            article,
+            is_read=bool(origins_by_article_id.get(article.id, set()) & READ_ORIGIN_VALUES),
+            feedback=feedback_by_article_id.get(article.id),
+        )
+        for recommendation, article in rows
+        if feedback_by_article_id.get(article.id) is None
+        or feedback_by_article_id[article.id].action != FeedbackAction.BAD.value
+    ]
 
 
 def _encode_cursor(run_id: uuid.UUID, rank: int) -> str:
@@ -238,7 +317,7 @@ def create_article_recommendations(
         run_id=result.run_id,
         mode=result.mode.value,
         generated_at=result.generated_at,
-        items=[_build_item(recommendation, article) for recommendation, article in rows],
+        items=_build_items(session, user_id, rows),
     )
 
 
@@ -260,6 +339,11 @@ def get_feed(
     新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。
     `cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、
     ページ間で重複が出ないようにする（受入基準）。
+
+    `next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で
+    cursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が
+    非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで
+    終端と判断せず、`next_cursor` が null になるまで辿ること。
 
     古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。
     """
@@ -292,6 +376,6 @@ def get_feed(
 
     next_cursor = _encode_cursor(run_id, page_rows[-1][0].rank) if has_next_page else None
     return FeedResponse(
-        items=[_build_item(recommendation, article) for recommendation, article in page_rows],
+        items=_build_items(session, user_id, page_rows),
         next_cursor=next_cursor,
     )

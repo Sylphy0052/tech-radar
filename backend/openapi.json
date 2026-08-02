@@ -1,6 +1,60 @@
 {
   "components": {
     "schemas": {
+      "ArticleFeedbackCreate": {
+        "additionalProperties": false,
+        "description": "フィードバック登録リクエスト。",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/FeedbackAction"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BadReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "ArticleFeedbackCreate",
+        "type": "object"
+      },
+      "ArticleFeedbackResponse": {
+        "description": "フィードバックの公開表現。\n\n`action` / `reason` は enum 型にする。`str` のままだと OpenAPI に enum が出ず、\n生成される `frontend/src/lib/api-schema.d.ts` でも単なる `string` になり、\nフロント側の文字列リテラル比較が型で守られない（Issue #13 自己レビュー B）。\nDB の `action` / `reason` 列は text 型だが、`from_attributes=True` により\npydantic がその文字列値から enum メンバーへ変換する。",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/FeedbackAction"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BadReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "reason",
+          "created_at"
+        ],
+        "title": "ArticleFeedbackResponse",
+        "type": "object"
+      },
       "ArticleRecommendationsResponse": {
         "description": "記事起点推薦（`POST /api/articles/{article_id}/recommendations`）のレスポンス。",
         "properties": {
@@ -114,6 +168,19 @@
         "title": "ArticleRegistrationResponse",
         "type": "object"
       },
+      "BadReason": {
+        "description": "Bad の理由（`PROJECT_SPEC.md` §7.2）。任意項目。",
+        "enum": [
+          "not_interested",
+          "too_shallow",
+          "already_known",
+          "promotional",
+          "untrusted_source",
+          "too_repetitive"
+        ],
+        "title": "BadReason",
+        "type": "string"
+      },
       "CrawlRunCreate": {
         "additionalProperties": false,
         "description": "巡回ジョブの起動リクエスト。省略可能。",
@@ -183,6 +250,16 @@
         ],
         "title": "FeedResponse",
         "type": "object"
+      },
+      "FeedbackAction": {
+        "description": "記事へのフィードバック種別。",
+        "enum": [
+          "good",
+          "bad",
+          "save"
+        ],
+        "title": "FeedbackAction",
+        "type": "string"
       },
       "HTTPValidationError": {
         "properties": {
@@ -301,8 +378,22 @@
             "title": "Canonical Url",
             "type": "string"
           },
+          "feedback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArticleFeedbackResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "is_primary_source": {
             "title": "Is Primary Source",
+            "type": "boolean"
+          },
+          "is_read": {
+            "title": "Is Read",
             "type": "boolean"
           },
           "language": {
@@ -414,7 +505,9 @@
           "technologies",
           "score",
           "rank",
-          "reasons"
+          "reasons",
+          "is_read",
+          "feedback"
         ],
         "title": "RecommendationItem",
         "type": "object"
@@ -768,6 +861,95 @@
         ]
       }
     },
+    "/api/articles/{article_id}/feedback": {
+      "delete": {
+        "description": "記事へのフィードバックを取り消す。\n\nGood / 保存に由来する `user_articles` 行も合わせて削除する\n（手動登録由来の行は残す）。",
+        "operationId": "delete_article_feedback_api_articles__article_id__feedback_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "article_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Article Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Article Feedback",
+        "tags": [
+          "feedback"
+        ]
+      },
+      "post": {
+        "description": "記事へ Good / Bad / 保存を記録する（`PROJECT_SPEC.md` §7）。",
+        "operationId": "create_article_feedback_api_articles__article_id__feedback_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "article_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Article Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArticleFeedbackCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleFeedbackResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Article Feedback",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
     "/api/articles/{article_id}/recommendations": {
       "post": {
         "description": "指定記事に近い記事を推薦する（`PROJECT_SPEC.md` §13.1）。\n\n構成比は適用せず、`rank_candidates` の上位をそのまま rank 昇順で返す\n（`recommendation/service.py` の ARTICLE_BASED モード）。",
@@ -873,7 +1055,7 @@
     },
     "/api/feed": {
       "get": {
-        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。\n\n`cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ\n新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。\n`cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、\nページ間で重複が出ないようにする（受入基準）。\n\n古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。",
+        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。\n\n`cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ\n新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。\n`cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、\nページ間で重複が出ないようにする（受入基準）。\n\n`next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で\ncursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が\n非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで\n終端と判断せず、`next_cursor` が null になるまで辿ること。\n\n古い run の削除ジョブと API のレート制限自体は本 MR のスコープ外（Issue #28）。",
         "operationId": "get_feed_api_feed_get",
         "parameters": [
           {
