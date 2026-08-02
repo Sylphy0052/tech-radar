@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 
 import pytest
@@ -20,13 +20,16 @@ from techradar.api.feedback import (
 )
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, UserArticle
-from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction
+from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction, JobStatus, JobType
+from techradar.db.models import Job, UserTopicPreference
 from techradar.main import create_app
 
 NOW = datetime(2026, 8, 1, tzinfo=UTC)
 
 
-def make_article(session: Session, *, title: str = "記事タイトル") -> Article:
+def make_article(
+    session: Session, *, title: str = "記事タイトル", topics: Sequence[str] = ()
+) -> Article:
     """フィードバック対象として使う記事を DB へ保存する。"""
     canonical_url = f"https://example.com/{uuid.uuid4().hex[:10]}"
     article = Article(
@@ -34,6 +37,7 @@ def make_article(session: Session, *, title: str = "記事タイトル") -> Arti
         original_url=canonical_url,
         title=title,
         source_domain="example.com",
+        topics=list(topics),
         fetched_at=NOW,
     )
     session.add(article)
@@ -495,3 +499,126 @@ class TestUpsertConcurrency:
         assert user_article is not None
         assert user_article.origin == ArticleOrigin.GOOD.value
         assert user_article.interest_weight == pytest.approx(0.8)
+
+
+def _get_topic_preference(
+    db_session: Session, user_id: uuid.UUID, topic: str
+) -> UserTopicPreference | None:
+    return db_session.get(UserTopicPreference, (user_id, topic))
+
+
+def _rebuild_jobs(db_session: Session) -> list[Job]:
+    return list(
+        db_session.scalars(
+            select(Job).where(Job.type == JobType.REBUILD_INTEREST_CLUSTERS.value)
+        ).all()
+    )
+
+
+class TestCreateArticleFeedbackUpdatesTopicPreferences:
+    """受入基準: Good でその記事の topics の positive_weight / effective_weight が増える。"""
+
+    def test_good_increases_the_topics_positive_and_effective_weight(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        article = make_article(db_session, topics=["llm"])
+
+        # Act
+        client.post(f"/api/articles/{article.id}/feedback", json={"action": "good"})
+
+        # Assert
+        preference = _get_topic_preference(db_session, settings.default_user_id, "llm")
+        assert preference is not None
+        assert preference.positive_weight > 0.0
+        assert preference.effective_weight > 0.0
+
+    def test_a_single_bad_does_not_lower_an_existing_topic_weight(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: 単発の Bad ではトピック重みが下がらない。"""
+        # Arrange — 先に Good でトピック重みを作っておく
+        article = make_article(db_session, topics=["llm"])
+        client.post(f"/api/articles/{article.id}/feedback", json={"action": "good"})
+        before = _get_topic_preference(db_session, settings.default_user_id, "llm")
+        assert before is not None
+
+        # Act — 別記事（同じトピック）を単発で Bad にする
+        other = make_article(db_session, title="別記事", topics=["llm"])
+        client.post(f"/api/articles/{other.id}/feedback", json={"action": "bad"})
+
+        # Assert — negative_weight が付かず effective_weight も変わらない
+        after = _get_topic_preference(db_session, settings.default_user_id, "llm")
+        assert after is not None
+        assert after.negative_weight == pytest.approx(0.0)
+        assert after.effective_weight == pytest.approx(before.effective_weight)
+
+
+class TestCreateArticleFeedbackEnqueuesClusterRebuild:
+    """受入基準: フィードバック POST でクラスタ再構築ジョブが1件積まれる。
+
+    連続実行しても pending が重複しない。
+    """
+
+    def test_enqueues_exactly_one_pending_job(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange
+        article = make_article(db_session)
+
+        # Act
+        response = client.post(f"/api/articles/{article.id}/feedback", json={"action": "good"})
+
+        # Assert
+        assert response.status_code == 200
+        jobs = _rebuild_jobs(db_session)
+        assert len(jobs) == 1
+        assert jobs[0].status == JobStatus.PENDING.value
+
+    def test_repeated_feedback_does_not_duplicate_the_pending_job(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange
+        article = make_article(db_session)
+        other_article = make_article(db_session, title="別記事")
+
+        # Act — 連続して2回フィードバックを送る
+        client.post(f"/api/articles/{article.id}/feedback", json={"action": "good"})
+        client.post(f"/api/articles/{other_article.id}/feedback", json={"action": "good"})
+
+        # Assert — pending のジョブは1件のまま
+        jobs = _rebuild_jobs(db_session)
+        assert len(jobs) == 1
+
+    def test_enqueues_a_new_job_once_the_previous_one_is_no_longer_pending(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange
+        article = make_article(db_session)
+        client.post(f"/api/articles/{article.id}/feedback", json={"action": "good"})
+        first_job = _rebuild_jobs(db_session)[0]
+        first_job.status = JobStatus.COMPLETED.value
+        db_session.flush()
+
+        # Act
+        other_article = make_article(db_session, title="別記事")
+        client.post(f"/api/articles/{other_article.id}/feedback", json={"action": "good"})
+
+        # Assert
+        jobs = _rebuild_jobs(db_session)
+        assert len(jobs) == 2
+
+
+class TestDeleteArticleFeedbackEnqueuesClusterRebuild:
+    def test_enqueues_a_pending_job(self, client: TestClient, db_session: Session) -> None:
+        # Arrange
+        article = make_article(db_session)
+        client.post(f"/api/articles/{article.id}/feedback", json={"action": "good"})
+
+        # Act
+        response = client.delete(f"/api/articles/{article.id}/feedback")
+
+        # Assert
+        assert response.status_code == 204
+        jobs = _rebuild_jobs(db_session)
+        assert len(jobs) == 1

@@ -382,11 +382,12 @@ class TestBuildInterestProfile:
         add_user_article(db_session, user_id, no_embedding_article, ArticleOrigin.SAVED)
 
         # Act
-        profile = build_interest_profile(db_session, user_id, settings)
+        profile = build_interest_profile(db_session, user_id, NOW, settings)
 
         # Assert — embedding が無い記事は無視され、他 2 件の embedding は集まる
         assert len(profile.embeddings) == 2
         assert profile.known_topics == {"llm", "rag", "agent"}
+        assert all(item.weight > 0.0 for item in profile.embeddings)
 
     def test_returns_an_empty_profile_without_raising_when_there_are_no_interest_articles(
         self, db_session: Session, settings: Settings
@@ -395,10 +396,12 @@ class TestBuildInterestProfile:
         user_id = uuid.uuid4()
 
         # Act
-        profile = build_interest_profile(db_session, user_id, settings)
+        profile = build_interest_profile(db_session, user_id, NOW, settings)
 
         # Assert
-        assert profile == InterestProfile(embeddings=(), known_topics=frozenset())
+        assert profile == InterestProfile(
+            embeddings=(), known_topics=frozenset(), bad_embeddings=()
+        )
 
     def test_truncates_to_the_configured_limit_and_logs_a_warning(
         self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
@@ -408,9 +411,10 @@ class TestBuildInterestProfile:
         limited_config = config.model_copy(
             update={"interest": config.interest.model_copy(update={"max_profile_articles": 1})}
         )
-        monkeypatch.setattr(
-            "techradar.recommendation.service.get_scoring_config", lambda: limited_config
-        )
+        # 対象記事の読み込み・重み計算は interest.service.load_weighted_interest_articles
+        # へ委譲した（DRY、rebuild_interest_clusters と共有）ため、その呼び出し元の
+        # get_scoring_config / logger を差し替える。
+        monkeypatch.setattr("techradar.interest.service.get_scoring_config", lambda: limited_config)
         user_id = uuid.uuid4()
         older_article = make_article(db_session, title="古い関心記事", embedding=make_embedding(0))
         add_user_article(
@@ -426,16 +430,81 @@ class TestBuildInterestProfile:
         add_user_article(db_session, user_id, newer_article, ArticleOrigin.MANUAL, created_at=NOW)
         messages: list[str] = []
         monkeypatch.setattr(
-            "techradar.recommendation.service.logger.warning",
+            "techradar.interest.service.logger.warning",
             lambda message, *args, **kwargs: messages.append(message % args if args else message),
         )
 
         # Act
-        profile = build_interest_profile(db_session, user_id, settings)
+        profile = build_interest_profile(db_session, user_id, NOW, settings)
 
         # Assert — 新しい順に残るため newer_article の embedding だけが残る
-        assert profile.embeddings == (tuple(make_embedding(1)),)
+        assert [item.vector for item in profile.embeddings] == [tuple(make_embedding(1))]
         assert any("truncated_count=1" in message for message in messages)
+
+    def test_weighs_a_recent_good_article_more_than_an_older_one(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 受入基準: 時間減衰により古い Good より新しい Good の
+        # weight が大きい。origin は両方 good に揃え、created_at の差だけにする
+        user_id = uuid.uuid4()
+        old_article = make_article(db_session, title="古いGood記事", embedding=make_embedding(0))
+        add_user_article(
+            db_session,
+            user_id,
+            old_article,
+            ArticleOrigin.GOOD,
+            created_at=NOW - timedelta(days=60),
+        )
+        new_article = make_article(db_session, title="新しいGood記事", embedding=make_embedding(1))
+        add_user_article(db_session, user_id, new_article, ArticleOrigin.GOOD, created_at=NOW)
+
+        # Act
+        profile = build_interest_profile(db_session, user_id, NOW, settings)
+        weight_by_vector = {item.vector: item.weight for item in profile.embeddings}
+
+        # Assert
+        assert (
+            weight_by_vector[tuple(make_embedding(1))] > weight_by_vector[tuple(make_embedding(0))]
+        )
+
+    def test_weighs_a_manual_registration_more_than_a_click(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 受入基準: origin=manual の記事は origin=clicked の記事より
+        # weight が大きい（explicit_weight の差）。created_at は揃えて時間減衰の
+        # 影響を排除する
+        user_id = uuid.uuid4()
+        manual_article = make_article(db_session, title="手動登録記事", embedding=make_embedding(0))
+        add_user_article(db_session, user_id, manual_article, ArticleOrigin.MANUAL, created_at=NOW)
+        clicked_article = make_article(
+            db_session, title="クリック記事", embedding=make_embedding(1)
+        )
+        add_user_article(
+            db_session, user_id, clicked_article, ArticleOrigin.CLICKED, created_at=NOW
+        )
+
+        # Act
+        profile = build_interest_profile(db_session, user_id, NOW, settings)
+        weight_by_vector = {item.vector: item.weight for item in profile.embeddings}
+
+        # Assert
+        assert (
+            weight_by_vector[tuple(make_embedding(0))] > weight_by_vector[tuple(make_embedding(1))]
+        )
+
+    def test_collects_bad_article_embeddings_into_bad_embeddings(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 受入基準: Bad した記事の embedding が bad_embeddings に入る
+        user_id = uuid.uuid4()
+        bad_article = make_article(db_session, title="Bad記事", embedding=make_embedding(0))
+        add_feedback(db_session, user_id, bad_article, FeedbackAction.BAD)
+
+        # Act
+        profile = build_interest_profile(db_session, user_id, NOW, settings)
+
+        # Assert
+        assert profile.bad_embeddings == (tuple(make_embedding(0)),)
 
 
 class TestGenerateRecommendationsDiscover:

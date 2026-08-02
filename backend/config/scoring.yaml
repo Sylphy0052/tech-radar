@@ -14,6 +14,12 @@
 #   novelty        : 新規性（novelty）の計算設定
 #   feed_composition: Discover フィードの構成比の目安。合計は 1.0
 #   limits         : ランキング処理の安全弁とページングの既定値
+#   feedback_weights: フィードバック種別ごとの重み（PROJECT_SPEC.md §7.1, §7.2）
+#   interest_decay : 関心の時間減衰の設定（§8）
+#   topic_preference: トピック単位の選好更新（Good/Bad の反映）の設定（§7.1, §7.2）
+#   bad_similarity : Bad 記事と意味的に近い記事を抑制する設定（§7.2）
+#   clustering     : 関心クラスタ構築（KMeans）の設定（§8）
+#   interest_timeline: 関心タイムライン（GET /api/interests/timeline）の週数の既定値・上限値
 
 weights:
   # 関心プロファイルとの一致を最も重視する（PROJECT_SPEC.md §14 の式）
@@ -64,6 +70,11 @@ interest:
   # ユーザーの関心記事が増え続けても、実行のたびに全件を読み込んで計算コストが
   # 際限なく増えないための安全弁。新しい順に打ち切る
   max_profile_articles: 200
+  # Bad 近傍抑制（bad_similarity）用に読み込む Bad 記事 embedding 数の上限
+  # （recommendation/service.py が使う）。max_profile_articles と同じ発想の
+  # 安全弁で、新しい順に打ち切る。抑制目的では古い Bad まで大量に遡る必要は
+  # 薄いため、max_profile_articles より小さめの値にする
+  max_bad_profile_articles: 100
 
 source_match:
   # 完全一致ほどの確信度は無いが無視もできない部分一致（エンティティ名が
@@ -113,3 +124,61 @@ limits:
   # jobs/handlers/purge_recommendation_runs.py、API のレート制限は
   # api/rate_limit.py がそれぞれ担う（Issue #28）
   feed_run_reuse_seconds: 600
+
+feedback_weights:
+  # フィードバック種別ごとの重み（PROJECT_SPEC.md §7.1, §7.2 の重み表）。
+  # 手動URL登録が最も強い意思表示で、以降 Good → 保存 → 全文閲覧 → クリックの
+  # 順に弱くなる（ユーザーが能動的に行った操作ほど関心の確度が高いため）
+  manual: 1.0
+  good: 0.8
+  save: 0.5
+  read_full: 0.2
+  clicked: 0.1
+  # Bad は負方向の強さの絶対値。Good（0.8）と同じ大きさにすることで、
+  # 「強い興味」と「強い忌避」を対称に扱う。符号は使う側（interest/weights.py 等）
+  # が持ち、ここには負数を書かない（設定ファイルの値は常に非負という前提を保つ）
+  bad: 0.8
+
+interest_decay:
+  # 関心の時間減衰の半減期（PROJECT_SPEC.md §8 の recency_decay）。日次で巡回する
+  # 運用（サーバー常駐なし）を踏まえ、数週間スパンで緩やかに関心が薄れる値にする
+  half_life_days: 30
+
+topic_preference:
+  # トピック重み低下の判定に見る直近フィードバック件数（§7.2 の例「直近5記事」）
+  recent_window: 5
+  # 直近 recent_window 件中この件数以上が Bad ならトピック重みを下げる
+  # （§7.2「同一トピックの直近5記事中3記事以上がBad」に合わせた過半数の閾値）
+  bad_threshold: 3
+  # 1 段階あたりのトピック重み低下量。1 回のペナルティで重みが消し飛ばない
+  # 程度に留め、繰り返しの Bad で段階的に下がるようにする
+  decay_step: 0.2
+
+bad_similarity:
+  # Bad 記事とのコサイン類似度がこれ以上なら抑制対象にする。緩すぎる閾値だと
+  # 無関係な記事まで巻き込むため、明確に近い記事だけに絞る
+  min_similarity: 0.7
+  # 類似度 1.0（Bad 記事とほぼ同一）のときの最大減点。penalties.bad（1.0）ほど
+  # 強くはせず、抑制はするが完全排除はしない範囲に留める
+  max_penalty: 0.5
+
+clustering:
+  # 関心クラスタ数の下限・上限（PROJECT_SPEC.md §8 の例のように、通常 2〜数個の
+  # クラスタでユーザーの関心領域を表現する）
+  min_clusters: 2
+  max_clusters: 8
+  # 1 クラスタを成立させるのに要する記事数。少数の記事だけで意味のあるクラスタと
+  # みなさないための下限
+  min_articles_per_cluster: 3
+  # クラスタのラベルに使うトピック語数。§8 の例（"AI Agent Engineering" 等）程度の
+  # 短いラベルにするため上位数語に絞る
+  label_topic_count: 3
+  # KMeans の初期化を固定し、同じ入力なら実行のたびに結果（クラスタの割当・
+  # ラベル・順序）が変わらないようにする
+  random_state: 0
+
+interest_timeline:
+  # GET /api/interests/timeline が既定で返す週数。
+  default_weeks: 12
+  # クライアントが要求できる最大週数。過大なレスポンス・集計コストを防ぐ。
+  max_weeks: 52

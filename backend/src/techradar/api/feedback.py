@@ -1,8 +1,13 @@
-"""記事フィードバック API（`PROJECT_SPEC.md` §7, Issue #13）。
+"""記事フィードバック API（`PROJECT_SPEC.md` §7, Issue #13, Issue #15）。
 
 Good / Bad / 保存の意思表示を記録する。`article_feedback` は 1 ユーザー 1 記事に
 つき 1 行で最新の意思表示を保持し（`db.models.ArticleFeedback`）、Good / 保存は
 さらに `user_articles`（関心記事）へも反映する（`PROJECT_SPEC.md` §7.1 の重み表）。
+
+Issue #15（関心プロファイル更新）により、フィードバックのたびにトピック単位の
+選好（`user_topic_preferences`）を同期更新し、関心クラスタ（`user_interest_clusters`）
+の再構築ジョブを積む。クラスタ再構築自体は同期実行しない（`_enqueue_interest_cluster_rebuild`
+docstring 参照）。
 """
 
 from __future__ import annotations
@@ -18,10 +23,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from techradar.api.deps import get_current_user_id, get_session
-from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction
+from techradar.api.deps import get_current_user_id, get_now, get_session
+from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction, JobType
 from techradar.db.errors import is_unique_violation
 from techradar.db.models import Article, ArticleFeedback, UserArticle
+from techradar.interest.service import update_topic_preferences
+from techradar.jobs.queue import enqueue
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +36,7 @@ router = APIRouter(prefix="/api/articles", tags=["feedback"])
 
 SessionDep = Annotated[Session, Depends(get_session)]
 UserIdDep = Annotated[uuid.UUID, Depends(get_current_user_id)]
+NowDep = Annotated[datetime, Depends(get_now)]
 
 # Good / 保存の重みの初期値（`PROJECT_SPEC.md` §7.1）。手動登録（1.0）は
 # `jobs/handlers/fetch_article.py` の `MANUAL_REGISTRATION_INTEREST_WEIGHT` で
@@ -235,20 +243,62 @@ def _apply_user_article_effect(
     _remove_feedback_derived_user_article(session, user_id, article_id)
 
 
+def _enqueue_interest_cluster_rebuild(session: Session, user_id: uuid.UUID) -> None:
+    """関心クラスタ再構築ジョブ（`rebuild_interest_clusters`）を積む（Issue #15）。
+
+    Good 連打のたびに全関心記事の embedding をクラスタリングすると API が
+    遅くなるため、同期実行せずジョブとして積むだけに留める（実際の再構築は
+    `jobs/handlers/rebuild_interest_clusters.py` が非同期に行う）。
+
+    同じ user の未処理（pending）のジョブが既にあれば積み増さない。重複抑制は
+    「pending 存在確認 → INSERT」という事前確認ではなく、DB 側の部分ユニーク
+    インデックス（`ux_jobs_active_rebuild_interest_clusters`、payload の
+    user_id ごとに1件、`migrations/versions/..._add_unique_index_for_active_
+    rebuild_.py`）を使う。`ux_jobs_active_crawl_sources`（Issue #26）と同じ
+    理由で、事前の SELECT だけでは同時に届いた2件のフィードバックがどちらも
+    「まだ無い」と判断して両方 INSERT してしまう TOCTOU レースをアプリの
+    コードだけでは塞げないため。ここでは事前確認すら行わず、まず INSERT を
+    試み、一意制約違反を捕捉して何もしない（既に同じ user の再構築ジョブが
+    積まれているとみなせる）。
+
+    INSERT は SAVEPOINT（`session.begin_nested`）に閉じ込め、違反時もこの
+    呼び出しより前の変更（フィードバック本体・トピック選好の更新）を道連れに
+    しない（`_upsert_feedback` と同じ方針）。
+    """
+    try:
+        with session.begin_nested():
+            enqueue(session, JobType.REBUILD_INTEREST_CLUSTERS, {"user_id": str(user_id)})
+    except IntegrityError as exc:
+        if not is_unique_violation(exc):
+            raise
+        logger.info("rebuild_interest_clusters.enqueue_skipped_already_pending user_id=%s", user_id)
+
+
 @router.post("/{article_id}/feedback", response_model=ArticleFeedbackResponse)
 def create_article_feedback(
     article_id: uuid.UUID,
     payload: ArticleFeedbackCreate,
     session: SessionDep,
     user_id: UserIdDep,
+    now: NowDep,
 ) -> ArticleFeedback:
-    """記事へ Good / Bad / 保存を記録する（`PROJECT_SPEC.md` §7）。"""
+    """記事へ Good / Bad / 保存を記録する（`PROJECT_SPEC.md` §7）。
+
+    合わせてトピック単位の選好（`user_topic_preferences`）を同期更新し
+    （`update_topic_preferences`）、関心クラスタの再構築ジョブを積む
+    （`_enqueue_interest_cluster_rebuild`、Issue #15）。
+    """
     article = session.get(Article, article_id)
     if article is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="記事が見つかりません")
 
     feedback = _upsert_feedback(session, user_id, article_id, payload)
     _apply_user_article_effect(session, user_id, article_id, payload.action)
+    # トピック選好の Bad 判定は、この記事自身のフィードバックも含めた「直近 N 件」を
+    # 見る（`update_topic_preferences` の docstring 参照）ため、必ず
+    # `_upsert_feedback` の後に呼ぶ。
+    update_topic_preferences(session, user_id, article_id, payload.action, now)
+    _enqueue_interest_cluster_rebuild(session, user_id)
     session.commit()
     return feedback
 
@@ -262,7 +312,14 @@ def delete_article_feedback(
     """記事へのフィードバックを取り消す。
 
     Good / 保存に由来する `user_articles` 行も合わせて削除する
-    （手動登録由来の行は残す）。
+    （手動登録由来の行は残す）。関心記事の構成が変わりうるため、関心クラスタの
+    再構築ジョブも積む。
+
+    トピック単位の選好（`user_topic_preferences`）は更新しない。
+    `interest/topics.py` の関数はいずれも増加方向のみで、取り消し時に
+    「その分を差し引く」ための減少関数を持たない（`update_topic_preferences`
+    の docstring 参照）。取り消し時に同じ関数を呼ぶと、削除したはずの
+    フィードバックの効果を新たに加算してしまい、意味が逆転するため呼ばない。
     """
     feedback = session.get(ArticleFeedback, (user_id, article_id))
     if feedback is None:
@@ -272,5 +329,6 @@ def delete_article_feedback(
 
     session.delete(feedback)
     _remove_feedback_derived_user_article(session, user_id, article_id)
+    _enqueue_interest_cluster_rebuild(session, user_id)
     session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

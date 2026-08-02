@@ -18,6 +18,9 @@ from techradar.jobs.handlers.purge_operation_logs import make_purge_operation_lo
 from techradar.jobs.handlers.purge_recommendation_runs import (
     make_purge_recommendation_runs_handler,
 )
+from techradar.jobs.handlers.rebuild_interest_clusters import (
+    make_rebuild_interest_clusters_handler,
+)
 
 __all__ = [
     "RegistrationErrorReason",
@@ -27,4 +30,5 @@ __all__ = [
     "make_fetch_article_handler",
     "make_purge_operation_logs_handler",
     "make_purge_recommendation_runs_handler",
+    "make_rebuild_interest_clusters_handler",
 ]
