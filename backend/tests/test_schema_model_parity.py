@@ -33,6 +33,15 @@ from techradar.api.articles import (
 )
 from techradar.api.crawl import CrawlRunCreate, CrawlRunResponse
 from techradar.api.feedback import ArticleFeedbackCreate, ArticleFeedbackResponse
+from techradar.api.interests import (
+    InterestClusterItem,
+    InterestClusterListResponse,
+    InterestTimelineBucket,
+    InterestTimelineResponse,
+    InterestTimelineTopicStats,
+    InterestTopicItem,
+    InterestTopicListResponse,
+)
 from techradar.api.jobs import JobResponse
 from techradar.api.rate_limit import RateLimitedResponse
 from techradar.api.recommendations import (
@@ -307,6 +316,38 @@ JOB_SPEC = ModelParitySpec(
     },
 )
 
+USER_TOPIC_PREFERENCE_SPEC = ModelParitySpec(
+    model=UserTopicPreference,
+    exposed={
+        "topic": (ExposedField(InterestTopicItem, "topic"),),
+        "positive_weight": (ExposedField(InterestTopicItem, "positive_weight"),),
+        "negative_weight": (ExposedField(InterestTopicItem, "negative_weight"),),
+        "effective_weight": (ExposedField(InterestTopicItem, "effective_weight"),),
+        "updated_at": (ExposedField(InterestTopicItem, "updated_at"),),
+    },
+    internal={
+        "user_id": "ユーザー識別子はAPI非公開（他のuser_id列と同じ方針）",
+    },
+)
+
+USER_INTEREST_CLUSTER_SPEC = ModelParitySpec(
+    model=UserInterestCluster,
+    exposed={
+        "label": (ExposedField(InterestClusterItem, "label"),),
+        "weight": (ExposedField(InterestClusterItem, "weight"),),
+        "topics": (ExposedField(InterestClusterItem, "topics"),),
+        "updated_at": (ExposedField(InterestClusterItem, "updated_at"),),
+    },
+    internal={
+        "id": "クラスタ行の内部PK。閲覧用途ではlabelで十分識別でき、APIレスポンスには含めない",
+        "user_id": "ユーザー識別子はAPI非公開（他のuser_id列と同じ方針）",
+        "centroid_embedding": (
+            "埋め込みベクトル（1024次元）はレスポンス肥大化のため非公開"
+            "（api/interests.pyのInterestClusterItemのdocstring参照）"
+        ),
+    },
+)
+
 MODEL_SPECS: tuple[ModelParitySpec, ...] = (
     ARTICLE_SPEC,
     USER_ARTICLE_SPEC,
@@ -316,14 +357,12 @@ MODEL_SPECS: tuple[ModelParitySpec, ...] = (
     SOURCE_REGISTRY_SPEC,
     ARTICLE_REGISTRATION_SPEC,
     JOB_SPEC,
+    USER_TOPIC_PREFERENCE_SPEC,
+    USER_INTEREST_CLUSTER_SPEC,
 )
 
 # API 公開スキーマを一切持たない内部専用モデル。
-INTERNAL_ONLY_MODELS: tuple[type[DeclarativeBase], ...] = (
-    OperationLog,
-    UserInterestCluster,
-    UserTopicPreference,
-)
+INTERNAL_ONLY_MODELS: tuple[type[DeclarativeBase], ...] = (OperationLog,)
 
 # モデル列由来ではない、スキーマ側の派生フィールド。
 DERIVED_FIELDS: tuple[DerivedField, ...] = (
@@ -389,6 +428,58 @@ DERIVED_FIELDS: tuple[DerivedField, ...] = (
         "detail",
         "429エラーの固定メッセージ（rate_limit.pyのRATE_LIMIT_DETAIL）。モデル列に基づかない",
     ),
+    DerivedField(
+        InterestTopicListResponse,
+        "items",
+        "InterestTopicItemのリスト。単一のモデル列由来ではない構造フィールド",
+    ),
+    DerivedField(
+        InterestClusterListResponse,
+        "items",
+        "InterestClusterItemのリスト。単一のモデル列由来ではない構造フィールド",
+    ),
+    DerivedField(
+        InterestTimelineTopicStats,
+        "topic",
+        "article_feedbackとarticles.topicsをJOINしたSQL集計結果のトピック名。"
+        "articles.topics列の値そのものではなく、jsonb_array_elements_textで行展開した"
+        "1要素であり、フィードバック日時（article_feedback.created_at）による週次集計"
+        "の単位でもあるため、単一モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestTimelineTopicStats,
+        "positive_count",
+        "週次バケット内でaction が good/save のarticle_feedback件数を集計したSQL集計値。"
+        "モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestTimelineTopicStats,
+        "negative_count",
+        "週次バケット内でaction が badのarticle_feedback件数を集計したSQL集計値。"
+        "モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestTimelineBucket,
+        "week_start",
+        "article_feedback.created_at/user_articles.created_atをdate_trunc('week', ...)で"
+        "UTC週単位に丸めたSQL集計値。モデル列の値そのものではない",
+    ),
+    DerivedField(
+        InterestTimelineBucket,
+        "interest_article_count",
+        "週次バケット内のuser_articles件数を集計したSQL集計値。モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        InterestTimelineBucket,
+        "topics",
+        "InterestTimelineTopicStatsのリスト。単一のモデル列由来ではない構造フィールド",
+    ),
+    DerivedField(
+        InterestTimelineResponse,
+        "buckets",
+        "InterestTimelineBucketのリスト。article_feedback/user_articlesの日時から"
+        "週単位で集計した派生データであり、単一のモデル列由来ではない構造フィールド",
+    ),
 )
 
 # 対象 API スキーマ。個別の parity 宣言（exposed/derived）で網羅する。
@@ -410,6 +501,13 @@ TARGET_SCHEMAS: tuple[type[BaseModel], ...] = (
     JobResponse,
     HealthResponse,
     RateLimitedResponse,
+    InterestTopicItem,
+    InterestTopicListResponse,
+    InterestClusterItem,
+    InterestClusterListResponse,
+    InterestTimelineTopicStats,
+    InterestTimelineBucket,
+    InterestTimelineResponse,
 )
 
 # API 入出力スキーマではないため TARGET_SCHEMAS の対象外とするクラス（現状は無し）。
