@@ -263,7 +263,13 @@ class BadSimilarityConfig(BaseModel):
 
 
 class ClusteringConfig(BaseModel):
-    """関心クラスタ構築（KMeans）の設定（`PROJECT_SPEC.md` §8）。"""
+    """関心クラスタ構築（KMeans）の設定（`PROJECT_SPEC.md` §8）。
+
+    `min_clusters` は目安であって強制されない。クラスタ数は
+    `min_articles_per_cluster` から賄える数を上限に決まるため
+    （`interest/clusters.py` の `_cluster_count`）、記事が少ないうちは
+    `min_clusters` を下回る。`max_clusters` は上限として常に効く。
+    """
 
     model_config = ConfigDict(extra="forbid")
 

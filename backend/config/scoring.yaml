@@ -172,8 +172,13 @@ bad_similarity:
   max_penalty: 0.5
 
 clustering:
-  # 関心クラスタ数の下限・上限（PROJECT_SPEC.md §8 の例のように、通常 2〜数個の
-  # クラスタでユーザーの関心領域を表現する）
+  # 関心クラスタ数の目安の下限と上限（PROJECT_SPEC.md §8 の例のように、通常 2〜数個の
+  # クラスタでユーザーの関心領域を表現する）。
+  # min_clusters は強制ではない。クラスタ数は min_articles_per_cluster から賄える
+  # 数（interest/clusters.py の _cluster_count）を上限に決めるため、記事が
+  # min_clusters * min_articles_per_cluster 件に満たないうちは min_clusters を
+  # 下回る（記事が少ないうちは無理にクラスタを分けない）。max_clusters は上限として
+  # 常に効く
   min_clusters: 2
   max_clusters: 8
   # 1 クラスタを成立させるのに要する記事数。少数の記事だけで意味のあるクラスタと
