@@ -23,6 +23,9 @@ _RUNNING_STATUS_BY_JOB_TYPE: dict[JobType, JobStatus] = {
     # 集約する方針（このモジュールの冒頭）を崩さないため、fetching / analyzing の
     # どちらでもない残りの searching に対応させる。
     JobType.PURGE_OPERATION_LOGS: JobStatus.SEARCHING,
+    # recommendation_runs 削除も operation_logs 削除と同じ保守処理のため、
+    # 同じ扱い（searching）にする。
+    JobType.PURGE_RECOMMENDATION_RUNS: JobStatus.SEARCHING,
 }
 
 # claim_next で遷移しうる実行中 status の集合。reclaim_stale が
