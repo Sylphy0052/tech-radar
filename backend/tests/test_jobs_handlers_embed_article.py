@@ -17,6 +17,7 @@ from techradar.db.models import Article, ArticleRegistration
 from techradar.embedding import FakeEmbeddingProvider, embed_articles
 from techradar.embedding.errors import EmbeddingModelLoadError
 from techradar.fetcher.url import normalize_url
+from techradar.jobs.handlers import embed_article as embed_article_handler
 from techradar.jobs.handlers.embed_article import process_embed_article
 from techradar.jobs.handlers.errors import RegistrationErrorReason
 from techradar.jobs.registry import JobContext
@@ -297,3 +298,53 @@ class TestProcessEmbedArticleMissingRow:
         # Act / Assert — 例外を出さずに終了する
         process_embed_article(db_session, context, settings, provider)
         assert provider.embedded_documents == []
+
+
+class TestProcessEmbedArticleWithoutRegistration:
+    """`registration_id` を持たない（巡回由来の）payload を検証する（Issue #9 T15）。"""
+
+    def _make_context(self, article: Article) -> JobContext:
+        return JobContext(
+            job_id=uuid.uuid4(),
+            job_type=JobType.EMBED_ARTICLE,
+            payload={"article_id": str(article.id)},
+            attempts=0,
+        )
+
+    def test_generates_the_embedding_without_raising_a_key_error(
+        self, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        article = make_article(db_session)
+        context = self._make_context(article)
+        provider = FakeEmbeddingProvider()
+
+        # Act — registration_id が無くても KeyError にならない
+        process_embed_article(db_session, context, settings, provider)
+
+        # Assert
+        assert article.embedding is not None
+
+    def test_does_not_call_record_registration_failure_safely_on_error(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """失敗記録先の登録行が無いため、記録処理を呼ばず例外をそのまま送出する。"""
+        # Arrange
+        article = make_article(db_session)
+        context = self._make_context(article)
+        provider = _FailingEmbeddingProvider("boom")
+
+        was_called = False
+
+        def _fail_if_called(*_args: object, **_kwargs: object) -> None:
+            nonlocal was_called
+            was_called = True
+
+        monkeypatch.setattr(
+            embed_article_handler, "record_registration_failure_safely", _fail_if_called
+        )
+
+        # Act / Assert
+        with pytest.raises(EmbeddingModelLoadError):
+            process_embed_article(db_session, context, settings, provider)
+        assert was_called is False

@@ -15,6 +15,7 @@ from techradar.config import Settings
 from techradar.db.enums import JobStatus, JobType
 from techradar.db.models import Article, ArticleRegistration, Job
 from techradar.fetcher.url import normalize_url
+from techradar.jobs.handlers import analyze_article as analyze_article_handler
 from techradar.jobs.handlers.analyze_article import process_analyze_article
 from techradar.jobs.handlers.errors import RegistrationErrorReason
 from techradar.jobs.registry import JobContext
@@ -251,3 +252,71 @@ class TestProcessAnalyzeArticleMissingRow:
         # Act / Assert — 例外を出さずに終了する
         process_analyze_article(db_session, context, settings, provider, sleep=no_sleep)
         assert provider.calls == []
+
+
+class TestProcessAnalyzeArticleWithoutRegistration:
+    """`registration_id` を持たない（巡回由来の）payload を検証する（Issue #9 T15）。"""
+
+    def _make_context(self, article: Article) -> JobContext:
+        return JobContext(
+            job_id=uuid.uuid4(),
+            job_type=JobType.ANALYZE_ARTICLE,
+            payload={"article_id": str(article.id)},
+            attempts=0,
+        )
+
+    def test_analyzes_the_article_without_raising_a_key_error(
+        self, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        article = make_article(db_session)
+        context = self._make_context(article)
+        provider = FakeLLMProvider([VALID_ANALYSIS])
+
+        # Act — registration_id が無くても KeyError にならない
+        process_analyze_article(db_session, context, settings, provider, sleep=no_sleep)
+
+        # Assert
+        assert article.summary_ja is not None
+
+    def test_enqueues_an_embed_article_job_without_a_registration_id(
+        self, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        article = make_article(db_session)
+        context = self._make_context(article)
+        provider = FakeLLMProvider([VALID_ANALYSIS])
+
+        # Act
+        process_analyze_article(db_session, context, settings, provider, sleep=no_sleep)
+
+        # Assert
+        jobs = db_session.scalars(select(Job).where(Job.type == JobType.EMBED_ARTICLE.value)).all()
+        assert len(jobs) == 1
+        assert jobs[0].payload == {"article_id": str(article.id)}
+
+    def test_does_not_call_record_registration_failure_safely_on_error(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """失敗記録先の登録行が無いため、記録処理を呼ばず例外をそのまま送出する。"""
+        # Arrange
+        article = make_article(db_session)
+        context = self._make_context(article)
+        provider = FakeLLMProvider([LLMTimeoutError("boom")])
+
+        was_called = False
+
+        def _fail_if_called(*_args: object, **_kwargs: object) -> None:
+            nonlocal was_called
+            was_called = True
+
+        monkeypatch.setattr(
+            analyze_article_handler, "record_registration_failure_safely", _fail_if_called
+        )
+
+        # Act / Assert
+        with pytest.raises(LLMTimeoutError):
+            process_analyze_article(
+                db_session, context, Settings(_env_file=None), provider, sleep=no_sleep
+            )
+        assert was_called is False

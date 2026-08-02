@@ -43,3 +43,13 @@ class ExtractionError(FetchError):
     """本文を抽出できなかった。"""
 
     reason = "extraction_failed"
+
+
+class InvalidHeaderError(FetchError):
+    """呼び出し側が渡した追加ヘッダが不正だった。
+
+    ヘッダ名/値への改行混入（ヘッダインジェクション）や、`Host` ヘッダの
+    上書き試行を拒否する際に送出する。
+    """
+
+    reason = "invalid_header"

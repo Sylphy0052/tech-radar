@@ -16,7 +16,15 @@ from techradar.fetcher.extract import (
     compute_body_hash,
     extract_article,
 )
-from techradar.fetcher.http import FetchedPage, fetch_page
+from techradar.fetcher.http import (
+    FEED_CONTENT_TYPES,
+    HTML_CONTENT_TYPES,
+    JSON_CONTENT_TYPES,
+    FetchedPage,
+    FetchedResource,
+    fetch_page,
+    fetch_resource,
+)
 from techradar.fetcher.service import (
     IngestResult,
     find_existing_article,
@@ -26,10 +34,14 @@ from techradar.fetcher.ssrf import is_blocked_ip, validate_url
 from techradar.fetcher.url import normalize_url, resolve_canonical_url
 
 __all__ = [
+    "FEED_CONTENT_TYPES",
+    "HTML_CONTENT_TYPES",
+    "JSON_CONTENT_TYPES",
     "ExtractedArticle",
     "ExtractionError",
     "FetchError",
     "FetchedPage",
+    "FetchedResource",
     "IngestResult",
     "ResponseTooLargeError",
     "TooManyRedirectsError",
@@ -38,6 +50,7 @@ __all__ = [
     "compute_body_hash",
     "extract_article",
     "fetch_page",
+    "fetch_resource",
     "find_existing_article",
     "ingest_article",
     "is_blocked_ip",
