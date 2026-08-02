@@ -9,13 +9,12 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
 from sqlalchemy.orm import Session
 
 from techradar.config import Settings, get_settings
 from techradar.db.enums import JobStatus, JobType
-from techradar.db.models import Article, ArticleRegistration
+from techradar.db.models import Article
 from techradar.embedding import (
     EmbeddingProvider,
     QwenEmbeddingProvider,
@@ -23,7 +22,8 @@ from techradar.embedding import (
     needs_embedding,
 )
 from techradar.jobs.handlers._shared import (
-    load_registration,
+    load_registration_if_present,
+    optional_registration_id,
     record_registration_failure_safely,
     run_job_in_thread,
     start_registration_step,
@@ -39,10 +39,10 @@ def process_embed_article(
     provider: EmbeddingProvider,
 ) -> None:
     """`embed_article` ジョブ 1 件分の処理。"""
-    registration_id = _optional_registration_id(context.payload)
+    registration_id = optional_registration_id(context.payload)
     article_id = uuid.UUID(context.payload["article_id"])
 
-    registration = _load_registration_if_present(session, registration_id)
+    registration = load_registration_if_present(session, registration_id)
     if registration_id is not None and registration is None:
         return
 
@@ -77,23 +77,6 @@ def process_embed_article(
                 settings=settings,
             )
         raise
-
-
-def _optional_registration_id(payload: dict[str, Any]) -> uuid.UUID | None:
-    """payload から `registration_id` を取り出す。無ければ巡回由来として `None`。"""
-    raw = payload.get("registration_id")
-    if raw is None:
-        return None
-    return uuid.UUID(raw)
-
-
-def _load_registration_if_present(
-    session: Session, registration_id: uuid.UUID | None
-) -> ArticleRegistration | None:
-    """`registration_id` があれば登録行を取得する。無ければ `None`（巡回由来）。"""
-    if registration_id is None:
-        return None
-    return load_registration(session, registration_id)
 
 
 def make_embed_article_handler(

@@ -11,6 +11,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
@@ -51,6 +52,27 @@ def load_registration(session: Session, registration_id: uuid.UUID) -> ArticleRe
     if registration is None:
         logger.warning("job_handlers.registration_missing registration_id=%s", registration_id)
     return registration
+
+
+def optional_registration_id(payload: dict[str, Any]) -> uuid.UUID | None:
+    """payload から `registration_id` を取り出す。無ければ巡回由来として `None`。
+
+    URL 登録（`ArticleRegistration` を伴う）と巡回由来（伴わない）の2経路が
+    同じジョブ種別を共有するため、3 つのハンドラすべてがこの判定を必要とする。
+    """
+    raw = payload.get("registration_id")
+    if raw is None:
+        return None
+    return uuid.UUID(raw)
+
+
+def load_registration_if_present(
+    session: Session, registration_id: uuid.UUID | None
+) -> ArticleRegistration | None:
+    """`registration_id` があれば登録行を取得する。無ければ `None`（巡回由来）。"""
+    if registration_id is None:
+        return None
+    return load_registration(session, registration_id)
 
 
 def start_registration_step(

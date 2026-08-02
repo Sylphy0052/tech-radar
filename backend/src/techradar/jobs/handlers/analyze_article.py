@@ -10,7 +10,6 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Callable
-from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -18,9 +17,10 @@ from techradar.analysis import analyze_article as run_analysis
 from techradar.analysis import needs_analysis
 from techradar.config import Settings, get_settings
 from techradar.db.enums import JobType
-from techradar.db.models import Article, ArticleRegistration
+from techradar.db.models import Article
 from techradar.jobs.handlers._shared import (
-    load_registration,
+    load_registration_if_present,
+    optional_registration_id,
     record_registration_failure_safely,
     run_job_in_thread,
     start_registration_step,
@@ -40,10 +40,10 @@ def process_analyze_article(
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """`analyze_article` ジョブ 1 件分の処理。"""
-    registration_id = _optional_registration_id(context.payload)
+    registration_id = optional_registration_id(context.payload)
     article_id = uuid.UUID(context.payload["article_id"])
 
-    registration = _load_registration_if_present(session, registration_id)
+    registration = load_registration_if_present(session, registration_id)
     if registration_id is not None and registration is None:
         # 登録行が既に削除されている。リトライしても解決しないため打ち切る。
         return
@@ -79,23 +79,6 @@ def process_analyze_article(
                 settings=settings,
             )
         raise
-
-
-def _optional_registration_id(payload: dict[str, Any]) -> uuid.UUID | None:
-    """payload から `registration_id` を取り出す。無ければ巡回由来として `None`。"""
-    raw = payload.get("registration_id")
-    if raw is None:
-        return None
-    return uuid.UUID(raw)
-
-
-def _load_registration_if_present(
-    session: Session, registration_id: uuid.UUID | None
-) -> ArticleRegistration | None:
-    """`registration_id` があれば登録行を取得する。無ければ `None`（巡回由来）。"""
-    if registration_id is None:
-        return None
-    return load_registration(session, registration_id)
 
 
 def make_analyze_article_handler(

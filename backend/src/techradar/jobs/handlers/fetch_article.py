@@ -11,7 +11,6 @@ URL から記事を取得・保存する。payload に `registration_id` があ�
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +22,7 @@ from techradar.db.models import UserArticle
 from techradar.fetcher.service import ingest_article
 from techradar.jobs.handlers._shared import (
     load_registration,
+    optional_registration_id,
     record_registration_failure_safely,
     run_job_in_thread,
     start_registration_step,
@@ -38,7 +38,7 @@ MANUAL_REGISTRATION_INTEREST_WEIGHT = 1.0
 def process_fetch_article(session: Session, context: JobContext, settings: Settings) -> None:
     """`fetch_article` ジョブ 1 件分の処理。"""
     url = context.payload["url"]
-    registration_id = _optional_registration_id(context.payload)
+    registration_id = optional_registration_id(context.payload)
 
     if registration_id is None:
         # 巡回由来のジョブ。登録行が無いため、以降の登録更新・失敗記録はすべて
@@ -97,14 +97,6 @@ def _process_without_registration(session: Session, url: str, settings: Settings
     result = ingest_article(session, url, settings=settings)
     enqueue(session, JobType.ANALYZE_ARTICLE, {"article_id": str(result.article.id)})
     session.flush()
-
-
-def _optional_registration_id(payload: dict[str, Any]) -> uuid.UUID | None:
-    """payload から `registration_id` を取り出す。無ければ巡回由来として `None`。"""
-    raw = payload.get("registration_id")
-    if raw is None:
-        return None
-    return uuid.UUID(raw)
 
 
 def _link_user_article(session: Session, user_id: uuid.UUID, article_id: uuid.UUID) -> None:
