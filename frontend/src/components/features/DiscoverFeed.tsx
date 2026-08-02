@@ -75,8 +75,10 @@ export function DiscoverFeed() {
       {/* 空表示に切り替えるのは次ページが無いと分かってから。ページ内が全件 Bad
           だと items が空でも next_cursor は返る（バックエンドは cursor を除外前の
           rank から計算する）ため、items が空というだけで打ち切ると読み進める手段を
-          失う。 */}
-      {items.length === 0 && !hasMore && (
+          失う。エラー時も除外する。初回ロードが失敗すると next_cursor は未取得の
+          ままなので、レート制限などの一時的な失敗を「記事が無い」と誤って伝えて
+          しまう。 */}
+      {items.length === 0 && !hasMore && error === null && (
         <p className="text-sm text-zinc-500 dark:text-zinc-400">表示できる記事がありません。</p>
       )}
 
