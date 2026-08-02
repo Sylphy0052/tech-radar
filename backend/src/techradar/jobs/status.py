@@ -26,6 +26,9 @@ _RUNNING_STATUS_BY_JOB_TYPE: dict[JobType, JobStatus] = {
     # recommendation_runs 削除も operation_logs 削除と同じ保守処理のため、
     # 同じ扱い（searching）にする。
     JobType.PURGE_RECOMMENDATION_RUNS: JobStatus.SEARCHING,
+    # 関心クラスタ再構築は記事単体の取得でも解析でもない保守寄りの処理のため、
+    # 同じく searching に対応させる。
+    JobType.REBUILD_INTEREST_CLUSTERS: JobStatus.SEARCHING,
 }
 
 # claim_next で遷移しうる実行中 status の集合。reclaim_stale が

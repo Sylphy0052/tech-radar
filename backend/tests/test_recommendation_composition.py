@@ -18,6 +18,7 @@ from techradar.recommendation.composition import (
 )
 from techradar.recommendation.ranking import (
     AuthorityGate,
+    BadSimilaritySettings,
     CandidateSignature,
     FeedComposition,
     FreshnessSettings,
@@ -57,6 +58,7 @@ FEED_COMPOSITION = FeedComposition(
     exploration_min_novelty=0.6,
 )
 LIMITS = RankingLimits(max_candidates_per_run=500, default_page_size=20, max_page_size=100)
+BAD_SIMILARITY_SETTINGS = BadSimilaritySettings(min_similarity=0.7, max_penalty=0.5)
 
 SETTINGS = ScoringSettings(
     weights=WEIGHTS,
@@ -68,6 +70,7 @@ SETTINGS = ScoringSettings(
     novelty=NOVELTY_SETTINGS,
     feed_composition=FEED_COMPOSITION,
     limits=LIMITS,
+    bad_similarity=BAD_SIMILARITY_SETTINGS,
 )
 
 PAGE_SIZE = 20
@@ -97,6 +100,7 @@ def make_breakdown(
         bad_penalty=0.0,
         duplicate_penalty=0.0,
         read_penalty=0.0,
+        bad_similarity_penalty=0.0,
         total=total,
     )
 

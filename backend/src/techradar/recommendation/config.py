@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from techradar.recommendation.ranking import (
     AuthorityGate,
+    BadSimilaritySettings,
     FeedComposition,
     FreshnessSettings,
     InterestSettings,
@@ -50,6 +51,31 @@ MIN_CANDIDATES_PER_RUN = 1
 
 # 関心プロファイル構築対象の記事数の下限。0 以下だと関心を表現できない。
 MIN_PROFILE_ARTICLES = 1
+
+# Bad 近傍抑制で使う Bad 記事 embedding 数の下限。0 以下だと抑制を表現できない。
+MIN_BAD_PROFILE_ARTICLES = 1
+
+# トピック重み低下の判定に見る直近フィードバック件数の下限。0 以下だと判定できない。
+MIN_RECENT_WINDOW = 1
+
+# 直近フィードバック中の Bad 件数の下限。0 以下だと「Bad が一定数以上」を表せない。
+MIN_BAD_THRESHOLD = 1
+
+# 関心クラスタ数の下限。0 以下だとクラスタを構築できない。
+MIN_CLUSTER_COUNT = 1
+
+# 1 クラスタを成立させるのに要する記事数の下限。0 以下だと閾値として機能しない。
+MIN_ARTICLES_PER_CLUSTER = 1
+
+# クラスタラベルに使うトピック語数の下限。0 以下だとラベルを作れない。
+MIN_LABEL_TOPIC_COUNT = 1
+
+# KMeans の random_state の下限（scikit-learn の仕様上 0 以上の整数）。
+MIN_RANDOM_STATE = 0
+
+# 関心タイムライン（`GET /api/interests/timeline`）が返す週数の下限。
+# 0 以下だと集計期間を表せない。
+MIN_TIMELINE_WEEKS = 1
 
 
 class ScoringConfigError(Exception):
@@ -105,6 +131,13 @@ class InterestConfig(BaseModel):
     # ランキングの純粋関数（`ScoringSettings`）には関係しないため `InterestSettings`
     # へは変換しない。
     max_profile_articles: int = Field(ge=MIN_PROFILE_ARTICLES)
+    # Bad 近傍抑制（`ranking.compute_bad_similarity_penalty`）用に読み込む Bad
+    # 記事 embedding 数の上限（`recommendation/service.py` が使う）。
+    # `max_profile_articles` と同じ発想の安全弁で、ユーザーの Bad 履歴が
+    # 増え続けても実行のたびに全件を読み込んで計算コストが際限なく増えない
+    # ようにする。ランキングの純粋関数には関係しないため `InterestSettings`
+    # へは変換しない。
+    max_bad_profile_articles: int = Field(ge=MIN_BAD_PROFILE_ARTICLES)
 
 
 class SourceMatchConfig(BaseModel):
@@ -165,6 +198,117 @@ class LimitsConfig(BaseModel):
         return self
 
 
+class FeedbackWeightsConfig(BaseModel):
+    """フィードバック種別ごとの重み（`PROJECT_SPEC.md` §7.1, §7.2 の重み表）。
+
+    `bad` は負方向の強さの絶対値として用意した値だが、現状はどこからも消費
+    していない。`ArticleOrigin` に Bad 相当の値が無いため
+    `interest/weights.py` の `explicit_weight_for_origin` からは呼ばれず、
+    トピック単位の Bad 抑制は `topic_preference.decay_step` が単独で強さを
+    担っている（両方を掛け合わせると二重管理になるため、意図的に未消費に
+    している。詳細は `config/scoring.yaml` の `feedback_weights.bad` の
+    コメント参照、Issue #15 自己レビュー 3）。符号は使う側が持ち、ここには
+    負数を書かない。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    manual: float = Field(ge=0.0, le=1.0)
+    good: float = Field(ge=0.0, le=1.0)
+    save: float = Field(ge=0.0, le=1.0)
+    read_full: float = Field(ge=0.0, le=1.0)
+    clicked: float = Field(ge=0.0, le=1.0)
+    bad: float = Field(ge=0.0, le=1.0)
+
+
+class InterestDecayConfig(BaseModel):
+    """関心の時間減衰の設定（`PROJECT_SPEC.md` §8 の `recency_decay`）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    half_life_days: float = Field(gt=0.0)
+
+
+class TopicPreferenceConfig(BaseModel):
+    """トピック単位の選好更新の設定（`PROJECT_SPEC.md` §7.2）。
+
+    「一件のBadだけでジャンル全体を抑制しない」ため、直近 `recent_window` 件中
+    `bad_threshold` 件以上が Bad のときだけ段階的にトピック重みを下げる。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    recent_window: int = Field(ge=MIN_RECENT_WINDOW)
+    bad_threshold: int = Field(ge=MIN_BAD_THRESHOLD)
+    decay_step: float = Field(gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _validate_bad_threshold_within_window(self) -> TopicPreferenceConfig:
+        if self.bad_threshold > self.recent_window:
+            message = (
+                "bad_threshold は recent_window 以下である必要があります: "
+                f"bad_threshold={self.bad_threshold}, recent_window={self.recent_window}"
+            )
+            raise ValueError(message)
+        return self
+
+
+class BadSimilarityConfig(BaseModel):
+    """Bad 記事と意味的に近い記事を抑制する設定（`PROJECT_SPEC.md` §7.2）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    min_similarity: float = Field(ge=0.0, le=1.0)
+    max_penalty: float = Field(ge=0.0, le=1.0)
+
+
+class ClusteringConfig(BaseModel):
+    """関心クラスタ構築（KMeans）の設定（`PROJECT_SPEC.md` §8）。
+
+    `min_clusters` は目安であって強制されない。クラスタ数は
+    `min_articles_per_cluster` から賄える数を上限に決まるため
+    （`interest/clusters.py` の `_cluster_count`）、記事が少ないうちは
+    `min_clusters` を下回る。`max_clusters` は上限として常に効く。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    min_clusters: int = Field(ge=MIN_CLUSTER_COUNT)
+    max_clusters: int = Field(ge=MIN_CLUSTER_COUNT)
+    min_articles_per_cluster: int = Field(ge=MIN_ARTICLES_PER_CLUSTER)
+    label_topic_count: int = Field(ge=MIN_LABEL_TOPIC_COUNT)
+    random_state: int = Field(ge=MIN_RANDOM_STATE)
+
+    @model_validator(mode="after")
+    def _validate_min_within_max_clusters(self) -> ClusteringConfig:
+        if self.min_clusters > self.max_clusters:
+            message = (
+                "min_clusters は max_clusters 以下である必要があります: "
+                f"min_clusters={self.min_clusters}, max_clusters={self.max_clusters}"
+            )
+            raise ValueError(message)
+        return self
+
+
+class InterestTimelineConfig(BaseModel):
+    """関心タイムライン（`GET /api/interests/timeline`）の週数の既定値・上限値。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    default_weeks: int = Field(ge=MIN_TIMELINE_WEEKS)
+    max_weeks: int = Field(ge=MIN_TIMELINE_WEEKS)
+
+    @model_validator(mode="after")
+    def _validate_default_within_max(self) -> InterestTimelineConfig:
+        if self.default_weeks > self.max_weeks:
+            message = (
+                "default_weeks は max_weeks 以下である必要があります: "
+                f"default_weeks={self.default_weeks}, max_weeks={self.max_weeks}"
+            )
+            raise ValueError(message)
+        return self
+
+
 class ScoringConfig(BaseModel):
     """`config/scoring.yaml` 全体。"""
 
@@ -179,6 +323,12 @@ class ScoringConfig(BaseModel):
     novelty: NoveltyConfig
     feed_composition: FeedCompositionConfig
     limits: LimitsConfig
+    feedback_weights: FeedbackWeightsConfig
+    interest_decay: InterestDecayConfig
+    topic_preference: TopicPreferenceConfig
+    bad_similarity: BadSimilarityConfig
+    clustering: ClusteringConfig
+    interest_timeline: InterestTimelineConfig
 
     @model_validator(mode="after")
     def _validate_weights_sum_to_one(self) -> ScoringConfig:
@@ -240,6 +390,10 @@ class ScoringConfig(BaseModel):
                 max_candidates_per_run=self.limits.max_candidates_per_run,
                 default_page_size=self.limits.default_page_size,
                 max_page_size=self.limits.max_page_size,
+            ),
+            bad_similarity=BadSimilaritySettings(
+                min_similarity=self.bad_similarity.min_similarity,
+                max_penalty=self.bad_similarity.max_penalty,
             ),
         )
 

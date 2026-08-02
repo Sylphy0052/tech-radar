@@ -75,7 +75,9 @@ def create_default_registry(settings: Settings | None = None) -> JobHandlerRegis
     実装がない後続タスクの担当のため、あえて登録しない。`purge_operation_logs`
     は巡回の完了時に積まれる保守ジョブ（Issue #19）として登録する。
     `purge_recommendation_runs` も同様に巡回の完了時に積まれる保守ジョブ
-    （Issue #28）として登録する。未登録種別のジョブが
+    （Issue #28）として登録する。`rebuild_interest_clusters` は記事フィードバック
+    （`api/feedback.py`）のたびに積まれる関心クラスタ再構築ジョブ（Issue #15）
+    として登録する。未登録種別のジョブが
     enqueue された場合、ワーカー側で検出してリトライせず即 failed に
     できるようにするため（登録漏れを握りつぶさない）。
 
@@ -92,6 +94,7 @@ def create_default_registry(settings: Settings | None = None) -> JobHandlerRegis
         make_fetch_article_handler,
         make_purge_operation_logs_handler,
         make_purge_recommendation_runs_handler,
+        make_rebuild_interest_clusters_handler,
     )
 
     registry = JobHandlerRegistry()
@@ -105,5 +108,9 @@ def create_default_registry(settings: Settings | None = None) -> JobHandlerRegis
     registry.register(
         JobType.PURGE_RECOMMENDATION_RUNS,
         make_purge_recommendation_runs_handler(resolved_settings),
+    )
+    registry.register(
+        JobType.REBUILD_INTEREST_CLUSTERS,
+        make_rebuild_interest_clusters_handler(resolved_settings),
     )
     return registry

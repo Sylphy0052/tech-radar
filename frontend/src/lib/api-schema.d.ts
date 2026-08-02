@@ -69,6 +69,10 @@ export interface paths {
         /**
          * Create Article Feedback
          * @description 記事へ Good / Bad / 保存を記録する（`PROJECT_SPEC.md` §7）。
+         *
+         *     合わせてトピック単位の選好（`user_topic_preferences`）を同期更新し
+         *     （`update_topic_preferences`）、関心クラスタの再構築ジョブを積む
+         *     （`_enqueue_interest_cluster_rebuild`、Issue #15）。
          */
         post: operations["create_article_feedback_api_articles__article_id__feedback_post"];
         /**
@@ -76,7 +80,21 @@ export interface paths {
          * @description 記事へのフィードバックを取り消す。
          *
          *     Good / 保存に由来する `user_articles` 行も合わせて削除する
-         *     （手動登録由来の行は残す）。
+         *     （手動登録由来の行は残す）。関心記事の構成が変わりうるため、関心クラスタの
+         *     再構築ジョブも積む。
+         *
+         *     トピック単位の選好（`user_topic_preferences`）は、取り消し後の直近
+         *     フィードバック集合から `negative_weight` を再計算する
+         *     （`recompute_topic_preferences_after_removal`、Issue #15 自己レビュー 1）。
+         *     `update_topic_preferences`（POST 側）が使う増加方向のみの更新関数は
+         *     取り消しには使わない（「上がった分を差し引く」処理を持たないため）。
+         *
+         *     呼び出し順序が重要: `session.delete(feedback)` の後に
+         *     `session.flush()` で DELETE を確定させてから
+         *     `recompute_topic_preferences_after_removal` を呼ぶ。先に確定させないと、
+         *     再計算が読む「直近フィードバック」に削除対象自身が残ったままになり、
+         *     取り消したはずのフィードバックが再計算結果に混入してしまう
+         *     （`recompute_topic_preferences_after_removal` の docstring 参照）。
          */
         delete: operations["delete_article_feedback_api_articles__article_id__feedback_delete"];
         options?: never;
@@ -208,6 +226,85 @@ export interface paths {
          * @description アプリケーションの稼働状態を返す。
          */
         get: operations["health_api_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/interests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Interest Topics
+         * @description トピック単位の関心一覧を返す（`PROJECT_SPEC.md` §7.1, §7.2）。
+         *
+         *     `effective_weight` 降順（同値は `topic` 昇順）で返す。並び順を安定させる
+         *     ためにタイブレークを必ず付ける（`recommendation/service.py` の他の並び順と
+         *     同じ方針）。件数はトピックの語彙数に比例し高々数百件程度に収まる見込み
+         *     のため、`cursor` ではなく単純な `offset`/`limit` にする（`api/articles.py`
+         *     の関心記事一覧のような無限スクロール想定の cursor ページングは過剰）。
+         */
+        get: operations["list_interest_topics_api_interests_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/interests/clusters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Interest Clusters
+         * @description 関心クラスタ一覧を返す（`PROJECT_SPEC.md` §8）。
+         *
+         *     `weight` 降順（同値は `label` 昇順）で返す。クラスタ数は
+         *     `config/scoring.yaml` の `clustering.max_clusters` で上限が付いており
+         *     （既定 8）小規模なため、ページングは設けない。
+         */
+        get: operations["list_interest_clusters_api_interests_clusters_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/interests/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Interest Timeline
+         * @description 関心の推移を週単位のバケットへ集計して返す。
+         *
+         *     履歴テーブルは新設せず、`user_articles.created_at` と
+         *     `article_feedback.created_at` を集計元にする。`weeks` は `now` から
+         *     `weeks * 7日` 遡った時刻以降を対象にする目安であり、境界週は部分週に
+         *     なりうる（ちょうど週の途中から `since` が始まるため）。
+         *
+         *     データが1件も無い週はバケットを作らない（0 件のバケットを並べても
+         *     情報量が無いため）。トピック別集計とは独立に、関心記事の追加件数
+         *     （`user_articles`）も同じ週バケットへ載せて返す。
+         */
+        get: operations["get_interest_timeline_api_interests_timeline_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -493,6 +590,96 @@ export interface components {
             items: components["schemas"]["InterestArticleItem"][];
             /** Next Cursor */
             next_cursor: string | null;
+        };
+        /**
+         * InterestClusterItem
+         * @description 関心クラスタ 1 件のレスポンス。
+         *
+         *     `centroid_embedding` は 1024 次元でレスポンスが肥大化するため返さない
+         *     （閲覧用途では不要な内部表現のため）。
+         */
+        InterestClusterItem: {
+            /** Label */
+            label: string;
+            /** Topics */
+            topics: string[];
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Weight */
+            weight: number;
+        };
+        /**
+         * InterestClusterListResponse
+         * @description `GET /api/interests/clusters` のレスポンス。
+         */
+        InterestClusterListResponse: {
+            /** Items */
+            items: components["schemas"]["InterestClusterItem"][];
+        };
+        /**
+         * InterestTimelineBucket
+         * @description タイムラインの 1 週バケット。
+         */
+        InterestTimelineBucket: {
+            /** Interest Article Count */
+            interest_article_count: number;
+            /** Topics */
+            topics: components["schemas"]["InterestTimelineTopicStats"][];
+            /**
+             * Week Start
+             * Format: date-time
+             */
+            week_start: string;
+        };
+        /**
+         * InterestTimelineResponse
+         * @description `GET /api/interests/timeline` のレスポンス。
+         */
+        InterestTimelineResponse: {
+            /** Buckets */
+            buckets: components["schemas"]["InterestTimelineBucket"][];
+        };
+        /**
+         * InterestTimelineTopicStats
+         * @description タイムラインの 1 週バケット内、1 トピックぶんの集計。
+         */
+        InterestTimelineTopicStats: {
+            /** Negative Count */
+            negative_count: number;
+            /** Positive Count */
+            positive_count: number;
+            /** Topic */
+            topic: string;
+        };
+        /**
+         * InterestTopicItem
+         * @description トピック単位の関心 1 件（`user_topic_preferences` 1 行）のレスポンス。
+         */
+        InterestTopicItem: {
+            /** Effective Weight */
+            effective_weight: number;
+            /** Negative Weight */
+            negative_weight: number;
+            /** Positive Weight */
+            positive_weight: number;
+            /** Topic */
+            topic: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * InterestTopicListResponse
+         * @description `GET /api/interests` のレスポンス。
+         */
+        InterestTopicListResponse: {
+            /** Items */
+            items: components["schemas"]["InterestTopicItem"][];
         };
         /**
          * JobResponse
@@ -1042,6 +1229,92 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    list_interest_topics_api_interests_get: {
+        parameters: {
+            query?: {
+                /** @description 取得件数 */
+                limit?: number;
+                /** @description スキップする件数 */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InterestTopicListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_interest_clusters_api_interests_clusters_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InterestClusterListResponse"];
+                };
+            };
+        };
+    };
+    get_interest_timeline_api_interests_timeline_get: {
+        parameters: {
+            query?: {
+                /** @description 遡って集計する週数 */
+                weeks?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InterestTimelineResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
