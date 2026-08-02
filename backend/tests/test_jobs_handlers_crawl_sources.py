@@ -211,20 +211,33 @@ class TestPurgeJobIsEnqueuedAfterCrawling:
     処理にする。
     """
 
-    def test_enqueues_a_purge_operation_logs_job(
+    def test_enqueues_a_purge_operation_logs_job_alongside_the_collected_candidates(
         self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """候補が集まった通常の巡回でも、削除ジョブは 1 件だけ積まれる。"""
         # Arrange
-        _patch_collect_candidates_with_collectors(monkeypatch, [])
+        candidate = CandidateArticle(
+            url="https://example.com/articles/found",
+            title="タイトル",
+            published_at=datetime.now(UTC),
+            collector_name="fake",
+        )
+        _patch_collect_candidates_with_collectors(
+            monkeypatch, [_FakeCollector("fake", [candidate])]
+        )
 
         # Act
         process_crawl_sources(db_session, make_context(), settings)
 
         # Assert
-        jobs = db_session.scalars(
+        fetch_jobs = db_session.scalars(
+            select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)
+        ).all()
+        purge_jobs = db_session.scalars(
             select(Job).where(Job.type == JobType.PURGE_OPERATION_LOGS.value)
         ).all()
-        assert len(jobs) == 1
+        assert len(fetch_jobs) == 1
+        assert len(purge_jobs) == 1
 
     def test_enqueues_the_purge_job_even_when_no_candidate_is_collected(
         self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch

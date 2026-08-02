@@ -35,11 +35,13 @@ def purge_expired_operation_logs(
     """
     cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
     stmt = delete(OperationLog).where(OperationLog.created_at < cutoff)
+    # DELETE は ORM の Unit of Work を経由しないため、未送信の変更があると
+    # それを取りこぼす。先に flush して DB 側の状態を揃えてから削除する。
+    session.flush()
     # Session.execute() の戻り値型は Result[Any] で rowcount を持たない。
     # Connection.execute() は常に CursorResult を返すため、セッションの現在の
     # トランザクションに紐づく接続を明示的に使う（`reclaim_stale` と同じ）。
     result = session.connection().execute(stmt)
-    session.flush()
     # 削除で消えた行を ORM が古いまま参照し続けないよう、Identity Map を捨てる。
     session.expire_all()
     return result.rowcount
