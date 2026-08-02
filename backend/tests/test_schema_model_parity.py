@@ -8,12 +8,20 @@ parity 宣言へ反映し忘れる」を機械的に検出するため、モデ�
 
 検証ロジックは `tests/schema_parity.py` の `verify_*` / `assert_*` ヘルパーへ切り出し、
 ヘルパー自体の RED/GREEN は `tests/test_schema_parity_helpers.py` で独立に検証する。
+
+**このテスト機構が保証する範囲（限界）**: 詳細は `tests/schema_parity.py` の
+モジュール docstring / `ModelParitySpec` の docstring を参照。要点のみ書くと、
+green は「列・フィールドの分類漏れが無い」という構造的完全性の保証であって、
+その分類がセキュリティ上妥当かの保証ではない（機微な列を `exposed` へ追加・
+移動する差分は security-auditor レビュー必須）。また値の詰め替えロジックの
+正しさは検証しない（それは `test_api_*.py` の責務）。
 """
 
 from __future__ import annotations
 
 import pytest
 from pydantic import BaseModel
+from sqlalchemy.orm import DeclarativeBase
 
 from techradar import api as api_package
 from techradar import main as main_module
@@ -56,7 +64,9 @@ from tests.schema_parity import (
     assert_parity,
     assert_schema_coverage,
     basemodel_subclasses_in_package,
+    schemas_reachable_from_app,
     verify_all_api_schemas_classified,
+    verify_all_classified,
     verify_all_models_classified,
 )
 
@@ -309,7 +319,11 @@ MODEL_SPECS: tuple[ModelParitySpec, ...] = (
 )
 
 # API 公開スキーマを一切持たない内部専用モデル。
-INTERNAL_ONLY_MODELS: tuple[type, ...] = (OperationLog, UserInterestCluster, UserTopicPreference)
+INTERNAL_ONLY_MODELS: tuple[type[DeclarativeBase], ...] = (
+    OperationLog,
+    UserInterestCluster,
+    UserTopicPreference,
+)
 
 # モデル列由来ではない、スキーマ側の派生フィールド。
 DERIVED_FIELDS: tuple[DerivedField, ...] = (
@@ -443,3 +457,54 @@ def test_every_api_schema_is_classified() -> None:
     all_schemas = basemodel_subclasses_in_package(api_package, extra_modules=(main_module,))
     errors = verify_all_api_schemas_classified(all_schemas, TARGET_SCHEMAS, EXCLUDED_API_SCHEMAS)
     assert not errors, "\n".join(errors)
+
+
+def test_every_route_schema_is_classified() -> None:
+    """`techradar.main.app` の全ルート（response_model・リクエストボディ・
+    responses=）から実際に参照されている BaseModel が TARGET_SCHEMAS か
+    EXCLUDED_API_SCHEMAS のどちらかに属することを検証する。
+
+    `test_every_api_schema_is_classified` のパッケージ走査はモジュール配置に
+    依存するため、新しいエンドポイントのスキーマを techradar.api /
+    techradar.main 以外のモジュール（別パッケージの router、共通 DTO
+    モジュール等）へ置くと素通りしうる。FastAPI の実際のルーティング情報から
+    直接辿るこのテストは、モジュール配置に依存しない網羅性を提供する。
+    """
+    route_schemas = schemas_reachable_from_app(main_module.app)
+    errors = verify_all_classified(
+        route_schemas,
+        declared=TARGET_SCHEMAS,
+        excluded=EXCLUDED_API_SCHEMAS,
+        label="ルーティングスキーマ",
+    )
+    assert not errors, "\n".join(errors)
+
+
+# ルート走査が壊れたときに空集合を返して黙って無効化されないよう、
+# 必ず拾えていなければならない代表スキーマ。サブルーター配下
+# （`/api/sources`、`/api/feed`）・エラー応答（`responses=` の 429）・
+# リクエストボディの3経路をそれぞれ1つずつ含める。
+ROUTE_SCAN_SENTINEL_SCHEMAS: tuple[type[BaseModel], ...] = (
+    SourceResponse,
+    FeedResponse,
+    RateLimitedResponse,
+    ArticleRegistrationCreate,
+)
+
+
+def test_route_scan_reaches_known_schemas() -> None:
+    """ルート走査そのものが機能していることを、代表スキーマの検出で確認する。
+
+    `test_every_route_schema_is_classified` は「見つかったスキーマが全て分類済みか」
+    しか見ないため、FastAPI 側の非互換で `_iter_api_routes` が何も拾えなくなっても
+    空集合が全て分類済み扱いとなり素通りしてしまう。走査の退化をここで検出する。
+    """
+    route_schemas = schemas_reachable_from_app(main_module.app)
+    missing = [
+        schema.__name__ for schema in ROUTE_SCAN_SENTINEL_SCHEMAS if schema not in route_schemas
+    ]
+    assert not missing, (
+        f"ルート走査が代表スキーマを拾えていません: {sorted(missing)}。"
+        "FastAPI のルーティング構造が変わった可能性があるため "
+        "`schema_parity._iter_api_routes` を見直すこと"
+    )
