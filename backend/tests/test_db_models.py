@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import Engine, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import ClauseElement
 
 from techradar.db import (
     EMBEDDING_DIMENSIONS,
@@ -882,15 +883,21 @@ def find_indexdef(engine: Engine, indexname: str) -> str | None:
         ).scalar_one_or_none()
 
 
-def explain(session: Session, statement) -> str:
+def explain(session: Session, statement: ClauseElement) -> str:
     """SELECT/DELETE 文の実行計画を文字列で返す。
 
     テスト DB は行数が少なくプランナが Seq Scan を選ぶため、`enable_seqscan`
     を切ってインデックスが使える形になっているかどうかだけを見る。
+    推定コストはプランの読み取りに要らないため `COSTS OFF` で落とす
+    （`test_embedding_service.py` の HNSW インデックス検証と同じ形）。
     """
     session.execute(text("SET LOCAL enable_seqscan = off"))
     compiled = statement.compile(dialect=session.get_bind().dialect)
-    rows = session.connection().exec_driver_sql(f"EXPLAIN {compiled}", compiled.params).fetchall()
+    rows = (
+        session.connection()
+        .exec_driver_sql(f"EXPLAIN (COSTS OFF) {compiled}", compiled.params)
+        .fetchall()
+    )
     return "\n".join(row[0] for row in rows)
 
 
