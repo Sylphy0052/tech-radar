@@ -3,6 +3,36 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+
+  /*
+   * 関心分析画面（Issue #16）のグラフ配色。dataviz skill の色決定手順
+   * （固定順の categorical hue、CVD/コントラストの検証済み配色、ライト/ダークで
+   * 個別にステップした値）に従う。recharts の fill/stroke へ var(--chart-*) を
+   * そのまま渡すことで、明暗切替のロジックをコンポーネント側に持たせずに済む
+   * （`--background` / `--foreground` と同じ方針）。
+   *
+   * --chart-series-1〜8: 識別（identity）用の固定順カテゴリカルパレット。
+   * --chart-status-*: Good/Bad のような状態を表す固定色（ライト/ダーク共通）。
+   * --chart-ordinal-*: 難易度（初級→上級）のような順序付きカテゴリ用の単色ランプ。
+   * --chart-muted: 未分類（null）を表す無彩色。
+   * --chart-grid / --chart-axis: グラフの罫線・軸線（控えめな色）。
+   */
+  --chart-series-1: #2a78d6;
+  --chart-series-2: #eb6834;
+  --chart-series-3: #1baf7a;
+  --chart-series-4: #eda100;
+  --chart-series-5: #e87ba4;
+  --chart-series-6: #008300;
+  --chart-series-7: #4a3aa7;
+  --chart-series-8: #e34948;
+  --chart-status-good: #0ca30c;
+  --chart-status-critical: #d03b3b;
+  --chart-ordinal-1: #86b6ef;
+  --chart-ordinal-2: #3987e5;
+  --chart-ordinal-3: #184f95;
+  --chart-muted: #898781;
+  --chart-grid: #e1e0d9;
+  --chart-axis: #c3c2b7;
 }
 
 @theme inline {
@@ -16,6 +46,18 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+
+    /* ライト用と同じ8色相をダーク面向けに個別ステップした値（検証済み）。 */
+    --chart-series-1: #3987e5;
+    --chart-series-2: #d95926;
+    --chart-series-3: #199e70;
+    --chart-series-4: #c98500;
+    --chart-series-5: #d55181;
+    --chart-series-6: #008300;
+    --chart-series-7: #9085e9;
+    --chart-series-8: #e66767;
+    --chart-grid: #2c2c2a;
+    --chart-axis: #383835;
   }
 }
 

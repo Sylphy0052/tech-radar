@@ -284,6 +284,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/interests/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Interest Summary
+         * @description 関心分析画面向けのサマリーを返す（`PROJECT_SPEC.md` §7, §8, Issue #16）。
+         *
+         *     集計元は `article_feedback JOIN articles`（`user_articles` は使わない）。
+         *     Good/Bad 比率は action 別の件数をそのまま返すが、内容分布系（技術・一次
+         *     情報比率・content_type・難易度）は `af.action IN ('good', 'save')` に
+         *     絞って集計する（Bad を付けた記事の属性まで「関心」として数えると実態と
+         *     ずれるため）。ジャンル別関心度だけは例外で、good/save の positive_count に
+         *     加えて bad の negative_count も返す（`InterestGenreItem` docstring 参照）。
+         *
+         *     抑制中のトピックは `user_topic_preferences.negative_weight > 0` の行を返す。
+         *     抑制ロジック（`interest/topics.py`）が domain ではなく topic 粒度で動くため、
+         *     ここも topic 粒度で返す（`GET /api/interests` と同じ ORM クエリ）。
+         *
+         *     集計は SQL 側で完結させ、Python へ全件ロードしない（`/timeline` と同じ方針）。
+         *     データが 1 件も無いときは各リストが空配列、`feedback_ratio` /
+         *     `primary_source_ratio` は全項目 0 になる（GROUP BY 無しの集約クエリは
+         *     行が無くても必ず 1 行返るため、例外にはならない）。
+         */
+        get: operations["get_interest_summary_api_interests_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/interests/timeline": {
         parameters: {
             query?: never;
@@ -620,6 +656,93 @@ export interface components {
             items: components["schemas"]["InterestClusterItem"][];
         };
         /**
+         * InterestContentTypeItem
+         * @description 記事の性質（`articles.content_type`）別の件数 1 件。
+         */
+        InterestContentTypeItem: {
+            /** Content Type */
+            content_type: string | null;
+            /** Count */
+            count: number;
+        };
+        /**
+         * InterestDifficultyItem
+         * @description 難易度（`articles.difficulty`）別の件数 1 件。
+         */
+        InterestDifficultyItem: {
+            /** Count */
+            count: number;
+            /** Difficulty */
+            difficulty: string | null;
+        };
+        /**
+         * InterestFeedbackRatio
+         * @description action 別のフィードバック件数（`GET /api/interests/summary` 用）。
+         */
+        InterestFeedbackRatio: {
+            /** Bad Count */
+            bad_count: number;
+            /** Good Count */
+            good_count: number;
+            /** Save Count */
+            save_count: number;
+        };
+        /**
+         * InterestGenreItem
+         * @description ジャンル（`articles.domain`）単位の関心度 1 件。
+         *
+         *     他の内容分布系（technologies / content_types / difficulties）と異なり
+         *     good/save に絞らず、`negative_count`（Bad の件数）も併せて返す。「抑制中の
+         *     ジャンル」（`suppressed_topics`、topic 粒度）とは別軸で、domain 粒度でも
+         *     Good/Bad の傾向を見たいという要求に応えるため（Issue #16）。
+         */
+        InterestGenreItem: {
+            /** Domain */
+            domain: string | null;
+            /** Negative Count */
+            negative_count: number;
+            /** Positive Count */
+            positive_count: number;
+        };
+        /**
+         * InterestPrimarySourceRatio
+         * @description 一次情報比率（`articles.is_primary_source`）。
+         */
+        InterestPrimarySourceRatio: {
+            /** Primary Count */
+            primary_count: number;
+            /** Secondary Count */
+            secondary_count: number;
+        };
+        /**
+         * InterestSummaryResponse
+         * @description `GET /api/interests/summary` のレスポンス（関心分析画面向け、Issue #16）。
+         */
+        InterestSummaryResponse: {
+            /** Content Types */
+            content_types: components["schemas"]["InterestContentTypeItem"][];
+            /** Difficulties */
+            difficulties: components["schemas"]["InterestDifficultyItem"][];
+            feedback_ratio: components["schemas"]["InterestFeedbackRatio"];
+            /** Genres */
+            genres: components["schemas"]["InterestGenreItem"][];
+            primary_source_ratio: components["schemas"]["InterestPrimarySourceRatio"];
+            /** Suppressed Topics */
+            suppressed_topics: components["schemas"]["SuppressedTopicItem"][];
+            /** Technologies */
+            technologies: components["schemas"]["InterestTechnologyItem"][];
+        };
+        /**
+         * InterestTechnologyItem
+         * @description 技術タグ（`articles.technologies`）単位の関心記事件数 1 件。
+         */
+        InterestTechnologyItem: {
+            /** Count */
+            count: number;
+            /** Technology */
+            technology: string;
+        };
+        /**
          * InterestTimelineBucket
          * @description タイムラインの 1 週バケット。
          */
@@ -847,6 +970,21 @@ export interface components {
             source_type?: components["schemas"]["SourceType"] | null;
             /** Verified */
             verified?: boolean | null;
+        };
+        /**
+         * SuppressedTopicItem
+         * @description 抑制中のトピック 1 件（`user_topic_preferences.negative_weight > 0`）。
+         *
+         *     抑制ロジック（`interest/topics.py` の `compute_negative_weight`）は
+         *     domain ではなく topic 粒度で動くため、ここも topic 粒度で返す。
+         */
+        SuppressedTopicItem: {
+            /** Effective Weight */
+            effective_weight: number;
+            /** Negative Weight */
+            negative_weight: number;
+            /** Topic */
+            topic: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -1283,6 +1421,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["InterestClusterListResponse"];
+                };
+            };
+        };
+    };
+    get_interest_summary_api_interests_summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InterestSummaryResponse"];
                 };
             };
         };
