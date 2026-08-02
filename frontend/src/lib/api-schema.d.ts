@@ -260,17 +260,21 @@ export interface components {
         /**
          * ArticleFeedbackResponse
          * @description フィードバックの公開表現。
+         *
+         *     `action` / `reason` は enum 型にする。`str` のままだと OpenAPI に enum が出ず、
+         *     生成される `frontend/src/lib/api-schema.d.ts` でも単なる `string` になり、
+         *     フロント側の文字列リテラル比較が型で守られない（Issue #13 自己レビュー B）。
+         *     DB の `action` / `reason` 列は text 型だが、`from_attributes=True` により
+         *     pydantic がその文字列値から enum メンバーへ変換する。
          */
         ArticleFeedbackResponse: {
-            /** Action */
-            action: string;
+            action: components["schemas"]["FeedbackAction"];
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
-            /** Reason */
-            reason: string | null;
+            reason: components["schemas"]["BadReason"] | null;
         };
         /**
          * ArticleRecommendationsResponse

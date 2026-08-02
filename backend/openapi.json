@@ -26,11 +26,10 @@
         "type": "object"
       },
       "ArticleFeedbackResponse": {
-        "description": "フィードバックの公開表現。",
+        "description": "フィードバックの公開表現。\n\n`action` / `reason` は enum 型にする。`str` のままだと OpenAPI に enum が出ず、\n生成される `frontend/src/lib/api-schema.d.ts` でも単なる `string` になり、\nフロント側の文字列リテラル比較が型で守られない（Issue #13 自己レビュー B）。\nDB の `action` / `reason` 列は text 型だが、`from_attributes=True` により\npydantic がその文字列値から enum メンバーへ変換する。",
         "properties": {
           "action": {
-            "title": "Action",
-            "type": "string"
+            "$ref": "#/components/schemas/FeedbackAction"
           },
           "created_at": {
             "format": "date-time",
@@ -40,13 +39,12 @@
           "reason": {
             "anyOf": [
               {
-                "type": "string"
+                "$ref": "#/components/schemas/BadReason"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Reason"
+            ]
           }
         },
         "required": [

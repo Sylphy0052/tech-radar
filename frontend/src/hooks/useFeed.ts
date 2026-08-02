@@ -60,6 +60,21 @@ export function useFeed(): UseFeedResult {
     itemsRef.current = items;
   }, [items]);
 
+  // loadMore の参照を安定させるための最新値。state と二重管理になるが、
+  // setState と同じタイミングで同期的に更新することで、
+  // 「setState 直後の再呼び出しでは古い値が見える」問題（itemsRef が
+  // useEffect 経由でしか更新されないことによるもの）を避ける。
+  const nextCursorRef = useRef<string | null>(null);
+  const isLoadingMoreRef = useRef(false);
+
+  // 送信中（pending）の article_id 集合。同じボタンを再レンダリングを挟まず
+  // 連打すると、itemsRef がまだ更新されていない古い feedback を読んでしまい、
+  // 既に取り消し済みの feedback へ再度 DELETE を送ってロールバックで復活させて
+  // しまう（サーバー側 404 → catch）。itemsRef の更新タイミングを直すよりも
+  // 「送信中は同じ記事への操作を無視する」方が意図が明確で、他の更新経路が
+  // 増えても壊れにくいためこちらを選ぶ。
+  const pendingArticleIdsRef = useRef<Set<string>>(new Set());
+
   // アンマウント後に非同期結果で setState してしまわないためのガード。
   const isMountedRef = useRef(true);
   useEffect(
@@ -81,6 +96,7 @@ export function useFeed(): UseFeedResult {
         }
         setItems(response.items);
         setNextCursor(response.next_cursor);
+        nextCursorRef.current = response.next_cursor;
         setError(null);
       })
       .catch((err: unknown) => {
@@ -101,18 +117,26 @@ export function useFeed(): UseFeedResult {
     };
   }, []);
 
+  // 依存配列を空にして参照を安定させる（nextCursor / isLoadingMore の値は
+  // ref から読む）。これらの state を依存に含めると、フェッチの開始・終了の
+  // たびに loadMore の参照が変わり、これを依存配列に持つ呼び出し側の
+  // useEffect（IntersectionObserver のセットアップ）がページを読むたびに
+  // observer を disconnect して作り直してしまう。
   const loadMore = useCallback(() => {
-    if (nextCursor === null || isLoadingMore) {
+    if (nextCursorRef.current === null || isLoadingMoreRef.current) {
       return;
     }
+    const cursor = nextCursorRef.current;
+    isLoadingMoreRef.current = true;
     setIsLoadingMore(true);
-    getFeed({ cursor: nextCursor })
+    getFeed({ cursor })
       .then((response) => {
         if (!isMountedRef.current) {
           return;
         }
         setItems((current) => mergeItems(current, response.items));
         setNextCursor(response.next_cursor);
+        nextCursorRef.current = response.next_cursor;
         setError(null);
       })
       .catch((err: unknown) => {
@@ -122,15 +146,21 @@ export function useFeed(): UseFeedResult {
         setError(getRequestErrorMessage(err));
       })
       .finally(() => {
+        isLoadingMoreRef.current = false;
         if (!isMountedRef.current) {
           return;
         }
         setIsLoadingMore(false);
       });
-  }, [nextCursor, isLoadingMore]);
+  }, []);
 
   const applyFeedback = useCallback(
     (articleId: string, action: FeedbackAction, reason?: BadReason) => {
+      if (pendingArticleIdsRef.current.has(articleId)) {
+        // 送信中の同じ記事への再クリックは無視する（G-1 参照）。
+        return;
+      }
+
       const target = itemsRef.current.find((item) => item.article_id === articleId);
       if (!target) {
         return;
@@ -147,6 +177,7 @@ export function useFeed(): UseFeedResult {
         : { action, reason: reason ?? null, created_at: new Date().toISOString() };
 
       setItems((current) => withFeedback(current, articleId, optimisticFeedback));
+      pendingArticleIdsRef.current.add(articleId);
 
       const request = isToggleOff
         ? deleteFeedback(articleId).then((): ArticleFeedback | null => null)
@@ -166,12 +197,20 @@ export function useFeed(): UseFeedResult {
           }
           setItems((current) => withFeedback(current, articleId, previousFeedback));
           setError(getRequestErrorMessage(err));
+        })
+        .finally(() => {
+          pendingArticleIdsRef.current.delete(articleId);
         });
     },
     [],
   );
 
   const removeFeedback = useCallback((articleId: string) => {
+    if (pendingArticleIdsRef.current.has(articleId)) {
+      // 送信中の同じ記事への再クリックは無視する（applyFeedback と同じ理由、G-1 参照）。
+      return;
+    }
+
     const target = itemsRef.current.find((item) => item.article_id === articleId);
     if (!target || target.feedback === null) {
       return;
@@ -179,6 +218,7 @@ export function useFeed(): UseFeedResult {
     const previousFeedback = target.feedback;
 
     setItems((current) => withFeedback(current, articleId, null));
+    pendingArticleIdsRef.current.add(articleId);
 
     deleteFeedback(articleId)
       .then(() => {
@@ -193,6 +233,9 @@ export function useFeed(): UseFeedResult {
         }
         setItems((current) => withFeedback(current, articleId, previousFeedback));
         setError(getRequestErrorMessage(err));
+      })
+      .finally(() => {
+        pendingArticleIdsRef.current.delete(articleId);
       });
   }, []);
 

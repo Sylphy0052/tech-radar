@@ -165,6 +165,14 @@ describe("ArticleCard", () => {
     expect(link).toHaveAttribute("rel", "noreferrer noopener");
   });
 
+  it("does not render a link when original_url uses an unsafe scheme (H)", () => {
+    // Arrange / Act
+    renderCard({ original_url: "javascript:alert(1)" });
+
+    // Assert — 危険なスキームはリンク化せず、テキスト表示へフォールバックする
+    expect(screen.queryByRole("link", { name: "元記事を開く" })).not.toBeInTheDocument();
+  });
+
   it("keeps the score breakdown collapsed by default and reveals it on demand", () => {
     // Arrange
     renderCard();

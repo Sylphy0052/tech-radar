@@ -12,12 +12,14 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_current_user_id, get_session
 from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction
+from techradar.db.errors import is_unique_violation
 from techradar.db.models import Article, ArticleFeedback, UserArticle
 
 router = APIRouter(prefix="/api/articles", tags=["feedback"])
@@ -53,14 +55,33 @@ class ArticleFeedbackCreate(BaseModel):
     action: FeedbackAction
     reason: BadReason | None = None
 
+    @model_validator(mode="after")
+    def _validate_reason_is_bad_only(self) -> ArticleFeedbackCreate:
+        """`reason` は action=bad 専用の任意項目（`PROJECT_SPEC.md` §7.2）。
+
+        action が bad 以外なのに reason が指定されていると、意味の無い reason が
+        そのまま保存されてしまう（Issue #13 自己レビュー D）。
+        """
+        if self.action is not FeedbackAction.BAD and self.reason is not None:
+            message = "reason は action=bad のときのみ指定できます"
+            raise ValueError(message)
+        return self
+
 
 class ArticleFeedbackResponse(BaseModel):
-    """フィードバックの公開表現。"""
+    """フィードバックの公開表現。
+
+    `action` / `reason` は enum 型にする。`str` のままだと OpenAPI に enum が出ず、
+    生成される `frontend/src/lib/api-schema.d.ts` でも単なる `string` になり、
+    フロント側の文字列リテラル比較が型で守られない（Issue #13 自己レビュー B）。
+    DB の `action` / `reason` 列は text 型だが、`from_attributes=True` により
+    pydantic がその文字列値から enum メンバーへ変換する。
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
-    action: str
-    reason: str | None
+    action: FeedbackAction
+    reason: BadReason | None
     created_at: datetime
 
 
@@ -74,21 +95,44 @@ def _upsert_feedback(
 
     PK が (user_id, article_id) のため、既存行があれば `action` / `reason` を
     上書きし、最新の意思表示だけを 1 行で保持する。
+
+    事前の存在確認（`session.get`）と INSERT の間には、同一記事への二重クリック
+    等で別リクエストが割り込みうる（TOCTOU）。INSERT を SAVEPOINT
+    （`session.begin_nested`）に閉じ込め、一意制約違反（`is_unique_violation`）
+    だけを捕捉して既存行を読み直し、更新に切り替えて処理を続ける
+    （`jobs/handlers/fetch_article.py` の `_link_user_article` と同じ方針）。
+    `articles.py` の `_create_registration` はセッション全体を `rollback` するが、
+    ここでは `_apply_user_article_effect` 側の書き込みがこの後に続くため、
+    SAVEPOINT だけを巻き戻し、その書き込みを道連れにしないようにする。
     """
     reason_value = payload.reason.value if payload.reason is not None else None
     feedback = session.get(ArticleFeedback, (user_id, article_id))
-    if feedback is None:
-        feedback = ArticleFeedback(
-            user_id=user_id,
-            article_id=article_id,
-            action=payload.action.value,
-            reason=reason_value,
-        )
-        session.add(feedback)
-    else:
+    if feedback is not None:
         feedback.action = payload.action.value
         feedback.reason = reason_value
-    session.flush()
+        session.flush()
+        return feedback
+
+    feedback = ArticleFeedback(
+        user_id=user_id,
+        article_id=article_id,
+        action=payload.action.value,
+        reason=reason_value,
+    )
+    try:
+        with session.begin_nested():
+            session.add(feedback)
+    except IntegrityError as exc:
+        if not is_unique_violation(exc):
+            raise
+        # 同時リクエストで既に他方が挿入済み。既存行を読み直して更新する。
+        feedback = session.get(ArticleFeedback, (user_id, article_id))
+        if feedback is None:
+            # 一意制約違反の直後のため理論上ここには来ない。
+            raise
+        feedback.action = payload.action.value
+        feedback.reason = reason_value
+        session.flush()
     return feedback
 
 
@@ -106,6 +150,9 @@ def _upsert_owned_user_article(
     最も重み（関心度）の強い経路を残す方針にする（`PROJECT_SPEC.md` §7.1）。
     例えば手動登録（1.0）済みの記事に Good（0.8）しても、origin・重みとも
     手動登録のまま維持する。
+
+    事前の存在確認と INSERT の間の TOCTOU は `_upsert_feedback` と同じ理由で
+    SAVEPOINT に閉じ込めて吸収する。
     """
     existing = session.scalar(
         select(UserArticle).where(
@@ -113,15 +160,31 @@ def _upsert_owned_user_article(
         )
     )
     if existing is None:
-        session.add(
-            UserArticle(
-                user_id=user_id,
-                article_id=article_id,
-                origin=origin.value,
-                interest_weight=interest_weight,
+        try:
+            with session.begin_nested():
+                session.add(
+                    UserArticle(
+                        user_id=user_id,
+                        article_id=article_id,
+                        origin=origin.value,
+                        interest_weight=interest_weight,
+                    )
+                )
+        except IntegrityError as exc:
+            if not is_unique_violation(exc):
+                raise
+            # 同時リクエストで既に他方が挿入済み。既存行を読み直して続行する。
+            existing = session.scalar(
+                select(UserArticle).where(
+                    UserArticle.user_id == user_id, UserArticle.article_id == article_id
+                )
             )
-        )
-        return
+            if existing is None:
+                # 一意制約違反の直後のため理論上ここには来ない。
+                raise
+        else:
+            return
+
     if existing.interest_weight >= interest_weight:
         return
     existing.origin = origin.value
