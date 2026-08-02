@@ -94,6 +94,14 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
     setError(null);
   }
 
+  // `loadMore` 発行時点の filterKey を捕捉するための最新値 ref（`itemsRef` と同じ狙い）。
+  // フィルターが切り替わった後に旧フィルターの loadMore レスポンスが解決しても、
+  // このref越しに世代のずれを検出して破棄できるようにする。
+  const filterKeyRef = useRef(filterKey);
+  useEffect(() => {
+    filterKeyRef.current = filterKey;
+  }, [filterKey]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -129,11 +137,17 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
       return;
     }
     const cursor = nextCursor;
+    // 発行時点のフィルターを捕捉する。レスポンス到達時にこれと食い違っていれば、
+    // その間にフィルターが切り替わっており（初回取得側の `cancelled` と同じ狙い）、
+    // 新フィルターの一覧へ旧フィルターの記事を混ぜてしまうため破棄する。
+    const requestFilterKey = filterKeyRef.current;
+    const isStaleResponse = () =>
+      !isMountedRef.current || filterKeyRef.current !== requestFilterKey;
     isLoadingMoreRef.current = true;
     setIsLoadingMore(true);
     listInterestArticles(filters, { cursor })
       .then((response) => {
-        if (!isMountedRef.current) {
+        if (isStaleResponse()) {
           return;
         }
         setItems((current) => mergeItems(current, response.items));
@@ -141,14 +155,14 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
         setError(null);
       })
       .catch((err: unknown) => {
-        if (!isMountedRef.current) {
+        if (isStaleResponse()) {
           return;
         }
         setError(getRequestErrorMessage(err));
       })
       .finally(() => {
         isLoadingMoreRef.current = false;
-        if (!isMountedRef.current) {
+        if (isStaleResponse()) {
           return;
         }
         setIsLoadingMore(false);

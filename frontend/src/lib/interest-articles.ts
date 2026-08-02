@@ -75,6 +75,20 @@ function isInterestArticleOrigin(value: string): value is ArticleOrigin {
 }
 
 /**
+ * ISO8601 文字列として妥当なら（`Date` としてパース可能なら）そのまま返し、そうでなければ
+ * `null` に落とす。共有リンク・ブラウザ履歴・手動編集で URL のクエリは容易に壊れうるため、
+ * ここで検証しておくことで `registeredFrom` / `registeredTo` が不正な値のまま
+ * バックエンドへ送られる（`GET /api/articles` の 422）ことも、`isoToJstDateInputValue`
+ * のクラッシュを誘発することも防ぐ。
+ */
+function parseValidIsoDateOrNull(value: string | null): string | null {
+  if (value === null) {
+    return null;
+  }
+  return Number.isNaN(new Date(value).getTime()) ? null : value;
+}
+
+/**
  * URL のクエリパラメータからフィルター条件を復元する。キー名は backend のクエリ
  * パラメータ名（`origin` / `source_domain` 等）とそのまま揃えており、URL 表示と
  * API リクエストの間で別々の変換テーブルを持たずに済むようにしている
@@ -88,8 +102,8 @@ export function parseArticleFiltersFromSearchParams(searchParams: URLSearchParam
     category: searchParams.get("category"),
     sourceDomain: searchParams.get("source_domain"),
     language: searchParams.get("language"),
-    registeredFrom: searchParams.get("registered_from"),
-    registeredTo: searchParams.get("registered_to"),
+    registeredFrom: parseValidIsoDateOrNull(searchParams.get("registered_from")),
+    registeredTo: parseValidIsoDateOrNull(searchParams.get("registered_to")),
     isPrimarySource: isPrimarySourceRaw === null ? null : isPrimarySourceRaw === "true",
   };
 }
@@ -142,9 +156,20 @@ export function jstDateToRegisteredToIso(dateString: string): string {
   return new Date(`${dateString}T23:59:59.999${JST_OFFSET}`).toISOString();
 }
 
-/** ISO8601 文字列（UTC）を JST の日付に直し、`<input type="date">` へ渡せる `YYYY-MM-DD` にする。 */
+/**
+ * ISO8601 文字列（UTC）を JST の日付に直し、`<input type="date">` へ渡せる `YYYY-MM-DD` にする。
+ *
+ * `isoString` が不正で `Date` としてパースできない場合は空文字列を返す。呼び出し元
+ * （`ArticleFilterPanel` の `defaultValue`）はレンダー中にこれを呼ぶため、
+ * `.toISOString()` の `RangeError` をここで防がないとページ全体がクラッシュする
+ * （`parseArticleFiltersFromSearchParams` 側で不正値を弾いていても、防御的にここでも弾く）。
+ */
 export function isoToJstDateInputValue(isoString: string): string {
-  const jstMillis = new Date(isoString).getTime() + 9 * 60 * 60 * 1000;
+  const utcMillis = new Date(isoString).getTime();
+  if (Number.isNaN(utcMillis)) {
+    return "";
+  }
+  const jstMillis = utcMillis + 9 * 60 * 60 * 1000;
   return new Date(jstMillis).toISOString().slice(0, 10);
 }
 

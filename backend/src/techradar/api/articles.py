@@ -60,6 +60,11 @@ _INTEREST_CURSOR_SEPARATOR = ":"
 _MAX_INTEREST_CURSOR_RAW_LENGTH = 96
 INTEREST_CURSOR_MAX_LENGTH = math.ceil(_MAX_INTEREST_CURSOR_RAW_LENGTH / 3) * 4
 
+# 関心記事一覧のテキストフィルター（domain/category/source_domain/language）の上限。
+# 実データはこれよりずっと短いが、際限なく長い文字列を DB 比較へ渡さないための安全弁
+# （`cursor` の `INTEREST_CURSOR_MAX_LENGTH` と同じ方針）。
+INTEREST_LIST_TEXT_FILTER_MAX_LENGTH = 256
+
 
 class ArticleRegistrationCreate(BaseModel):
     """URL 登録リクエスト。
@@ -303,10 +308,43 @@ def _build_interest_article_item(
     )
 
 
+def _reject_naive_datetime(value: datetime | None, *, param_name: str) -> None:
+    """タイムゾーン情報の無い（naive な）datetime を 422 で拒否する。
+
+    `user_articles.created_at` は `DateTime(timezone=True)` 列のため、naive な
+    datetime を比較に使うとセッションのタイムゾーン設定に暗黙依存してしまう。
+
+    `AfterValidator` をクエリパラメータの `Annotated` に付ける方式も検討したが、
+    このモジュールは `from __future__ import annotations` を使っており、
+    pydantic がその組み合わせでアノテーションを `ForwardRef` のまま解決できず
+    `PydanticUserError` になった（実機で確認済み）ため、既存の
+    `registered_from > registered_to` 検証と同じ「関数本体で明示チェックして
+    HTTPException を送出する」方式に統一する。
+    """
+    if value is not None and value.tzinfo is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"{param_name} はタイムゾーン付きの日時で指定してください",
+        )
+
+
+def _resolve_allowed_origins(origin: Sequence[ArticleOrigin] | None) -> frozenset[str]:
+    """`origin` クエリを、一覧に出す3経路（`INTEREST_LIST_ORIGIN_VALUES`）との積集合にする。
+
+    read_full/clicked だけを指定した場合は空集合になる（一覧にそもそも出ない
+    origin のため）。呼び出し側はこれが空なら DB へ問い合わせず 200 + 空配列を
+    返すショートサーキットを行う（`UserArticle.origin.in_(set())` という
+    常に偽になる IN 句を SQLAlchemy に発行させないため）。
+    """
+    if not origin:
+        return INTEREST_LIST_ORIGIN_VALUES
+    return frozenset(value.value for value in origin) & INTEREST_LIST_ORIGIN_VALUES
+
+
 def _build_interest_article_query(
     user_id: uuid.UUID,
     *,
-    origin: Sequence[ArticleOrigin] | None,
+    allowed_origins: frozenset[str],
     domain: str | None,
     category: str | None,
     source_domain: str | None,
@@ -317,14 +355,8 @@ def _build_interest_article_query(
 ) -> Select[tuple[UserArticle, Article]]:
     """フィルター条件を反映した、関心記事一覧の SELECT 文を組み立てる。
 
-    `origin` フィルターは常に適用する `INTEREST_LIST_ORIGIN_VALUES`（一覧に
-    出す3経路）との積集合にする。read_full/clicked だけを指定した場合は
-    合致件数 0 件になる（一覧にそもそも出ない origin のため）。
+    `allowed_origins` は空でない前提（空集合なら呼び出し側がショートサーキットする）。
     """
-    allowed_origins = INTEREST_LIST_ORIGIN_VALUES
-    if origin:
-        allowed_origins = {value.value for value in origin} & INTEREST_LIST_ORIGIN_VALUES
-
     filters = [
         UserArticle.user_id == user_id,
         UserArticle.origin.in_(allowed_origins),
@@ -356,10 +388,22 @@ def list_interest_articles(
     session: SessionDep,
     user_id: UserIdDep,
     origin: Annotated[list[ArticleOrigin] | None, Query(description="登録方法。複数指定可")] = None,
-    domain: Annotated[str | None, Query(description="ジャンル大分類")] = None,
-    category: Annotated[str | None, Query(description="ジャンル中分類")] = None,
-    source_domain: Annotated[str | None, Query(description="情報源")] = None,
-    language: Annotated[str | None, Query(description="言語")] = None,
+    domain: Annotated[
+        str | None,
+        Query(description="ジャンル大分類", max_length=INTEREST_LIST_TEXT_FILTER_MAX_LENGTH),
+    ] = None,
+    category: Annotated[
+        str | None,
+        Query(description="ジャンル中分類", max_length=INTEREST_LIST_TEXT_FILTER_MAX_LENGTH),
+    ] = None,
+    source_domain: Annotated[
+        str | None,
+        Query(description="情報源", max_length=INTEREST_LIST_TEXT_FILTER_MAX_LENGTH),
+    ] = None,
+    language: Annotated[
+        str | None,
+        Query(description="言語", max_length=INTEREST_LIST_TEXT_FILTER_MAX_LENGTH),
+    ] = None,
     registered_from: Annotated[
         datetime | None, Query(description="登録日時の期間（下限、含む）")
     ] = None,
@@ -379,6 +423,11 @@ def list_interest_articles(
     手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）
     降順で返す。タイブレークに `user_articles.id` を使い、cursor はこの2つの組から作る。
     """
+    # naive な datetime 同士でも `>` 自体は例外を出さないが、片方だけ tz-aware だと
+    # 比較で TypeError になる。ここで先に弾いておくことで、直後の順序比較を安全にする。
+    _reject_naive_datetime(registered_from, param_name="registered_from")
+    _reject_naive_datetime(registered_to, param_name="registered_to")
+
     if (
         registered_from is not None
         and registered_to is not None
@@ -398,9 +447,16 @@ def list_interest_articles(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="cursor が不正です"
             ) from exc
 
+    allowed_origins = _resolve_allowed_origins(origin)
+    if not allowed_origins:
+        # 指定された origin が一覧対象の3経路と1つも重ならない
+        # （例: read_full のみ指定）。DB へ問い合わせるまでもなく空配列が確定するため、
+        # 常に偽になる `IN ()` 句を発行せずショートサーキットする。
+        return InterestArticleListResponse(items=[], next_cursor=None)
+
     statement = _build_interest_article_query(
         user_id,
-        origin=origin,
+        allowed_origins=allowed_origins,
         domain=domain,
         category=category,
         source_domain=source_domain,
@@ -457,5 +513,10 @@ def delete_interest_article(
         )
 
     session.delete(user_article)
+    # 応答を返す前に明示的にコミットする。`get_session`（`session_scope`）は
+    # 正常終了時に自動コミットするが、その後処理が走るのはレスポンス送信より後になる
+    # （`create_article_registration` と同じ理由）。ここで委ねると、204 を受け取った
+    # UI が直後に一覧を再取得したとき、削除がまだコミットされておらず該当行が
+    # 残って見えるおそれがある。
     session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
