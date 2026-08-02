@@ -110,6 +110,9 @@ describe("DiscoverFeed", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<DiscoverFeed />);
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+    // 記事の描画（DOM の変化）と observer を張る effect の実行順は保証されないため、
+    // observer が張られるまで待ってから通知する（未生成だと通知が握り潰される）。
+    await waitFor(() => expect(MockIntersectionObserver.instances).toHaveLength(1));
 
     // Act — センチネルが可視になったことを通知する
     act(() => {
