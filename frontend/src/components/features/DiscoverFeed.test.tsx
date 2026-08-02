@@ -245,7 +245,10 @@ describe("DiscoverFeed", () => {
     // Act
     fireEvent.click(screen.getByRole("button", { name: "Good" }));
 
-    // Assert — API 応答を待たずに押下状態になる
-    expect(screen.getByRole("button", { name: "Good" })).toHaveAttribute("aria-pressed", "true");
+    // Assert — API 応答を待たずに押下状態になる。POST のモックは解決しない Promise を
+    // 返すため、押下状態になるのは楽観的更新によるものだけ（応答による反映は起こらない）。
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Good" })).toHaveAttribute("aria-pressed", "true"),
+    );
   });
 });
