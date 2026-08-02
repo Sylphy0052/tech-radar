@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, apiFetch, getApiBaseUrl, getHealth } from "@/lib/api";
+import { ApiError, apiFetch, getApiBaseUrl, getHealth, isRateLimitError } from "@/lib/api";
 import type { Health } from "@/lib/api";
 
 const ORIGINAL_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
@@ -59,6 +59,91 @@ describe("apiFetch", () => {
     });
   });
 
+  it("carries the Retry-After seconds on a 429 response", async () => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response("too many requests", { status: 429, headers: { "Retry-After": "30" } }),
+      ),
+    );
+
+    // Act / Assert
+    await expect(apiFetch("/api/feed")).rejects.toMatchObject({
+      status: 429,
+      retryAfterSeconds: 30,
+    });
+  });
+
+  it("leaves retryAfterSeconds null when the Retry-After header is absent", async () => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async () => new Response("too many requests", { status: 429 })),
+    );
+
+    // Act / Assert
+    await expect(apiFetch("/api/feed")).rejects.toMatchObject({
+      status: 429,
+      retryAfterSeconds: null,
+    });
+  });
+
+  it.each([
+    ["a negative value", "-1"],
+    ["a hexadecimal notation", "0x1e"],
+    ["an exponential notation", "1e2"],
+    ["a value just beyond the accepted upper bound", "301"],
+    ["a value far beyond the accepted upper bound", "999999999"],
+  ])("leaves retryAfterSeconds null for %s in Retry-After", async (_label, headerValue) => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response("too many requests", {
+            status: 429,
+            headers: { "Retry-After": headerValue },
+          }),
+      ),
+    );
+
+    // Act / Assert
+    await expect(apiFetch("/api/feed")).rejects.toMatchObject({ retryAfterSeconds: null });
+  });
+
+  it("keeps a Retry-After value exactly at the accepted upper bound", async () => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response("too many requests", { status: 429, headers: { "Retry-After": "300" } }),
+      ),
+    );
+
+    // Act / Assert
+    await expect(apiFetch("/api/feed")).rejects.toMatchObject({ retryAfterSeconds: 300 });
+  });
+
+  it("leaves retryAfterSeconds null when the Retry-After header is not delta-seconds", async () => {
+    // Arrange — HTTP-date 形式（backend は返さないが、規格上は許容される）
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response("too many requests", {
+            status: 429,
+            headers: { "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT" },
+          }),
+      ),
+    );
+
+    // Act / Assert
+    await expect(apiFetch("/api/feed")).rejects.toMatchObject({ retryAfterSeconds: null });
+  });
+
   it("resolves to undefined on a 204 No Content response without parsing json", async () => {
     // Arrange — 204 はボディを持たないため、body に null を渡した Response で再現する
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
@@ -68,6 +153,15 @@ describe("apiFetch", () => {
 
     // Assert
     expect(result).toBeUndefined();
+  });
+});
+
+describe("isRateLimitError", () => {
+  it("identifies only a 429 ApiError as a rate limit error", () => {
+    // Act / Assert
+    expect(isRateLimitError(new ApiError(429, "too many requests"))).toBe(true);
+    expect(isRateLimitError(new ApiError(404, "not found"))).toBe(false);
+    expect(isRateLimitError(new TypeError("Failed to fetch"))).toBe(false);
   });
 });
 

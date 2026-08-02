@@ -50,6 +50,41 @@ function stubFeedPages(): ReturnType<typeof vi.fn> {
   return fetchMock;
 }
 
+/** 2 ページ目だけ 429（Retry-After: 30）を返す fetch を差し込む。 */
+function stubRateLimitedSecondPage(): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+    if (url.includes("cursor=")) {
+      return new Response("too many requests", {
+        status: 429,
+        headers: { "Retry-After": "30" },
+      });
+    }
+    return jsonResponse({ items: [itemA], next_cursor: "page-2" });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+/**
+ * `Date.now()` を「実時間 + 任意のオフセット」にする。
+ *
+ * fake timers で時刻ごと止めると `waitFor` のポーリングが進まなくなるため、
+ * 実時間はそのまま進めたうえで先送りだけを足せるようにしている。
+ */
+function stubAdvanceableClock(): { advance: (ms: number) => void; restore: () => void } {
+  const realNow = Date.now.bind(Date);
+  let offsetMs = 0;
+  const spy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offsetMs);
+  return {
+    advance: (ms: number) => {
+      offsetMs += ms;
+    },
+    restore: () => {
+      spy.mockRestore();
+    },
+  };
+}
+
 describe("useFeed", () => {
   it("loads the first page on mount", async () => {
     // Arrange
@@ -403,6 +438,111 @@ describe("useFeed", () => {
 
     // Assert
     expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
+  });
+
+  it("surfaces a rate limit message with the wait time when loadMore hits 429", async () => {
+    // Arrange
+    stubRateLimitedSecondPage();
+    const { result } = renderHook(() => useFeed());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act
+    act(() => {
+      result.current.loadMore();
+    });
+
+    // Assert
+    await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
+    expect(result.current.error).toBe("リクエストが多すぎます。約30秒後に再度お試しください。");
+  });
+
+  it("does not retry immediately after a 429 response", async () => {
+    // Arrange
+    const fetchMock = stubRateLimitedSecondPage();
+    const { result } = renderHook(() => useFeed());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    act(() => {
+      result.current.loadMore();
+    });
+    await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
+    const callCountAfterRateLimit = fetchMock.mock.calls.length;
+
+    // Act — 無限スクロールの再交差や「さらに読み込む」連打を模す
+    act(() => {
+      result.current.loadMore();
+      result.current.loadMore();
+    });
+
+    // Assert
+    expect(fetchMock).toHaveBeenCalledTimes(callCountAfterRateLimit);
+  });
+
+  it("re-shows the rate limit message with the remaining wait when loadMore is pressed during the cooldown", async () => {
+    // Arrange — 429 のあとフィードバック送信が成功してエラー表示が消える状況
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return jsonResponse({ action: "good", reason: null, created_at: "2026-08-01T00:00:00Z" });
+      }
+      if (url.includes("cursor=")) {
+        return new Response("too many requests", {
+          status: 429,
+          headers: { "Retry-After": "30" },
+        });
+      }
+      return jsonResponse({ items: [itemA], next_cursor: "page-2" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const clock = stubAdvanceableClock();
+    try {
+      const { result } = renderHook(() => useFeed());
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      act(() => {
+        result.current.loadMore();
+      });
+      await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
+      act(() => {
+        result.current.applyFeedback(itemA.article_id, "good");
+      });
+      await waitFor(() => expect(result.current.error).toBeNull());
+
+      // Act — 25 秒経過した時点で「さらに読み込む」を押す
+      clock.advance(25_000);
+      act(() => {
+        result.current.loadMore();
+      });
+
+      // Assert — 押しても何も起きないのではなく、残りの待ち時間を出し直す
+      expect(result.current.error).toBe("リクエストが多すぎます。約5秒後に再度お試しください。");
+    } finally {
+      clock.restore();
+    }
+  });
+
+  it("allows loadMore again once the Retry-After window has elapsed", async () => {
+    // Arrange
+    const fetchMock = stubRateLimitedSecondPage();
+    const clock = stubAdvanceableClock();
+    try {
+      const { result } = renderHook(() => useFeed());
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      act(() => {
+        result.current.loadMore();
+      });
+      await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
+      const callCountAfterRateLimit = fetchMock.mock.calls.length;
+
+      // Act
+      clock.advance(30_000);
+      act(() => {
+        result.current.loadMore();
+      });
+
+      // Assert
+      await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
+      expect(fetchMock.mock.calls.length).toBe(callCountAfterRateLimit + 1);
+    } finally {
+      clock.restore();
+    }
   });
 
   it("surfaces a network error message when the feed request fails", async () => {
