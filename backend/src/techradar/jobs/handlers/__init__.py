@@ -14,6 +14,7 @@ from techradar.jobs.handlers.crawl_sources import make_crawl_sources_handler
 from techradar.jobs.handlers.embed_article import make_embed_article_handler
 from techradar.jobs.handlers.errors import RegistrationErrorReason
 from techradar.jobs.handlers.fetch_article import make_fetch_article_handler
+from techradar.jobs.handlers.purge_operation_logs import make_purge_operation_logs_handler
 
 __all__ = [
     "RegistrationErrorReason",
@@ -21,4 +22,5 @@ __all__ = [
     "make_crawl_sources_handler",
     "make_embed_article_handler",
     "make_fetch_article_handler",
+    "make_purge_operation_logs_handler",
 ]
