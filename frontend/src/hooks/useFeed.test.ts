@@ -477,6 +477,41 @@ describe("useFeed", () => {
     expect(fetchMock).toHaveBeenCalledTimes(callCountAfterRateLimit);
   });
 
+  it("re-shows the rate limit message when loadMore is pressed during the cooldown", async () => {
+    // Arrange — 429 のあとフィードバック送信が成功してエラー表示が消える状況
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return jsonResponse({ action: "good", reason: null, created_at: "2026-08-01T00:00:00Z" });
+      }
+      if (url.includes("cursor=")) {
+        return new Response("too many requests", {
+          status: 429,
+          headers: { "Retry-After": "30" },
+        });
+      }
+      return jsonResponse({ items: [itemA], next_cursor: "page-2" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useFeed());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    act(() => {
+      result.current.loadMore();
+    });
+    await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
+    act(() => {
+      result.current.applyFeedback(itemA.article_id, "good");
+    });
+    await waitFor(() => expect(result.current.error).toBeNull());
+
+    // Act
+    act(() => {
+      result.current.loadMore();
+    });
+
+    // Assert — 押しても何も起きないのではなく、待機中である旨を出し直す
+    expect(result.current.error).toBe("リクエストが多すぎます。約30秒後に再度お試しください。");
+  });
+
   it("allows loadMore again once the Retry-After window has elapsed", async () => {
     // Arrange
     const fetchMock = stubRateLimitedSecondPage();

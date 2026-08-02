@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, apiFetch, getApiBaseUrl, getHealth } from "@/lib/api";
+import { ApiError, apiFetch, getApiBaseUrl, getHealth, isRateLimitError } from "@/lib/api";
 import type { Health } from "@/lib/api";
 
 const ORIGINAL_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
@@ -90,6 +90,28 @@ describe("apiFetch", () => {
     });
   });
 
+  it.each([
+    ["a negative value", "-1"],
+    ["a hexadecimal notation", "0x1e"],
+    ["an exponential notation", "1e2"],
+    ["a value beyond the accepted upper bound", "999999999"],
+  ])("leaves retryAfterSeconds null for %s in Retry-After", async (_label, headerValue) => {
+    // Arrange
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response("too many requests", {
+            status: 429,
+            headers: { "Retry-After": headerValue },
+          }),
+      ),
+    );
+
+    // Act / Assert
+    await expect(apiFetch("/api/feed")).rejects.toMatchObject({ retryAfterSeconds: null });
+  });
+
   it("leaves retryAfterSeconds null when the Retry-After header is not delta-seconds", async () => {
     // Arrange — HTTP-date 形式（backend は返さないが、規格上は許容される）
     vi.stubGlobal(
@@ -116,6 +138,15 @@ describe("apiFetch", () => {
 
     // Assert
     expect(result).toBeUndefined();
+  });
+});
+
+describe("isRateLimitError", () => {
+  it("identifies only a 429 ApiError as a rate limit error", () => {
+    // Act / Assert
+    expect(isRateLimitError(new ApiError(429, "too many requests"))).toBe(true);
+    expect(isRateLimitError(new ApiError(404, "not found"))).toBe(false);
+    expect(isRateLimitError(new TypeError("Failed to fetch"))).toBe(false);
   });
 });
 

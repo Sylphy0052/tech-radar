@@ -16,7 +16,8 @@ const SERVER_ERROR_STATUS_THRESHOLD = 500;
 
 /** レート制限（429）は通信障害ではなく意図的な拒否なので、待てば回復すると伝える。 */
 function getRateLimitMessage(retryAfterSeconds: number | null): string {
-  if (retryAfterSeconds === null) {
+  // 0 秒（境界ちょうどで弾かれた場合）は「約0秒後」が不自然なので秒数を出さない。
+  if (retryAfterSeconds === null || retryAfterSeconds <= 0) {
     return RATE_LIMIT_MESSAGE;
   }
   return `リクエストが多すぎます。約${retryAfterSeconds}秒後に再度お試しください。`;
