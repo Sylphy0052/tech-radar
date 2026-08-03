@@ -193,6 +193,85 @@
         "title": "BadReason",
         "type": "string"
       },
+      "Body_bulk_import_article_registrations_api_articles_bulk_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "description": "URLリストファイル（.md / .txt、UTF-8）",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_bulk_import_article_registrations_api_articles_bulk_post",
+        "type": "object"
+      },
+      "BulkArticleImportResponse": {
+        "description": "URL リストファイルの一括登録結果（`POST /api/articles/bulk`）。",
+        "properties": {
+          "created": {
+            "items": {
+              "$ref": "#/components/schemas/ArticleRegistrationResponse"
+            },
+            "title": "Created",
+            "type": "array"
+          },
+          "created_count": {
+            "title": "Created Count",
+            "type": "integer"
+          },
+          "duplicate_count": {
+            "title": "Duplicate Count",
+            "type": "integer"
+          },
+          "error_count": {
+            "title": "Error Count",
+            "type": "integer"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/BulkImportErrorItem"
+            },
+            "title": "Errors",
+            "type": "array"
+          }
+        },
+        "required": [
+          "created",
+          "created_count",
+          "duplicate_count",
+          "error_count",
+          "errors"
+        ],
+        "title": "BulkArticleImportResponse",
+        "type": "object"
+      },
+      "BulkImportErrorItem": {
+        "description": "一括登録でエラーとして扱った行の情報。",
+        "properties": {
+          "line": {
+            "title": "Line",
+            "type": "string"
+          },
+          "line_number": {
+            "title": "Line Number",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "line_number",
+          "line",
+          "reason"
+        ],
+        "title": "BulkImportErrorItem",
+        "type": "object"
+      },
       "CrawlRunCreate": {
         "additionalProperties": false,
         "description": "巡回ジョブの起動リクエスト。省略可能。",
@@ -1610,6 +1689,48 @@
           }
         },
         "summary": "Create Article Registration",
+        "tags": [
+          "articles"
+        ]
+      }
+    },
+    "/api/articles/bulk": {
+      "post": {
+        "description": "URL リストファイルをアップロードし、行ごとに URL を抽出して一括登録する（Issue #39）。\n\n1件でも不正な行があっても全体を拒否せず、抽出できた URL をファイル内の出現順に\n処理する。ファイルサイズ・抽出後の URL 件数が上限を超える場合は DB を一切\n変更せず 413 を返す（`_read_upload_within_limit` / 抽出後件数チェックのどちらも、\n行ごとの DB 処理を始める前に完了させることで担保する）。",
+        "operationId": "bulk_import_article_registrations_api_articles_bulk_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_bulk_import_article_registrations_api_articles_bulk_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkArticleImportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bulk Import Article Registrations",
         "tags": [
           "articles"
         ]

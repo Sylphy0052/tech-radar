@@ -1,4 +1,5 @@
 import { ArticleRegistrationForm } from "@/components/features/ArticleRegistrationForm";
+import { BulkArticleImportForm } from "@/components/features/BulkArticleImportForm";
 import { CrawlRunPanel } from "@/components/features/CrawlRunPanel";
 import { DiscoverFeed } from "@/components/features/DiscoverFeed";
 import { PageShell } from "@/components/ui/PageShell";
@@ -13,6 +14,7 @@ export default function Home() {
       <div className="flex flex-col gap-8 lg:flex-row lg:items-start">
         <div className="flex flex-col gap-6 lg:w-80 lg:shrink-0">
           <ArticleRegistrationForm />
+          <BulkArticleImportForm />
           <CrawlRunPanel />
         </div>
         <div className="min-w-0 flex-1">

@@ -5,9 +5,10 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Iterator
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, delete, select
+from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -298,3 +299,238 @@ class TestGetArticleRegistration:
         body = response.json()
         assert "normalized_url" not in body
         assert "user_id" not in body
+
+
+def _upload_bulk_file(
+    client: TestClient, content: str | bytes, *, filename: str = "urls.md"
+) -> httpx.Response:
+    """一括登録 API へファイルをアップロードする（テスト用ヘルパー）。"""
+    raw = content.encode("utf-8") if isinstance(content, str) else content
+    return client.post("/api/articles/bulk", files={"file": (filename, raw, "text/markdown")})
+
+
+class TestBulkImportArticleRegistrations:
+    """`POST /api/articles/bulk`（Issue #39）。"""
+
+    def test_registers_urls_from_markdown_link_and_bare_url_lines(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: Markdownリンク・素URL行から抽出したURLが登録される。
+
+        見出し・空行・URLを含まない行は無視され、エラー件数に数えられない。
+        """
+        # Arrange
+        content = (
+            "## 7月下旬\n"
+            "\n"
+            "- [記事A](https://example.com/a)\n"
+            "メモ行（URLなし）\n"
+            "https://example.com/b\n"
+        )
+
+        # Act
+        response = _upload_bulk_file(client, content)
+
+        # Assert
+        assert response.status_code == 200
+        body = response.json()
+        assert body["created_count"] == 2
+        assert body["duplicate_count"] == 0
+        assert body["error_count"] == 0
+        assert body["errors"] == []
+        assert {item["url"] for item in body["created"]} == {
+            "https://example.com/a",
+            "https://example.com/b",
+        }
+        jobs = db_session.scalars(select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)).all()
+        assert len(jobs) == 2
+
+    def test_registers_only_the_first_url_when_a_line_has_multiple(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: 1行に複数URLがあっても最初の1つだけ抽出・登録される。"""
+        # Act
+        response = _upload_bulk_file(client, "https://example.com/a https://example.com/b\n")
+
+        # Assert
+        assert response.status_code == 200
+        body = response.json()
+        assert body["created_count"] == 1
+        assert body["created"][0]["url"] == "https://example.com/a"
+        jobs = db_session.scalars(select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)).all()
+        assert len(jobs) == 1
+
+    def test_reports_invalid_lines_with_line_number_and_reason_without_blocking_other_lines(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: 不正スキーム/2048文字超の行が行番号・理由付きでエラーとして返り、
+        他の行の登録は成功する。
+        """
+        # Arrange
+        too_long_url = "https://example.com/" + "a" * 2048
+        content = f"https://example.com/good\nftp://example.com/bad\n{too_long_url}\n"
+
+        # Act
+        response = _upload_bulk_file(client, content)
+
+        # Assert
+        assert response.status_code == 200
+        body = response.json()
+        assert body["created_count"] == 1
+        assert body["created"][0]["url"] == "https://example.com/good"
+        assert body["error_count"] == 2
+        assert {error["line_number"] for error in body["errors"]} == {2, 3}
+        for error in body["errors"]:
+            assert error["line"]
+            assert error["reason"]
+
+    def test_counts_a_line_as_duplicate_when_a_matching_registration_already_exists(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: 既存登録と同じ正規化URLの行は重複として数えられ、
+        fetchジョブが積み増されない。
+        """
+        # Arrange
+        setup_response = client.post("/api/articles", json={"url": "https://example.com/existing"})
+        assert setup_response.status_code == 201
+
+        # Act
+        response = _upload_bulk_file(client, "https://example.com/existing\n")
+
+        # Assert
+        assert response.status_code == 200
+        body = response.json()
+        assert body["created_count"] == 0
+        assert body["duplicate_count"] == 1
+        assert body["created"] == []
+        jobs = db_session.scalars(select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)).all()
+        assert len(jobs) == 1
+
+    def test_registers_only_the_first_occurrence_of_a_duplicate_url_within_the_file(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: 同一ファイル内の重複URL（正規化後に一致）は初出のみ登録される。"""
+        # Arrange — 末尾スラッシュ・大文字ホスト違いだけの別表記
+        content = "https://example.com/a\nhttps://Example.com/a/\n"
+
+        # Act
+        response = _upload_bulk_file(client, content)
+
+        # Assert
+        assert response.status_code == 200
+        body = response.json()
+        assert body["created_count"] == 1
+        assert body["duplicate_count"] == 1
+        assert len(body["created"]) == 1
+        jobs = db_session.scalars(select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)).all()
+        assert len(jobs) == 1
+
+    def test_returns_413_and_leaves_the_db_unchanged_when_url_count_exceeds_the_limit(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: 抽出後URL件数が501件のファイルは413になりDBが無変更のまま。"""
+        # Arrange
+        content = "\n".join(f"https://example.com/{i}" for i in range(501)) + "\n"
+
+        # Act
+        response = _upload_bulk_file(client, content)
+
+        # Assert
+        assert response.status_code == 413
+        assert db_session.scalar(select(func.count()).select_from(ArticleRegistration)) == 0
+        assert db_session.scalar(select(func.count()).select_from(Job)) == 0
+
+    def test_does_not_count_headings_and_blank_lines_toward_the_url_count_limit(
+        self, client: TestClient
+    ) -> None:
+        """受入基準: 抽出後のURL件数ではなく行数で判定すると誤って413になるケースが
+        無いことを確認する（見出し・空行を大量に含んでもURLが500件以下なら通る）。
+        """
+        # Arrange — 見出し・空行が600行、URLは500件ぴったり
+        heading_lines = "\n".join(f"## 見出し{i}" for i in range(600))
+        url_lines = "\n".join(f"https://example.com/{i}" for i in range(500))
+        content = f"{heading_lines}\n{url_lines}\n"
+
+        # Act
+        response = _upload_bulk_file(client, content)
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json()["created_count"] == 500
+
+    def test_returns_413_and_leaves_the_db_unchanged_when_file_size_exceeds_the_limit(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: 1MB超のファイルは413になりDBが無変更のまま。"""
+        # Arrange
+        oversized_content = "a" * (1024 * 1024 + 1)
+
+        # Act
+        response = _upload_bulk_file(client, oversized_content, filename="urls.txt")
+
+        # Assert
+        assert response.status_code == 413
+        assert db_session.scalar(select(func.count()).select_from(ArticleRegistration)) == 0
+
+    def test_does_not_roll_back_other_lines_when_one_line_hits_a_unique_violation(
+        self, client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: ある行で一意制約違反が起きても、他の行の登録が巻き戻らない
+        （SAVEPOINTの担保）。
+
+        既存登録を作った上で、既存チェック（`_find_existing_registration`）を
+        常に None を返すよう差し替えることで、事前チェックと挿入の間に同時挿入が
+        起きた場合（TOCTOU）と同じ状況を再現する。1行目は正常に登録された後、
+        2行目で実際のDB一意制約違反が起きるが、SAVEPOINTで隔離されていれば
+        1行目の登録は巻き戻らない。
+        """
+        # Arrange
+        setup_response = client.post("/api/articles", json={"url": "https://example.com/existing"})
+        assert setup_response.status_code == 201
+        monkeypatch.setattr(
+            "techradar.api.articles._find_existing_registration",
+            lambda *args, **kwargs: None,
+        )
+        content = "https://example.com/success\nhttps://example.com/existing\n"
+
+        # Act
+        response = _upload_bulk_file(client, content)
+
+        # Assert
+        assert response.status_code == 200
+        body = response.json()
+        assert body["created_count"] == 1
+        assert body["created"][0]["url"] == "https://example.com/success"
+        assert body["duplicate_count"] == 1
+
+        success_registration = db_session.scalar(
+            select(ArticleRegistration).where(
+                ArticleRegistration.url == "https://example.com/success"
+            )
+        )
+        assert success_registration is not None
+        jobs = db_session.scalars(select(Job).where(Job.type == JobType.FETCH_ARTICLE.value)).all()
+        # 事前の単発登録分 + 1行目成功分の2件。2行目（重複）は積み増されない。
+        assert len(jobs) == 2
+
+    def test_returns_422_when_the_file_cannot_be_decoded_as_utf8(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: UTF-8デコード不能なファイルは422になる。"""
+        # Arrange
+        invalid_utf8_bytes = b"https://example.com/a\n\xff\xfe invalid bytes"
+
+        # Act
+        response = _upload_bulk_file(client, invalid_utf8_bytes, filename="urls.txt")
+
+        # Assert
+        assert response.status_code == 422
+        assert db_session.scalar(select(func.count()).select_from(ArticleRegistration)) == 0
+
+    def test_returns_422_for_an_unsupported_file_extension(self, client: TestClient) -> None:
+        """`.md` / `.txt` 以外の拡張子は受け付けない。"""
+        # Act
+        response = _upload_bulk_file(client, "https://example.com/a\n", filename="urls.csv")
+
+        # Assert
+        assert response.status_code == 422
