@@ -70,6 +70,7 @@ from techradar.db.models import (
     SourceRegistry,
     UserArticle,
     UserInterestCluster,
+    UserSourcePreference,
     UserTopicPreference,
 )
 from techradar.main import HealthResponse
@@ -383,7 +384,9 @@ MODEL_SPECS: tuple[ModelParitySpec, ...] = (
 )
 
 # API 公開スキーマを一切持たない内部専用モデル。
-INTERNAL_ONLY_MODELS: tuple[type[DeclarativeBase], ...] = (OperationLog,)
+# UserSourcePreference は推薦スコアの計算にのみ使い、API では公開しない（Issue #34）。
+# 関心分析画面（Issue #16）へ出すかどうかは後続 Issue で判断する。
+INTERNAL_ONLY_MODELS: tuple[type[DeclarativeBase], ...] = (OperationLog, UserSourcePreference)
 
 # モデル列由来ではない、スキーマ側の派生フィールド。
 DERIVED_FIELDS: tuple[DerivedField, ...] = (

@@ -19,12 +19,15 @@ from techradar.db.models import (
     ArticleFeedback,
     UserArticle,
     UserInterestCluster,
+    UserSourcePreference,
     UserTopicPreference,
 )
 from techradar.interest.service import (
     load_weighted_interest_articles,
     rebuild_interest_clusters,
+    recompute_source_preferences_after_removal,
     recompute_topic_preferences_after_removal,
+    update_source_preferences,
     update_topic_preferences,
 )
 from techradar.recommendation.config import get_scoring_config
@@ -46,13 +49,14 @@ def make_article(
     title: str = "記事タイトル",
     topics: Sequence[str] = (),
     embedding: list[float] | None = None,
+    source_domain: str = "example.com",
 ) -> Article:
-    canonical_url = f"https://example.com/{uuid.uuid4().hex[:10]}"
+    canonical_url = f"https://{source_domain}/{uuid.uuid4().hex[:10]}"
     article = Article(
         canonical_url=canonical_url,
         original_url=canonical_url,
         title=title,
-        source_domain="example.com",
+        source_domain=source_domain,
         topics=list(topics),
         embedding=embedding,
         fetched_at=NOW,
@@ -112,6 +116,12 @@ def _get_topic_preference(
     session: Session, user_id: uuid.UUID, topic: str
 ) -> UserTopicPreference | None:
     return session.get(UserTopicPreference, (user_id, topic))
+
+
+def _get_source_preference(
+    session: Session, user_id: uuid.UUID, source_domain: str
+) -> UserSourcePreference | None:
+    return session.get(UserSourcePreference, (user_id, source_domain))
 
 
 class TestUpdateTopicPreferencesGoodAndSave:
@@ -524,3 +534,190 @@ class TestRebuildInterestClusters:
             select(UserInterestCluster).where(UserInterestCluster.user_id == other_user_id)
         ).all()
         assert len(other_clusters) >= 1
+
+
+class TestUpdateSourcePreferencesGoodAndSave:
+    """受入基準「Good した記事の情報源に対する選好が増える」（Issue #34）。"""
+
+    def test_good_increases_positive_and_effective_weight(self, db_session: Session) -> None:
+        # Arrange
+        user_id = uuid.uuid4()
+        article = make_article(db_session, source_domain="blog.example.jp")
+
+        # Act
+        update_source_preferences(db_session, user_id, article.id, FeedbackAction.GOOD, NOW)
+
+        # Assert — 増分は config/scoring.yaml の feedback_weights.good
+        config = get_scoring_config()
+        preference = _get_source_preference(db_session, user_id, "blog.example.jp")
+        assert preference is not None
+        assert preference.positive_weight == pytest.approx(config.feedback_weights.good)
+        assert preference.effective_weight == pytest.approx(config.feedback_weights.good)
+
+    def test_save_increases_positive_weight_by_the_save_increment(
+        self, db_session: Session
+    ) -> None:
+        # Arrange
+        user_id = uuid.uuid4()
+        article = make_article(db_session, source_domain="blog.example.jp")
+
+        # Act
+        update_source_preferences(db_session, user_id, article.id, FeedbackAction.SAVE, NOW)
+
+        # Assert
+        config = get_scoring_config()
+        preference = _get_source_preference(db_session, user_id, "blog.example.jp")
+        assert preference is not None
+        assert preference.positive_weight == pytest.approx(config.feedback_weights.save)
+
+    def test_repeated_good_accumulates_the_positive_weight(self, db_session: Session) -> None:
+        # Arrange
+        user_id = uuid.uuid4()
+        first = make_article(db_session, title="1本目", source_domain="blog.example.jp")
+        update_source_preferences(db_session, user_id, first.id, FeedbackAction.GOOD, NOW)
+
+        # Act — 同じ情報源の別記事へ Good を重ねる
+        second = make_article(db_session, title="2本目", source_domain="blog.example.jp")
+        update_source_preferences(db_session, user_id, second.id, FeedbackAction.GOOD, NOW)
+
+        # Assert
+        config = get_scoring_config()
+        preference = _get_source_preference(db_session, user_id, "blog.example.jp")
+        assert preference is not None
+        assert preference.positive_weight == pytest.approx(config.feedback_weights.good * 2)
+
+    def test_does_not_touch_another_source(self, db_session: Session) -> None:
+        # Arrange
+        user_id = uuid.uuid4()
+        article = make_article(db_session, source_domain="blog.example.jp")
+
+        # Act
+        update_source_preferences(db_session, user_id, article.id, FeedbackAction.GOOD, NOW)
+
+        # Assert
+        assert _get_source_preference(db_session, user_id, "other.example.jp") is None
+
+    def test_does_nothing_when_the_article_does_not_exist(self, db_session: Session) -> None:
+        # Arrange
+        user_id = uuid.uuid4()
+
+        # Act / Assert — 例外にならない
+        update_source_preferences(db_session, user_id, uuid.uuid4(), FeedbackAction.GOOD, NOW)
+
+
+class TestUpdateSourcePreferencesBad:
+    """受入基準「単発の Bad では下がらず、繰り返された場合にのみ下がる」（Issue #34）。"""
+
+    def test_a_single_bad_does_not_lower_the_source_weight(self, db_session: Session) -> None:
+        # Arrange
+        user_id = uuid.uuid4()
+        article = make_article(db_session, source_domain="blog.example.jp")
+        add_feedback(db_session, user_id, article, FeedbackAction.BAD)
+
+        # Act
+        update_source_preferences(db_session, user_id, article.id, FeedbackAction.BAD, NOW)
+
+        # Assert — 閾値未達のため行すら作られない
+        assert _get_source_preference(db_session, user_id, "blog.example.jp") is None
+
+    def test_lowers_the_weight_once_three_of_five_recent_are_bad(self, db_session: Session) -> None:
+        # Arrange — 同一情報源の記事5件を Good/Good/Bad/Bad まで積み、
+        # 3件目の Bad を送って閾値（3/5）に達させる
+        user_id = uuid.uuid4()
+        domain = "blog.example.jp"
+        for index, action in enumerate((FeedbackAction.GOOD, FeedbackAction.GOOD)):
+            article = make_article(db_session, title=f"good-{index}", source_domain=domain)
+            add_feedback(
+                db_session, user_id, article, action, created_at=NOW - timedelta(days=4 - index)
+            )
+        for index in range(2):
+            article = make_article(db_session, title=f"bad-{index}", source_domain=domain)
+            add_feedback(
+                db_session,
+                user_id,
+                article,
+                FeedbackAction.BAD,
+                created_at=NOW - timedelta(days=2 - index),
+            )
+        target = make_article(db_session, title="bad-3", source_domain=domain)
+        add_feedback(db_session, user_id, target, FeedbackAction.BAD, created_at=NOW)
+
+        # Act
+        update_source_preferences(db_session, user_id, target.id, FeedbackAction.BAD, NOW)
+
+        # Assert
+        config = get_scoring_config()
+        preference = _get_source_preference(db_session, user_id, domain)
+        assert preference is not None
+        assert preference.negative_weight == pytest.approx(config.source_preference.decay_step)
+        assert preference.effective_weight == pytest.approx(-config.source_preference.decay_step)
+
+    def test_counts_only_feedback_for_the_same_source(self, db_session: Session) -> None:
+        # Arrange — 別ドメインの Bad は数えない
+        user_id = uuid.uuid4()
+        for index in range(2):
+            other = make_article(
+                db_session, title=f"other-{index}", source_domain="other.example.jp"
+            )
+            add_feedback(
+                db_session,
+                user_id,
+                other,
+                FeedbackAction.BAD,
+                created_at=NOW - timedelta(days=2 - index),
+            )
+        target = make_article(db_session, title="target", source_domain="blog.example.jp")
+        add_feedback(db_session, user_id, target, FeedbackAction.BAD, created_at=NOW)
+
+        # Act
+        update_source_preferences(db_session, user_id, target.id, FeedbackAction.BAD, NOW)
+
+        # Assert — 対象ドメインの直近 Bad は 1 件だけのため下がらない
+        assert _get_source_preference(db_session, user_id, "blog.example.jp") is None
+
+
+class TestRecomputeSourcePreferencesAfterRemoval:
+    """フィードバック取り消し後に情報源選好の抑制が残り続けないことを検証する。"""
+
+    def test_clears_the_negative_weight_once_the_bad_feedback_is_removed(
+        self, db_session: Session
+    ) -> None:
+        # Arrange — 閾値に達して negative_weight が付いた状態を作る
+        user_id = uuid.uuid4()
+        domain = "blog.example.jp"
+        articles = []
+        for index in range(3):
+            article = make_article(db_session, title=f"bad-{index}", source_domain=domain)
+            add_feedback(
+                db_session,
+                user_id,
+                article,
+                FeedbackAction.BAD,
+                created_at=NOW - timedelta(days=2 - index),
+            )
+            articles.append(article)
+        target = articles[-1]
+        update_source_preferences(db_session, user_id, target.id, FeedbackAction.BAD, NOW)
+        assert _get_source_preference(db_session, user_id, domain) is not None
+
+        # Act — Bad を1件取り消して閾値を下回らせる
+        db_session.execute(
+            delete(ArticleFeedback).where(
+                ArticleFeedback.user_id == user_id, ArticleFeedback.article_id == target.id
+            )
+        )
+        db_session.flush()
+        recompute_source_preferences_after_removal(db_session, user_id, target.id, NOW)
+
+        # Assert
+        preference = _get_source_preference(db_session, user_id, domain)
+        assert preference is not None
+        assert preference.negative_weight == pytest.approx(0.0)
+        assert preference.effective_weight == pytest.approx(preference.positive_weight)
+
+    def test_does_nothing_when_the_article_does_not_exist(self, db_session: Session) -> None:
+        # Arrange
+        user_id = uuid.uuid4()
+
+        # Act / Assert — 例外にならない
+        recompute_source_preferences_after_removal(db_session, user_id, uuid.uuid4(), NOW)

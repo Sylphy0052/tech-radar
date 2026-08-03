@@ -310,6 +310,37 @@ class UserTopicPreference(Base):
     __table_args__ = (PrimaryKeyConstraint("user_id", "topic", name="pk_user_topic_preferences"),)
 
 
+class UserSourcePreference(Base):
+    """情報源単位の選好（`PROJECT_SPEC.md` §7.1 手順 4、Issue #34）。
+
+    `articles.source_authority`（`source_registry.authority_score` 由来）が
+    ユーザー横断で静的なスコアなのに対し、こちらは「この情報源は自分にとって
+    当たりが多い / 外れが多い」を Good / Bad の履歴から学習するユーザー固有の
+    値。キーは `source_registry.id` ではなく `articles.source_domain` にする
+    （レジストリに載らない一般の情報源にも選好を持たせるため。詳細は
+    `interest/sources.py` の docstring 参照）。
+
+    `effective_weight` は `positive_weight - negative_weight` の符号付きの値で、
+    トピック側（`user_topic_preferences`）の非負の値とは意味が異なる
+    （`interest/sources.py` の `compute_effective_weight` 参照）。
+    """
+
+    __tablename__ = "user_source_preferences"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    source_domain: Mapped[str] = mapped_column(Text, nullable=False)
+    positive_weight: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    negative_weight: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    effective_weight: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "source_domain", name="pk_user_source_preferences"),
+    )
+
+
 class ArticleRegistration(Base):
     """ユーザーによる URL 登録の状態（`PROJECT_SPEC.md` §6.2）。
 
