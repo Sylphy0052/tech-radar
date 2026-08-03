@@ -288,6 +288,16 @@ class TestLoading:
         with pytest.raises(ValueError, match="confidence"):
             load_scoring_config(path)
 
+    def test_rejects_a_min_confidence_above_the_smallest_signal(self, tmp_path: Path):
+        # Arrange — 下限が個々のシグナルより大きいと、シグナル 1 つの記事と
+        # 0 個の記事の confidence が同じ値に潰れる
+        broken = VALID_YAML.replace("min_confidence: 0.3", "min_confidence: 0.35")
+        path = write_config(tmp_path, broken)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="min_confidence"):
+            load_scoring_config(path)
+
     def test_loads_the_bundled_source_preference(self, config: ScoringConfig):
         # Arrange / Act / Assert — 情報源選好は専用セクションで管理する（Issue #34）
         assert config.source_preference.recent_window == 5
