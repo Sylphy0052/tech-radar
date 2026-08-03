@@ -1,15 +1,18 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InterestArticleList } from "@/components/features/InterestArticleList";
 import type { InterestArticleItem } from "@/lib/interest-articles";
 import { NavigationTestProvider, useNavigationTestContext } from "@/test-utils/next-navigation-test-context";
+import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => useNavigationTestContext().searchParams,
   usePathname: () => useNavigationTestContext().pathname,
   useRouter: () => useNavigationTestContext().router,
 }));
+
+configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -71,7 +74,7 @@ describe("InterestArticleList", () => {
     expect(within(manualCard as HTMLElement).getByText("手動登録")).toBeInTheDocument();
     expect(within(goodCard as HTMLElement).getByText("Good")).toBeInTheDocument();
     expect(within(savedCard as HTMLElement).getByText("保存")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows registered_at, topics, source_domain and content_type", async () => {
     // Arrange
@@ -93,7 +96,7 @@ describe("InterestArticleList", () => {
     expect(screen.getByText("llm")).toBeInTheDocument();
     expect(screen.getByText("blog.example.com")).toBeInTheDocument();
     expect(screen.getByText("研究・論文")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("removes the article from the list once it is excluded", async () => {
     // Arrange
@@ -113,7 +116,49 @@ describe("InterestArticleList", () => {
 
     // Assert
     await waitFor(() => expect(screen.queryByText("除外対象")).not.toBeInTheDocument());
-  });
+  }, TEST_TIMEOUT_MS);
+
+  it("removes the article even when clicked in the same tick it appears (Issue #37)", async () => {
+    // Arrange — 記事が DOM に出た瞬間（React の passive effect が走る前）に
+    // クリックする。MutationObserver のコールバックはマイクロタスク、passive
+    // effect はマクロタスク（MessageChannel）で走るため、この順序は必ず成立する。
+    // 以前はこの窓でクリックすると、hook が最新の items をまだ読めず、操作が
+    // 黙って捨てられていた（Issue #37）。
+    const item = makeItem({ article_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", title: "除外対象" });
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse({ items: [item], next_cursor: null });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    let clicked = false;
+    const observer = new MutationObserver(() => {
+      if (clicked) {
+        return;
+      }
+      const button = screen.queryByRole("button", { name: "関心対象から除外" });
+      if (button === null) {
+        return;
+      }
+      clicked = true;
+      fireEvent.click(button);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    try {
+      // Act
+      renderList();
+
+      await waitFor(() => expect(clicked).toBe(true));
+
+      // Assert — 描画直後のクリックが黙って捨てられず、除外が反映される
+      await waitFor(() => expect(screen.queryByText("除外対象")).not.toBeInTheDocument());
+    } finally {
+      observer.disconnect();
+    }
+  }, TEST_TIMEOUT_MS);
 
   it("shows an error message when the request fails", async () => {
     // Arrange
@@ -125,7 +170,7 @@ describe("InterestArticleList", () => {
     // Assert
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
     expect(screen.getByRole("alert")).toHaveTextContent("通信に失敗しました");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an empty state message when there are no matching articles", async () => {
     // Arrange
@@ -136,7 +181,7 @@ describe("InterestArticleList", () => {
 
     // Assert
     await waitFor(() => expect(screen.getByText("該当する記事がありません。")).toBeInTheDocument());
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("requests the API with the filters restored from the URL", async () => {
     // Arrange
@@ -152,5 +197,5 @@ describe("InterestArticleList", () => {
     const searchParams = new URL(url).searchParams;
     expect(searchParams.getAll("origin")).toEqual(["good"]);
     expect(searchParams.get("domain")).toBe("ai");
-  });
+  }, TEST_TIMEOUT_MS);
 });

@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InterestAnalysisDashboard } from "@/components/features/InterestAnalysisDashboard";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -73,7 +74,7 @@ describe("InterestAnalysisDashboard", () => {
 
     // Assert
     expect(screen.getByRole("status")).toHaveTextContent("読み込み中...");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("renders all 9 visualizations once data has loaded", async () => {
     // Arrange
@@ -86,7 +87,7 @@ describe("InterestAnalysisDashboard", () => {
     for (const heading of CHART_HEADINGS) {
       expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
     }
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an error message when a request fails", async () => {
     // Arrange
@@ -99,5 +100,5 @@ describe("InterestAnalysisDashboard", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "通信に失敗しました。しばらくしてから再度お試しください。",
     );
-  });
+  }, TEST_TIMEOUT_MS);
 });
