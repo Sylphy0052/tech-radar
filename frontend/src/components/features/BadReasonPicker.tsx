@@ -19,17 +19,11 @@ export function BadReasonPicker({ onSubmit, onCancel }: BadReasonPickerProps) {
   const [selectedReason, setSelectedReason] = useState<BadReason | null>(null);
 
   return (
-    <div
-      role="group"
-      aria-label="Badの理由を選択"
-      className="flex flex-col gap-2 rounded border border-zinc-200 p-3 text-sm dark:border-zinc-800"
-    >
+    <div role="group" aria-label="Badの理由を選択" className="panel flex flex-col gap-2 text-sm">
       <fieldset className="flex flex-col gap-1">
-        <legend className="text-xs text-zinc-500 dark:text-zinc-400">
-          理由を選択（任意）
-        </legend>
+        <legend className="mono-label">理由を選択（任意）</legend>
         {Object.entries(BAD_REASON_LABELS).map(([reason, label]) => (
-          <label key={reason} className="flex items-center gap-2">
+          <label key={reason} className="flex items-center gap-2 text-ink">
             <input
               type="radio"
               name={groupName}
@@ -42,14 +36,10 @@ export function BadReasonPicker({ onSubmit, onCancel }: BadReasonPickerProps) {
         ))}
       </fieldset>
       <div className="flex gap-2">
-        <button
-          type="button"
-          onClick={() => onSubmit(selectedReason ?? undefined)}
-          className="rounded bg-zinc-900 px-3 py-1 text-white dark:bg-zinc-100 dark:text-zinc-900"
-        >
+        <button type="button" onClick={() => onSubmit(selectedReason ?? undefined)} className="btn">
           {selectedReason === null ? "理由なしで送信" : "この理由で送信"}
         </button>
-        <button type="button" onClick={onCancel} className="rounded border border-zinc-300 px-3 py-1 dark:border-zinc-700">
+        <button type="button" onClick={onCancel} className="btn">
           閉じる
         </button>
       </div>

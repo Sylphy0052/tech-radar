@@ -14,9 +14,8 @@ import {
 } from "@/lib/interest-articles";
 import type { ArticleFilters } from "@/lib/interest-articles";
 
-const INPUT_CLASS =
-  "rounded border border-zinc-300 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-900";
-const LABEL_CLASS = "flex flex-col gap-1 text-sm";
+/** ラベルと入力欄を縦に並べる、キー/値ペアの基本レイアウト。 */
+const FIELD_CLASS = "flex flex-col gap-1";
 
 function emptyToNull(value: FormDataEntryValue | null): string | null {
   if (typeof value !== "string") {
@@ -102,12 +101,17 @@ export function ArticleFilterPanel() {
       key={searchParams.toString()}
       onSubmit={handleSubmit}
       aria-label="関心記事のフィルター"
-      className="flex flex-col gap-4 rounded border border-zinc-200 p-4 dark:border-zinc-800"
+      className="panel flex flex-col gap-4 text-sm"
     >
-      <fieldset className="flex flex-col gap-1">
-        <legend className="text-sm font-semibold">登録方法</legend>
+      <h2 className="heading text-sm">フィルター</h2>
+
+      <fieldset className="flex flex-col gap-2">
+        <legend className="mono-label">登録方法</legend>
         {INTEREST_ARTICLE_ORIGINS.map((origin) => (
-          <label key={origin} className="flex items-center gap-2 text-sm">
+          <label
+            key={origin}
+            className="flex items-center gap-2 text-ink has-checked:text-accent-strong"
+          >
             <input
               type="checkbox"
               name="origin"
@@ -119,67 +123,67 @@ export function ArticleFilterPanel() {
         ))}
       </fieldset>
 
-      <label className={LABEL_CLASS}>
-        ジャンル（大分類）
-        <input type="text" name="domain" defaultValue={filters.domain ?? ""} className={INPUT_CLASS} />
+      <label className={FIELD_CLASS}>
+        <span className="mono-label">ジャンル（大分類）</span>
+        <input type="text" name="domain" defaultValue={filters.domain ?? ""} className="field-input" />
       </label>
 
-      <label className={LABEL_CLASS}>
-        ジャンル（中分類）
+      <label className={FIELD_CLASS}>
+        <span className="mono-label">ジャンル（中分類）</span>
         <input
           type="text"
           name="category"
           defaultValue={filters.category ?? ""}
-          className={INPUT_CLASS}
+          className="field-input"
         />
       </label>
 
-      <label className={LABEL_CLASS}>
-        情報源
+      <label className={FIELD_CLASS}>
+        <span className="mono-label">情報源</span>
         <input
           type="text"
           name="source_domain"
           defaultValue={filters.sourceDomain ?? ""}
-          className={INPUT_CLASS}
+          className="field-input"
         />
       </label>
 
-      <label className={LABEL_CLASS}>
-        言語
+      <label className={FIELD_CLASS}>
+        <span className="mono-label">言語</span>
         <input
           type="text"
           name="language"
           defaultValue={filters.language ?? ""}
-          className={INPUT_CLASS}
+          className="field-input"
         />
       </label>
 
-      <label className={LABEL_CLASS}>
-        登録日時（開始）
+      <label className={FIELD_CLASS}>
+        <span className="mono-label">登録日時（開始）</span>
         <input
           type="date"
           name="registered_from_date"
           defaultValue={filters.registeredFrom ? isoToJstDateInputValue(filters.registeredFrom) : ""}
-          className={INPUT_CLASS}
+          className="field-input"
         />
       </label>
 
-      <label className={LABEL_CLASS}>
-        登録日時（終了）
+      <label className={FIELD_CLASS}>
+        <span className="mono-label">登録日時（終了）</span>
         <input
           type="date"
           name="registered_to_date"
           defaultValue={filters.registeredTo ? isoToJstDateInputValue(filters.registeredTo) : ""}
-          className={INPUT_CLASS}
+          className="field-input"
         />
       </label>
 
-      <label className={LABEL_CLASS}>
-        公式 / 非公式
+      <label className={FIELD_CLASS}>
+        <span className="mono-label">公式 / 非公式</span>
         <select
           name="is_primary_source"
           defaultValue={isPrimarySourceToSelectValue(filters.isPrimarySource)}
-          className={INPUT_CLASS}
+          className="field-input"
         >
           <option value="">すべて</option>
           <option value="true">公式・一次情報のみ</option>
@@ -187,14 +191,11 @@ export function ArticleFilterPanel() {
         </select>
       </label>
 
-      <div className="flex gap-2">
-        <button
-          type="submit"
-          className="rounded border border-zinc-300 px-3 py-1 text-sm dark:border-zinc-700"
-        >
+      <div className="flex gap-2 pt-1">
+        <button type="submit" className="btn btn-primary">
           絞り込む
         </button>
-        <button type="button" onClick={handleReset} className="text-sm underline">
+        <button type="button" onClick={handleReset} className="btn">
           クリア
         </button>
       </div>

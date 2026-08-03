@@ -28,18 +28,15 @@ export function InterestClusterList({ clusters }: InterestClusterListProps) {
         {clusters.map((cluster, index) => (
           <article
             key={`${index}-${cluster.label}`}
-            className="flex flex-col gap-2 rounded border border-zinc-200 p-3 dark:border-zinc-800"
+            className="flex flex-col gap-2 border border-line bg-surface-raised p-3"
           >
             <div className="flex items-center justify-between gap-2">
-              <h4 className="text-sm font-semibold">{cluster.label}</h4>
-              <span className="text-xs text-zinc-500 dark:text-zinc-400">重み {cluster.weight.toFixed(2)}</span>
+              <h4 className="text-sm font-semibold text-ink">{cluster.label}</h4>
+              <span className="mono-label text-accent">重み {cluster.weight.toFixed(2)}</span>
             </div>
             <div className="flex flex-wrap gap-1">
               {cluster.topics.map((topic, topicIndex) => (
-                <span
-                  key={`${topicIndex}-${topic}`}
-                  className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs dark:bg-zinc-800"
-                >
+                <span key={`${topicIndex}-${topic}`} className="chip">
                   {topic}
                 </span>
               ))}
