@@ -29,8 +29,9 @@ describe("PageShell", () => {
     expect(screen.getByText("本文")).toBeInTheDocument();
   });
 
-  it("keeps Japanese accessible names on the navigation links", () => {
-    // Arrange / Act — 表示は等幅の英字だが、読み上げ用の名前は日本語のまま維持する。
+  it("includes both the visible label and the Japanese description in the accessible name", () => {
+    // Arrange / Act — 画面上は等幅の英字だけを見せつつ、日本語の説明も
+    // アクセシブルネームに含める（WCAG 2.5.3 Label in Name）。
     render(
       <PageShell current="feed" title="TechRadar" description="説明文">
         <p>本文</p>
@@ -38,15 +39,15 @@ describe("PageShell", () => {
     );
 
     // Assert
-    expect(screen.getByRole("link", { name: "関心記事一覧を見る" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "ARTICLES関心記事一覧を見る" })).toHaveAttribute(
       "href",
       "/articles",
     );
-    expect(screen.getByRole("link", { name: "関心分析を見る" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "INTERESTS関心分析を見る" })).toHaveAttribute(
       "href",
       "/interests",
     );
-    expect(screen.getByRole("link", { name: "フィードを見る" })).toHaveAttribute("href", "/");
+    expect(screen.getByRole("link", { name: "FEEDフィードを見る" })).toHaveAttribute("href", "/");
   });
 
   it("marks only the current page link with aria-current", () => {
@@ -58,11 +59,11 @@ describe("PageShell", () => {
     );
 
     // Assert
-    expect(screen.getByRole("link", { name: "関心記事一覧を見る" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /関心記事一覧を見る/ })).toHaveAttribute(
       "aria-current",
       "page",
     );
-    expect(screen.getByRole("link", { name: "関心分析を見る" })).not.toHaveAttribute(
+    expect(screen.getByRole("link", { name: /関心分析を見る/ })).not.toHaveAttribute(
       "aria-current",
     );
   });

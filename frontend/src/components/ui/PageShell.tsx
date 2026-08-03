@@ -7,9 +7,10 @@ import Link from "next/link";
  * 1か所に集約する。各 `page.tsx` はこのコンポーネントに見出しと本文を渡すだけに
  * 留め、画面ごとにレイアウトが少しずつずれるのを防ぐ。
  *
- * ナビゲーションのリンク文言（アクセシブルネーム）は日本語のまま維持し、画面上の
- * 表示だけを等幅の英字にする。スクリーンリーダー利用者に対して意味の分かる名前を
- * 保ちつつ、ターミナル風の見た目を両立させるため。
+ * ナビゲーションは表示を等幅の英字にしつつ、日本語の説明を視覚的に隠した文字列
+ * として併記する。`aria-label` で日本語名に差し替えてしまうと、画面に見えている
+ * 「FEED」がアクセシブルネームに含まれず、音声操作で読み上げどおりに指示できなく
+ * なるため（WCAG 2.5.3 Label in Name）。
  */
 
 const NAV_ITEMS = [
@@ -50,7 +51,6 @@ export function PageShell({ current, title, description, children }: PageShellPr
                 <li key={item.key}>
                   <Link
                     href={item.href}
-                    aria-label={item.label}
                     aria-current={item.key === current ? "page" : undefined}
                     className={`font-mono text-xs tracking-[0.12em] ${
                       item.key === current
@@ -59,6 +59,7 @@ export function PageShell({ current, title, description, children }: PageShellPr
                     }`}
                   >
                     {item.display}
+                    <span className="sr-only"> {item.label}</span>
                   </Link>
                 </li>
               ))}

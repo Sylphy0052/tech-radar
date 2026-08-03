@@ -141,7 +141,7 @@ body::after {
 
 ::selection {
   background: var(--accent-dim);
-  color: #ffffff;
+  color: var(--ink);
 }
 
 /*
@@ -238,8 +238,14 @@ progress {
     color: var(--accent-strong);
   }
 
+  /*
+   * 無効状態は「押せない」ことが伝わればよく、読めなくなるほど落とさない。
+   * 透明度だけで表すと境界線も同時に沈むため、文字色を控えめな階調へ
+   * 置き換えたうえで透明度の下げ幅は小さく留める。
+   */
   .btn:disabled {
-    opacity: 0.45;
+    opacity: 0.7;
+    color: var(--ink-subtle);
     cursor: not-allowed;
   }
 

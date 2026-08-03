@@ -71,6 +71,10 @@ export function ScoreBreakdown({ reasons }: ScoreBreakdownProps) {
           {entries.map(([key, value]) => {
             const isNumeric = typeof value === "number";
             const barWidth = isNumeric ? `${Math.min(Math.abs(value), 1) * 100}%` : undefined;
+            // 減点項目（`*_penalty`）は合計から引かれる量を正の数で持つ
+            // （`ranking.py` の `to_reasons`）。バーの長さだけでは加点と区別が
+            // つかないため、色で向きを示す。
+            const isPenalty = key.endsWith("_penalty");
             return (
               <div key={key} className="flex items-center gap-2">
                 {/* 対応表に無いキーはそのまま表示するため、長い英字が来てもバーに
@@ -80,11 +84,16 @@ export function ScoreBreakdown({ reasons }: ScoreBreakdownProps) {
                 </dt>
                 {isNumeric && (
                   <div className="h-1 flex-1 bg-surface-raised">
-                    <div className="h-full bg-accent" style={{ width: barWidth }} />
+                    <div
+                      className={`h-full ${isPenalty ? "bg-danger" : "bg-accent"}`}
+                      style={{ width: barWidth }}
+                    />
                   </div>
                 )}
                 <dd
-                  className={`shrink-0 font-mono text-xs ${isNumeric ? "text-accent" : "text-ink"}`}
+                  className={`shrink-0 font-mono text-xs ${
+                    isNumeric ? (isPenalty ? "text-danger" : "text-accent") : "text-ink"
+                  }`}
                 >
                   {formatReasonValue(value)}
                 </dd>
