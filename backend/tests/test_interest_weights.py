@@ -9,14 +9,20 @@ import pytest
 
 from techradar.db.enums import ArticleOrigin
 from techradar.interest.weights import (
-    DEFAULT_CONFIDENCE,
+    MAX_CONFIDENCE,
+    ConfidenceSettings,
     FeedbackWeights,
+    compute_confidence,
     compute_effective_interest,
     compute_recency_decay,
     explicit_weight_for_origin,
 )
+from techradar.recommendation.config import DEFAULT_CONFIG_PATH, load_scoring_config
 
 WEIGHTS = FeedbackWeights(manual=1.0, good=0.8, save=0.5, read_full=0.2, clicked=0.1, bad=0.8)
+CONFIDENCE_SETTINGS = ConfidenceSettings(
+    has_embedding=0.4, has_topics=0.3, is_analyzed=0.3, min_confidence=0.3
+)
 
 
 class TestComputeRecencyDecay:
@@ -59,13 +65,13 @@ class TestComputeEffectiveInterest:
             explicit_weight=1.0,
             feedback_weight=0.8,
             recency_decay=recent_decay,
-            confidence=DEFAULT_CONFIDENCE,
+            confidence=MAX_CONFIDENCE,
         )
         old = compute_effective_interest(
             explicit_weight=1.0,
             feedback_weight=0.8,
             recency_decay=old_decay,
-            confidence=DEFAULT_CONFIDENCE,
+            confidence=MAX_CONFIDENCE,
         )
 
         # Assert
@@ -79,9 +85,99 @@ class TestComputeEffectiveInterest:
         # Assert
         assert value == pytest.approx(0.5 * 0.8 * 0.25 * 0.9)
 
-    def test_default_confidence_is_one(self):
-        # Arrange / Act / Assert — Issue #20 実装までは常にこの値を使う
-        assert DEFAULT_CONFIDENCE == 1.0
+    def test_lower_confidence_lowers_the_effective_interest(self):
+        # Arrange / Act — 受入基準「effective_interest の計算に confidence が反映される」
+        certain = compute_effective_interest(
+            explicit_weight=1.0, feedback_weight=1.0, recency_decay=1.0, confidence=1.0
+        )
+        uncertain = compute_effective_interest(
+            explicit_weight=1.0, feedback_weight=1.0, recency_decay=1.0, confidence=0.3
+        )
+        # Assert
+        assert uncertain < certain
+
+
+class TestComputeConfidence:
+    """記事のシグナル充足度から確信度を導く（`PROJECT_SPEC.md` §8、Issue #20）。"""
+
+    def test_is_one_when_every_signal_is_present(self):
+        # Arrange / Act
+        confidence = compute_confidence(
+            has_embedding=True, has_topics=True, is_analyzed=True, settings=CONFIDENCE_SETTINGS
+        )
+        # Assert
+        assert confidence == pytest.approx(MAX_CONFIDENCE)
+
+    def test_falls_back_to_the_minimum_when_no_signal_is_present(self):
+        # Arrange / Act — クリックされただけで解析前の記事
+        confidence = compute_confidence(
+            has_embedding=False, has_topics=False, is_analyzed=False, settings=CONFIDENCE_SETTINGS
+        )
+        # Assert — 寄与をゼロにはしない（関心記事であること自体は事実のため）
+        assert confidence == pytest.approx(CONFIDENCE_SETTINGS.min_confidence)
+
+    def test_a_missing_signal_lowers_the_confidence(self):
+        # Arrange / Act
+        full = compute_confidence(
+            has_embedding=True, has_topics=True, is_analyzed=True, settings=CONFIDENCE_SETTINGS
+        )
+        without_embedding = compute_confidence(
+            has_embedding=False, has_topics=True, is_analyzed=True, settings=CONFIDENCE_SETTINGS
+        )
+        # Assert
+        assert without_embedding < full
+        assert without_embedding == pytest.approx(
+            CONFIDENCE_SETTINGS.has_topics + CONFIDENCE_SETTINGS.is_analyzed
+        )
+
+    def test_sums_only_the_satisfied_signals(self):
+        # Arrange / Act
+        confidence = compute_confidence(
+            has_embedding=True, has_topics=False, is_analyzed=True, settings=CONFIDENCE_SETTINGS
+        )
+        # Assert
+        assert confidence == pytest.approx(
+            CONFIDENCE_SETTINGS.has_embedding + CONFIDENCE_SETTINGS.is_analyzed
+        )
+
+    def test_never_exceeds_the_maximum(self):
+        # Arrange — 設定の合計が 1.0 を超えても係数として 1.0 を超えさせない
+        settings = ConfidenceSettings(
+            has_embedding=0.8, has_topics=0.8, is_analyzed=0.8, min_confidence=0.3
+        )
+        # Act
+        confidence = compute_confidence(
+            has_embedding=True, has_topics=True, is_analyzed=True, settings=settings
+        )
+        # Assert
+        assert confidence == pytest.approx(MAX_CONFIDENCE)
+
+
+class TestConfidenceReflectsConfigChanges:
+    """受入基準「各信号の寄与が設定ファイルで管理される」。"""
+
+    def test_changing_min_confidence_in_scoring_yaml_changes_the_floor(self, tmp_path):
+        # Arrange
+        original = DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
+        modified = original.replace("min_confidence: 0.3", "min_confidence: 0.6")
+        assert modified != original
+        path = tmp_path / "scoring.yaml"
+        path.write_text(modified, encoding="utf-8")
+        config = load_scoring_config(path)
+        settings = ConfidenceSettings(
+            has_embedding=config.confidence.has_embedding,
+            has_topics=config.confidence.has_topics,
+            is_analyzed=config.confidence.is_analyzed,
+            min_confidence=config.confidence.min_confidence,
+        )
+
+        # Act
+        confidence = compute_confidence(
+            has_embedding=False, has_topics=False, is_analyzed=False, settings=settings
+        )
+
+        # Assert
+        assert confidence == pytest.approx(0.6)
 
 
 class TestExplicitWeightForOrigin:

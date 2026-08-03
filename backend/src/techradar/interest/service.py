@@ -16,7 +16,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from techradar.db.enums import ArticleOrigin, FeedbackAction
+from techradar.db.enums import ArticleOrigin, FeedbackAction, JobStatus
 from techradar.db.errors import is_unique_violation
 from techradar.db.models import (
     Article,
@@ -37,8 +37,9 @@ from techradar.interest.topics import (
     increase_positive_weight,
 )
 from techradar.interest.weights import (
-    DEFAULT_CONFIDENCE,
+    ConfidenceSettings,
     FeedbackWeights,
+    compute_confidence,
     compute_effective_interest,
     compute_recency_decay,
     explicit_weight_for_origin,
@@ -146,7 +147,12 @@ def load_weighted_interest_articles(
       `age_days` は `now` と記録日時（`user_articles.created_at` /
       `article_feedback.created_at`、user_articles 側優先で下記と同じ規則）
       の差
-    * `confidence`: `DEFAULT_CONFIDENCE`（1.0、実値算出は Issue #20 のスコープ）
+    * `confidence`: `compute_confidence`（`interest/weights.py`）が記事の
+      シグナル充足度（embedding の有無 / topics の有無 / 解析完了の有無）から
+      求める（Issue #20）。クリックされただけで解析前の記事は寄与が下がるが、
+      `confidence.min_confidence` を下限にゼロにはしない。値は `articles` の
+      既存列から毎回導出し、DB へは保存しない（保存すると記事の再解析で
+      古びる二重管理になるため。`docs/decisions.md` 参照）
 
     embedding が無い記事も戻り値には含める（`topics` は既知トピック集合の算出や
     クラスタのラベル付けに使えるため）。embedding が無い記事を対象から外すかどうか
@@ -163,6 +169,12 @@ def load_weighted_interest_articles(
         bad=config.feedback_weights.bad,
     )
     half_life_days = config.interest_decay.half_life_days
+    confidence_settings = ConfidenceSettings(
+        has_embedding=config.confidence.has_embedding,
+        has_topics=config.confidence.has_topics,
+        is_analyzed=config.confidence.is_analyzed,
+        min_confidence=config.confidence.min_confidence,
+    )
 
     user_article_rows = session.execute(
         select(UserArticle.article_id, UserArticle.origin, UserArticle.created_at).where(
@@ -208,7 +220,12 @@ def load_weighted_interest_articles(
             ),
             feedback_weight=_NEUTRAL_FEEDBACK_WEIGHT,
             recency_decay=compute_recency_decay(age_days, half_life_days),
-            confidence=DEFAULT_CONFIDENCE,
+            confidence=compute_confidence(
+                has_embedding=article.embedding is not None,
+                has_topics=bool(article.topics),
+                is_analyzed=article.analysis_status == JobStatus.COMPLETED.value,
+                settings=confidence_settings,
+            ),
         )
         result.append(
             WeightedInterestArticle(
