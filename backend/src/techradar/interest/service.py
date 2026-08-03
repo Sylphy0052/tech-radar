@@ -617,8 +617,12 @@ def update_source_preferences(
     if article is None:
         return
 
+    if action not in _POSITIVE_FEEDBACK_ACTIONS and action is not FeedbackAction.BAD:
+        return
+
     config = get_scoring_config()
     source_domain = article.source_domain
+    current = _current_source_weights(session.get(UserSourcePreference, (user_id, source_domain)))
 
     if action in _POSITIVE_FEEDBACK_ACTIONS:
         increment = (
@@ -626,18 +630,11 @@ def update_source_preferences(
             if action is FeedbackAction.GOOD
             else config.feedback_weights.save
         )
-        current = _current_source_weights(
-            session.get(UserSourcePreference, (user_id, source_domain))
-        )
         updated = sources.increase_positive_weight(current, increment)
         _upsert_source_preference(session, user_id, source_domain, updated, now)
         return
 
-    if action is not FeedbackAction.BAD:
-        return
-
     settings = _source_preference_settings(config)
-    current = _current_source_weights(session.get(UserSourcePreference, (user_id, source_domain)))
     recent_actions = _load_recent_source_actions(
         session, user_id, source_domain, settings.recent_window
     )

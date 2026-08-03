@@ -300,6 +300,26 @@ class SourcePreferenceConfig(BaseModel):
             raise ValueError(message)
         return self
 
+    @model_validator(mode="after")
+    def _validate_neutral_factor_is_reachable(self) -> SourcePreferenceConfig:
+        """係数の範囲が中立（1.0）を含むことを保証する。
+
+        `recommendation/ranking.py` の `compute_source_preference_factor` は
+        選好が無い情報源（`effective_weight` が 0）に対して
+        `clamp(1.0, min_factor, max_factor)` を返す。範囲が 1.0 を含まないと
+        「まだ学習していない情報源のスコアは従来と変わらない」という前提が
+        設定次第で崩れ、全候補の `source_authority` の寄与が一律に増減して
+        しまうため、設定の時点で弾く。
+        """
+        if not (self.min_factor <= 1.0 <= self.max_factor):
+            message = (
+                "min_factor と max_factor の範囲は 1.0（選好なしの中立値）を"
+                f"含む必要があります: min_factor={self.min_factor}, "
+                f"max_factor={self.max_factor}"
+            )
+            raise ValueError(message)
+        return self
+
 
 class BadSimilarityConfig(BaseModel):
     """Bad 記事と意味的に近い記事を抑制する設定（`PROJECT_SPEC.md` §7.2）。"""
