@@ -3,7 +3,16 @@
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { InterestChartCard } from "@/components/features/InterestChartCard";
-import { CHART_ANIMATION_ACTIVE, CHART_AXIS, CHART_GRID, CHART_SERIES, CHART_STATUS } from "@/lib/chart-colors";
+import {
+  CHART_ANIMATION_ACTIVE,
+  CHART_AXIS,
+  CHART_GRID,
+  CHART_SERIES,
+  CHART_STATUS,
+  CHART_TICK_FILL,
+  CHART_TOOLTIP_CONTENT_STYLE,
+  CHART_TOOLTIP_LABEL_STYLE,
+} from "@/lib/chart-colors";
 import { formatWeekLabel } from "@/lib/interests";
 import type { InterestTimelineBucket } from "@/lib/interests";
 
@@ -48,9 +57,9 @@ export function InterestTimelineChart({ buckets }: InterestTimelineChartProps) {
       <ResponsiveContainer width="100%" height={280}>
         <LineChart data={rows}>
           <CartesianGrid stroke={CHART_GRID} vertical={false} />
-          <XAxis dataKey="week" stroke={CHART_AXIS} tick={{ fontSize: 12 }} />
-          <YAxis stroke={CHART_AXIS} allowDecimals={false} />
-          <Tooltip />
+          <XAxis dataKey="week" stroke={CHART_AXIS} tick={{ fontSize: 12, fill: CHART_TICK_FILL }} />
+          <YAxis stroke={CHART_AXIS} allowDecimals={false} tick={{ fill: CHART_TICK_FILL }} />
+          <Tooltip contentStyle={CHART_TOOLTIP_CONTENT_STYLE} labelStyle={CHART_TOOLTIP_LABEL_STYLE} />
           <Legend />
           <Line
             type="monotone"

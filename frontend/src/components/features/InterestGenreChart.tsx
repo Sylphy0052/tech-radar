@@ -3,7 +3,15 @@
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { InterestChartCard } from "@/components/features/InterestChartCard";
-import { CHART_ANIMATION_ACTIVE, CHART_AXIS, CHART_GRID, CHART_STATUS } from "@/lib/chart-colors";
+import {
+  CHART_ANIMATION_ACTIVE,
+  CHART_AXIS,
+  CHART_GRID,
+  CHART_STATUS,
+  CHART_TICK_FILL,
+  CHART_TOOLTIP_CONTENT_STYLE,
+  CHART_TOOLTIP_LABEL_STYLE,
+} from "@/lib/chart-colors";
 import { formatNullableLabel } from "@/lib/interests";
 import type { InterestGenreItem } from "@/lib/interests";
 
@@ -50,9 +58,15 @@ export function InterestGenreChart({ genres }: InterestGenreChartProps) {
       <ResponsiveContainer width="100%" height={height}>
         <BarChart data={rows} layout="vertical" margin={{ left: 16, right: 16 }}>
           <CartesianGrid stroke={CHART_GRID} horizontal={false} />
-          <XAxis type="number" stroke={CHART_AXIS} allowDecimals={false} />
-          <YAxis type="category" dataKey="domain" stroke={CHART_AXIS} width={120} tick={{ fontSize: 12 }} />
-          <Tooltip />
+          <XAxis type="number" stroke={CHART_AXIS} allowDecimals={false} tick={{ fill: CHART_TICK_FILL }} />
+          <YAxis
+            type="category"
+            dataKey="domain"
+            stroke={CHART_AXIS}
+            width={120}
+            tick={{ fontSize: 12, fill: CHART_TICK_FILL }}
+          />
+          <Tooltip contentStyle={CHART_TOOLTIP_CONTENT_STYLE} labelStyle={CHART_TOOLTIP_LABEL_STYLE} />
           <Legend />
           <Bar
             dataKey="positiveCount"

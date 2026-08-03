@@ -38,7 +38,7 @@ describe("Home", () => {
     render(<Home />);
 
     // Assert
-    expect(screen.getByRole("link", { name: "関心記事一覧を見る" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /関心記事一覧を見る/ })).toHaveAttribute(
       "href",
       "/articles",
     );
@@ -55,6 +55,9 @@ describe("Home", () => {
     render(<Home />);
 
     // Assert
-    expect(screen.getByRole("link", { name: "関心分析を見る" })).toHaveAttribute("href", "/interests");
+    expect(screen.getByRole("link", { name: /関心分析を見る/ })).toHaveAttribute(
+      "href",
+      "/interests",
+    );
   });
 });

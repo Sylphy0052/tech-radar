@@ -31,8 +31,10 @@ const REASON_FIELD_LABELS: Record<string, string> = {
   technical_quality_contribution: "技術的な質の寄与",
   novelty_contribution: "新規性の寄与",
   bad_penalty: "Bad済みの減点",
+  bad_similarity_penalty: "Bad記事との近さの減点",
   duplicate_penalty: "重複の減点",
   read_penalty: "既読の減点",
+  source_preference_factor: "情報源の選好係数",
   total: "合計スコア",
 };
 
@@ -60,20 +62,44 @@ export function ScoreBreakdown({ reasons }: ScoreBreakdownProps) {
         aria-expanded={isExpanded}
         aria-controls={listId}
         onClick={() => setIsExpanded((current) => !current)}
-        className="self-start text-xs text-zinc-500 underline dark:text-zinc-400"
+        className="self-start font-mono text-xs tracking-wide text-ink-subtle underline underline-offset-2 hover:text-accent-strong"
       >
         {isExpanded ? "スコア内訳を閉じる" : "スコア内訳を見る"}
       </button>
       {isExpanded && (
-        <dl id={listId} className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-          {entries.map(([key, value]) => (
-            <div key={key} className="contents">
-              <dt className="text-zinc-500 dark:text-zinc-400">
-                {REASON_FIELD_LABELS[key] ?? key}
-              </dt>
-              <dd>{formatReasonValue(value)}</dd>
-            </div>
-          ))}
+        <dl id={listId} className="flex flex-col gap-1.5">
+          {entries.map(([key, value]) => {
+            const isNumeric = typeof value === "number";
+            const barWidth = isNumeric ? `${Math.min(Math.abs(value), 1) * 100}%` : undefined;
+            // 減点項目（`*_penalty`）は合計から引かれる量を正の数で持つ
+            // （`ranking.py` の `to_reasons`）。バーの長さだけでは加点と区別が
+            // つかないため、色で向きを示す。
+            const isPenalty = key.endsWith("_penalty");
+            return (
+              <div key={key} className="flex items-center gap-2">
+                {/* 対応表に無いキーはそのまま表示するため、長い英字が来てもバーに
+                    重ならないよう幅を固定したうえで省略する。 */}
+                <dt className="mono-label w-40 shrink-0 truncate" title={key}>
+                  {REASON_FIELD_LABELS[key] ?? key}
+                </dt>
+                {isNumeric && (
+                  <div className="h-1 flex-1 bg-surface-raised">
+                    <div
+                      className={`h-full ${isPenalty ? "bg-danger" : "bg-accent"}`}
+                      style={{ width: barWidth }}
+                    />
+                  </div>
+                )}
+                <dd
+                  className={`shrink-0 font-mono text-xs ${
+                    isNumeric ? (isPenalty ? "text-danger" : "text-accent") : "text-ink"
+                  }`}
+                >
+                  {formatReasonValue(value)}
+                </dd>
+              </div>
+            );
+          })}
         </dl>
       )}
     </div>
