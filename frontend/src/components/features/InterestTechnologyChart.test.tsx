@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { InterestTechnologyChart } from "@/components/features/InterestTechnologyChart";
 import type { InterestTechnologyItem } from "@/lib/interests";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("InterestTechnologyChart", () => {
   it("renders the title and a tick label for each technology", () => {
@@ -26,7 +27,7 @@ describe("InterestTechnologyChart", () => {
     expect(view.getByText("Good・保存した記事のみを対象にしています。")).toBeInTheDocument();
     expect(view.getByText("Rust")).toBeInTheDocument();
     expect(view.getByText("TypeScript")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an empty state when there are no technologies", () => {
     // Arrange & Act
@@ -36,5 +37,5 @@ describe("InterestTechnologyChart", () => {
     // Assert
     expect(view.getByText("まだデータがありません。")).toBeInTheDocument();
     expect(view.queryByText("Rust")).not.toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 });

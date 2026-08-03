@@ -57,11 +57,6 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const itemsRef = useRef<InterestArticleItem[]>(items);
-  useEffect(() => {
-    itemsRef.current = items;
-  }, [items]);
-
   const isLoadingMoreRef = useRef(false);
 
   // 送信中（pending）の article_id 集合。連打で二重に DELETE を送らないためのガード
@@ -94,7 +89,7 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
     setError(null);
   }
 
-  // `loadMore` 発行時点の filterKey を捕捉するための最新値 ref（`itemsRef` と同じ狙い）。
+  // `loadMore` 発行時点の filterKey を捕捉するための最新値 ref。
   // フィルターが切り替わった後に旧フィルターの loadMore レスポンスが解決しても、
   // このref越しに世代のずれを検出して破棄できるようにする。
   const filterKeyRef = useRef(filterKey);
@@ -169,42 +164,45 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
       });
   }, [nextCursor, filters]);
 
-  const removeArticle = useCallback((articleId: string) => {
-    if (pendingArticleIdsRef.current.has(articleId)) {
-      return;
-    }
+  const removeArticle = useCallback(
+    (articleId: string) => {
+      if (pendingArticleIdsRef.current.has(articleId)) {
+        return;
+      }
 
-    const index = itemsRef.current.findIndex((item) => item.article_id === articleId);
-    if (index === -1) {
-      return;
-    }
-    const removedItem = itemsRef.current[index];
+      const index = items.findIndex((item) => item.article_id === articleId);
+      if (index === -1) {
+        return;
+      }
+      const removedItem = items[index];
 
-    setItems((current) => withoutArticle(current, articleId));
-    pendingArticleIdsRef.current.add(articleId);
+      setItems((current) => withoutArticle(current, articleId));
+      pendingArticleIdsRef.current.add(articleId);
 
-    deleteInterestArticle(articleId)
-      .then(() => {
-        if (!isMountedRef.current) {
-          return;
-        }
-        setError(null);
-      })
-      .catch((err: unknown) => {
-        if (!isMountedRef.current) {
-          return;
-        }
-        setItems((current) => {
-          const restored = [...current];
-          restored.splice(index, 0, removedItem);
-          return restored;
+      deleteInterestArticle(articleId)
+        .then(() => {
+          if (!isMountedRef.current) {
+            return;
+          }
+          setError(null);
+        })
+        .catch((err: unknown) => {
+          if (!isMountedRef.current) {
+            return;
+          }
+          setItems((current) => {
+            const restored = [...current];
+            restored.splice(index, 0, removedItem);
+            return restored;
+          });
+          setError(getRequestErrorMessage(err));
+        })
+        .finally(() => {
+          pendingArticleIdsRef.current.delete(articleId);
         });
-        setError(getRequestErrorMessage(err));
-      })
-      .finally(() => {
-        pendingArticleIdsRef.current.delete(articleId);
-      });
-  }, []);
+    },
+    [items],
+  );
 
   return {
     items,

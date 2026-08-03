@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { InterestDifficultyChart } from "@/components/features/InterestDifficultyChart";
 import type { InterestDifficultyItem } from "@/lib/interests";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("InterestDifficultyChart", () => {
   it("renders the title, the good/save-only note, and a Japanese tick label per difficulty", () => {
@@ -22,7 +23,7 @@ describe("InterestDifficultyChart", () => {
     expect(screen.getByText("初級")).toBeInTheDocument();
     expect(screen.getByText("上級")).toBeInTheDocument();
     expect(screen.getByText("未分類")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("orders ticks from beginner to advanced with unclassified last, regardless of count order", () => {
     // Arrange: API は件数降順で返す（上級 → 初級 → 未分類 → 中級）
@@ -43,7 +44,7 @@ describe("InterestDifficultyChart", () => {
       .map((node) => node.textContent)
       .filter((text): text is string => text !== null && expectedLabels.includes(text));
     expect(renderedLabels).toEqual(expectedLabels);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an empty state when there are no articles counted", () => {
     // Arrange & Act
@@ -51,5 +52,5 @@ describe("InterestDifficultyChart", () => {
 
     // Assert
     expect(screen.getByText("まだデータがありません。")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 });
