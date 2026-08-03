@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DiscoverFeed } from "@/components/features/DiscoverFeed";
@@ -67,16 +67,39 @@ function triggerIntersection(isIntersecting: boolean): void {
   if (!instance) {
     throw new Error(
       "IntersectionObserver が未生成のまま通知しようとした。" +
-        "observer が張られるまで待ってから呼ぶこと（waitFor で instances を待つ）。",
+        "呼ぶ前に await waitForObserver() で observer が張られるのを待つこと。",
     );
   }
   instance.callback([{ isIntersecting }]);
 }
 
 /** observer が張られるまで待つ。`triggerIntersection` の前提を満たすために使う。 */
-async function waitForObserver(count = 1): Promise<void> {
-  await waitFor(() => expect(MockIntersectionObserver.instances).toHaveLength(count));
+async function waitForObserver(): Promise<void> {
+  await waitFor(() => expect(MockIntersectionObserver.instances).toHaveLength(1));
 }
+
+/**
+ * このファイルの `waitFor` の持ち時間。
+ *
+ * 既定の 1 秒は、テストファイル並列実行で CPU が奪われているときに
+ * 「fetch のモックが解決 → state 更新 → 再レンダー」までを賄えないことがある
+ * （Issue #29, #30, #35 の失敗はいずれもこの形）。個々の `waitFor` へ都度
+ * 指定すると、付け忘れた待機だけが脆いまま残るため、ファイル単位で引き上げる。
+ */
+const WAIT_TIMEOUT_MS = 5_000;
+
+/**
+ * 上の待機を使うテストへ与える持ち時間。
+ *
+ * vitest の既定（5000ms）のままだと `WAIT_TIMEOUT_MS` と並んでしまい、待ち切る
+ * 前にテスト側が先にタイムアウトする（Issue #35）。待機が本当に失敗したときに、
+ * タイムアウトではなく assert の失敗として原因が読める形にするため引き上げる。
+ * グローバル設定（`vitest.config.mts`）は変えない。他のテストが実際にハング
+ * したときの検出まで一律に遅くなるため。
+ */
+const TEST_TIMEOUT_MS = 20_000;
+
+configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
 beforeEach(() => {
   MockIntersectionObserver.instances = [];
@@ -133,7 +156,8 @@ describe("DiscoverFeed", () => {
     render(<DiscoverFeed />);
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
     // 記事の描画（DOM の変化）と observer を張る effect の実行順は保証されないため、
-    // observer が張られるまで待ってから通知する（未生成だと通知が握り潰される）。
+    // observer が張られるまで待ってから通知する（未生成のまま呼ぶと
+    // `triggerIntersection` が例外を投げる）。
     await waitForObserver();
 
     // Act — センチネルが可視になったことを通知する
@@ -269,15 +293,13 @@ describe("DiscoverFeed", () => {
     render(<DiscoverFeed />);
 
     // Assert — 一時的な制限を「記事が無い」と誤って伝えない
-    await waitFor(
-      () =>
-        expect(
-          screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
-        ).toBeInTheDocument(),
-      { timeout: 5_000 },
+    await waitFor(() =>
+      expect(
+        screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
+      ).toBeInTheDocument(),
     );
     expect(screen.queryByText("表示できる記事がありません。")).not.toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("stops loading more pages while the sentinel keeps intersecting after a 429", async () => {
     // Arrange
@@ -295,7 +317,8 @@ describe("DiscoverFeed", () => {
     // 429 のあと `useFeed` は残り時間を計算し直してメッセージを出す
     // （`rateLimitedUntilRef - Date.now()`）。実時間で 1 秒以上経つと文言が
     // 「約29秒後」へ変わり、負荷の高い環境でだけ検証が崩れるため時計を止める。
-    // 実タイマー（`waitFor` の待機）には影響しない。
+    // `waitFor` のポーリングと打ち切りは setTimeout / MutationObserver で動いて
+    // おり `Date.now` を見ないため、完全に固定しても待機は壊れない。
     vi.spyOn(Date, "now").mockReturnValue(new Date("2026-08-03T00:00:00Z").getTime());
     render(<DiscoverFeed />);
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
@@ -307,15 +330,10 @@ describe("DiscoverFeed", () => {
     act(() => {
       triggerIntersection(true);
     });
-    await waitFor(
-      () =>
-        expect(
-          screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
-        ).toBeInTheDocument(),
-      // 既定の 1 秒では、テストファイル並列実行で負荷が高いときに間に合わない
-      // ことがある。テスト全体の持ち時間（vitest.config.mts の testTimeout）は
-      // これより長く取ってあるため、待ち切る前にテスト側が落ちることはない。
-      { timeout: 5_000 },
+    await waitFor(() =>
+      expect(
+        screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
+      ).toBeInTheDocument(),
     );
     const callCountAfterRateLimit = fetchMock.mock.calls.length;
     act(() => {
@@ -328,7 +346,7 @@ describe("DiscoverFeed", () => {
     expect(
       screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
     ).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("marks the Good button as pressed optimistically when clicked", async () => {
     // Arrange
@@ -351,5 +369,5 @@ describe("DiscoverFeed", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Good" })).toHaveAttribute("aria-pressed", "true"),
     );
-  });
+  }, TEST_TIMEOUT_MS);
 });
