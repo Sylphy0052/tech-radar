@@ -34,6 +34,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/articles/bulk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bulk Import Article Registrations
+         * @description URL リストファイルをアップロードし、行ごとに URL を抽出して一括登録する（Issue #39）。
+         *
+         *     1件でも不正な行があっても全体を拒否せず、抽出できた URL をファイル内の出現順に
+         *     処理する。ファイルサイズ・抽出後の URL 件数が上限を超える場合は DB を一切
+         *     変更せず 413 を返す（`_read_upload_within_limit` / 抽出後件数チェックのどちらも、
+         *     行ごとの DB 処理を始める前に完了させることで担保する）。
+         */
+        post: operations["bulk_import_article_registrations_api_articles_bulk_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/articles/registrations/{registration_id}": {
         parameters: {
             query?: never;
@@ -522,6 +547,42 @@ export interface components {
          * @enum {string}
          */
         BadReason: "not_interested" | "too_shallow" | "already_known" | "promotional" | "untrusted_source" | "too_repetitive";
+        /** Body_bulk_import_article_registrations_api_articles_bulk_post */
+        Body_bulk_import_article_registrations_api_articles_bulk_post: {
+            /**
+             * File
+             * @description URLリストファイル（.md / .txt、UTF-8）
+             */
+            file: string;
+        };
+        /**
+         * BulkArticleImportResponse
+         * @description URL リストファイルの一括登録結果（`POST /api/articles/bulk`）。
+         */
+        BulkArticleImportResponse: {
+            /** Created */
+            created: components["schemas"]["ArticleRegistrationResponse"][];
+            /** Created Count */
+            created_count: number;
+            /** Duplicate Count */
+            duplicate_count: number;
+            /** Error Count */
+            error_count: number;
+            /** Errors */
+            errors: components["schemas"]["BulkImportErrorItem"][];
+        };
+        /**
+         * BulkImportErrorItem
+         * @description 一括登録でエラーとして扱った行の情報。
+         */
+        BulkImportErrorItem: {
+            /** Line */
+            line: string;
+            /** Line Number */
+            line_number: number;
+            /** Reason */
+            reason: string;
+        };
         /**
          * CrawlRunCreate
          * @description 巡回ジョブの起動リクエスト。省略可能。
@@ -1086,6 +1147,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ArticleRegistrationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bulk_import_article_registrations_api_articles_bulk_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_bulk_import_article_registrations_api_articles_bulk_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkArticleImportResponse"];
                 };
             };
             /** @description Validation Error */

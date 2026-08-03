@@ -68,9 +68,18 @@ function parseRetryAfterSeconds(header: string | null): number | null {
 }
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  // body が FormData（一括インポート等の multipart/form-data 送信）の場合、
+  // Content-Type は付けない。ブラウザが boundary 付きの値を自動設定するため、
+  // ここで application/json を既定値として付けてしまうと backend が
+  // multipart として解釈できなくなる。init?.headers による明示的な上書きは
+  // 従来どおり優先する。
+  const isFormDataBody = init?.body instanceof FormData;
+  const defaultHeaders: Record<string, string> = isFormDataBody
+    ? {}
+    : { "Content-Type": "application/json" };
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: { ...defaultHeaders, ...init?.headers },
   });
 
   if (!response.ok) {
