@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from techradar.db.enums import ArticleOrigin, FeedbackAction
+from techradar.db.enums import ArticleOrigin, FeedbackAction, JobStatus
 from techradar.db.models import (
     Article,
     ArticleFeedback,
@@ -50,6 +50,7 @@ def make_article(
     topics: Sequence[str] = (),
     embedding: list[float] | None = None,
     source_domain: str = "example.com",
+    analysis_status: str | None = JobStatus.COMPLETED.value,
 ) -> Article:
     canonical_url = f"https://{source_domain}/{uuid.uuid4().hex[:10]}"
     article = Article(
@@ -59,6 +60,7 @@ def make_article(
         source_domain=source_domain,
         topics=list(topics),
         embedding=embedding,
+        analysis_status=analysis_status,
         fetched_at=NOW,
     )
     session.add(article)
@@ -440,6 +442,65 @@ class TestLoadWeightedInterestArticles:
         records = load_weighted_interest_articles(db_session, uuid.uuid4(), NOW)
         # Assert
         assert records == ()
+
+
+class TestLoadWeightedInterestArticlesConfidence:
+    """受入基準「`effective_interest` の計算に confidence が反映される」（Issue #20）。"""
+
+    def test_an_unanalyzed_article_weighs_less_than_a_fully_analyzed_one(
+        self, db_session: Session
+    ) -> None:
+        # Arrange — 同じ経路（手動登録）・同じ日時で、シグナルの充足度だけが違う 2 件
+        user_id = uuid.uuid4()
+        analyzed = make_article(
+            db_session, title="解析済み", topics=["llm"], embedding=make_embedding(0)
+        )
+        add_user_article(db_session, user_id, analyzed, ArticleOrigin.MANUAL)
+        unanalyzed = make_article(
+            db_session,
+            title="クリックされただけ",
+            topics=[],
+            embedding=None,
+            analysis_status=JobStatus.PENDING.value,
+        )
+        add_user_article(db_session, user_id, unanalyzed, ArticleOrigin.MANUAL)
+
+        # Act
+        records = load_weighted_interest_articles(db_session, user_id, NOW)
+        weight_by_topics = {record.topics: record.weight for record in records}
+
+        # Assert
+        assert weight_by_topics[("llm",)] > weight_by_topics[()]
+
+    def test_keeps_a_positive_weight_even_without_any_signal(self, db_session: Session) -> None:
+        # Arrange — 寄与をゼロにはしない（min_confidence の下限が効く）
+        user_id = uuid.uuid4()
+        article = make_article(
+            db_session, topics=[], embedding=None, analysis_status=JobStatus.PENDING.value
+        )
+        add_user_article(db_session, user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        records = load_weighted_interest_articles(db_session, user_id, NOW)
+
+        # Assert
+        assert len(records) == 1
+        assert records[0].weight > 0.0
+
+    def test_a_fully_analyzed_article_uses_the_maximum_confidence(
+        self, db_session: Session
+    ) -> None:
+        # Arrange — 全シグナルが揃った記事は confidence による減衰を受けない
+        user_id = uuid.uuid4()
+        article = make_article(db_session, topics=["llm"], embedding=make_embedding(0))
+        add_user_article(db_session, user_id, article, ArticleOrigin.MANUAL)
+        config = get_scoring_config()
+
+        # Act
+        records = load_weighted_interest_articles(db_session, user_id, NOW)
+
+        # Assert — explicit_weight（manual=1.0）× recency_decay（当日=1.0）そのもの
+        assert records[0].weight == pytest.approx(config.feedback_weights.manual)
 
 
 class TestRebuildInterestClusters:

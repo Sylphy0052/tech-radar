@@ -75,6 +75,11 @@ feedback_weights:
   bad: 0.8
 interest_decay:
   half_life_days: 30
+confidence:
+  has_embedding: 0.4
+  has_topics: 0.3
+  is_analyzed: 0.3
+  min_confidence: 0.3
 topic_preference:
   recent_window: 5
   bad_threshold: 3
@@ -266,6 +271,32 @@ class TestLoading:
         assert config.topic_preference.recent_window == 5
         assert config.topic_preference.bad_threshold == 3
         assert config.topic_preference.decay_step == 0.2
+
+    def test_loads_the_bundled_confidence(self, config: ScoringConfig):
+        # Arrange / Act / Assert — 記事シグナルの充足度（Issue #20）
+        assert config.confidence.has_embedding == 0.4
+        assert config.confidence.has_topics == 0.3
+        assert config.confidence.is_analyzed == 0.3
+        assert config.confidence.min_confidence == 0.3
+
+    def test_rejects_confidence_signals_that_do_not_sum_to_one(self, tmp_path: Path):
+        # Arrange — 全シグナルが揃った記事の confidence が 1.0 にならない設定は弾く
+        broken = VALID_YAML.replace("has_embedding: 0.4", "has_embedding: 0.9")
+        path = write_config(tmp_path, broken)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="confidence"):
+            load_scoring_config(path)
+
+    def test_rejects_a_min_confidence_above_the_smallest_signal(self, tmp_path: Path):
+        # Arrange — 下限が個々のシグナルより大きいと、シグナル 1 つの記事と
+        # 0 個の記事の confidence が同じ値に潰れる
+        broken = VALID_YAML.replace("min_confidence: 0.3", "min_confidence: 0.35")
+        path = write_config(tmp_path, broken)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="min_confidence"):
+            load_scoring_config(path)
 
     def test_loads_the_bundled_source_preference(self, config: ScoringConfig):
         # Arrange / Act / Assert — 情報源選好は専用セクションで管理する（Issue #34）

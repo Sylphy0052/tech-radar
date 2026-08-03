@@ -842,3 +842,190 @@ class TestRunLimits:
         assert len(provider.calls) == 1
         # 上限到達後に判定されなかった候補は安全側（重複）として扱われる
         assert candidates[-1].duplicate_of_article_id == official.id
+
+
+class TestNewsEventId:
+    """同一ニュースイベントのクラスタ ID（`PROJECT_SPEC.md` §17、Issue #20）。"""
+
+    def test_groups_duplicate_articles_under_the_same_news_event_id(self, db_session: Session):
+        # Arrange — 受入基準: 同一ニュースの複数記事が同じクラスタ ID でまとまる
+        shared_body_hash = "identical-content-hash"
+        official = make_article(
+            db_session, title="記事A", source_authority=0.9, body_hash=shared_body_hash
+        )
+        mirror = make_article(
+            db_session, title="記事B", source_authority=0.3, body_hash=shared_body_hash
+        )
+        provider = FakeLLMProvider(DUMMY_LLM_RESPONSE)
+
+        # Act
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert
+        assert official.news_event_id is not None
+        assert mirror.news_event_id == official.news_event_id
+
+    def test_keeps_a_unique_value_article_in_the_same_news_event(self, db_session: Session):
+        # Arrange — 独自価値ありと判定された記事は duplicate_of_article_id が
+        # 付かない（別記事として残す）が、同一ニュースである事実は残す
+        official = make_article(
+            db_session,
+            title="新製品について解説する記事",
+            canonical_url="https://official.example/post",
+            source_authority=0.9,
+            body="公式発表の内容をそのまま紹介する記事。",
+        )
+        analysis = make_article(
+            db_session,
+            title="新製品について解説する記事",
+            canonical_url="https://blogger.example/analysis",
+            source_authority=0.65,
+            content_type=ContentType.IMPLEMENTATION,
+            technical_quality=0.85,
+            body="実際に触って独自に計測したベンチマーク結果とコードを掲載する記事。",
+        )
+        provider = FakeLLMProvider(
+            [{"has_unique_value": True, "reason": "独自のベンチマーク結果とコードがある"}]
+        )
+
+        # Act
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert
+        assert analysis.duplicate_of_article_id is None
+        assert analysis.news_event_id is not None
+        assert analysis.news_event_id == official.news_event_id
+
+    def test_does_not_assign_an_id_to_a_standalone_article(self, db_session: Session):
+        # Arrange — 単独記事はニュースイベントを構成しない
+        article = make_article(db_session, title="単独記事")
+        provider = FakeLLMProvider(DUMMY_LLM_RESPONSE)
+
+        # Act
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert
+        assert article.news_event_id is None
+
+    def test_keeps_the_same_id_across_reruns(self, db_session: Session):
+        # Arrange — 再実行のたびに ID が振り直されると、外部から参照できない
+        shared_body_hash = "identical-content-hash"
+        official = make_article(
+            db_session, title="記事A", source_authority=0.9, body_hash=shared_body_hash
+        )
+        mirror = make_article(
+            db_session, title="記事B", source_authority=0.3, body_hash=shared_body_hash
+        )
+        provider = FakeLLMProvider(DUMMY_LLM_RESPONSE)
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+        first_id = official.news_event_id
+
+        # Act
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert
+        assert official.news_event_id == first_id
+        assert mirror.news_event_id == first_id
+
+    def test_reuses_the_existing_id_when_a_new_article_joins_the_event(self, db_session: Session):
+        # Arrange — 既にイベント ID を持つクラスタへ後から記事が加わっても、
+        # 既存の ID を引き継ぐ（後続記事のために ID が変わらない）
+        shared_body_hash = "identical-content-hash"
+        official = make_article(
+            db_session, title="記事A", source_authority=0.9, body_hash=shared_body_hash
+        )
+        make_article(db_session, title="記事B", source_authority=0.3, body_hash=shared_body_hash)
+        provider = FakeLLMProvider(DUMMY_LLM_RESPONSE)
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+        existing_id = official.news_event_id
+
+        # Act — 同じ本文ハッシュの記事を追加して再実行する
+        latecomer = make_article(
+            db_session, title="記事C", source_authority=0.2, body_hash=shared_body_hash
+        )
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert
+        assert latecomer.news_event_id == existing_id
+        assert official.news_event_id == existing_id
+
+
+class TestNewsEventIdClusterChanges:
+    """クラスタの併合・分裂・縮小で ID がどうなるかを固定する（Issue #20 自己レビュー）。"""
+
+    def test_merges_two_events_into_the_smallest_existing_id(self, db_session: Session):
+        # Arrange — 別々のイベントとして ID が確定した 2 クラスタを作る
+        provider = FakeLLMProvider(DUMMY_LLM_RESPONSE)
+        first_pair = [
+            make_article(db_session, title=f"イベント1-{index}", body_hash="hash-event-1")
+            for index in range(2)
+        ]
+        second_pair = [
+            make_article(db_session, title=f"イベント2-{index}", body_hash="hash-event-2")
+            for index in range(2)
+        ]
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+        first_id = first_pair[0].news_event_id
+        second_id = second_pair[0].news_event_id
+        assert first_id is not None
+        assert second_id is not None
+        assert first_id != second_id
+
+        # Act — 2 つ目のクラスタの本文ハッシュを 1 つ目と同じにして連結させる
+        for article in second_pair:
+            article.body_hash = "hash-event-1"
+        db_session.flush()
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert — 全員が同じ ID になり、選ばれるのは小さい方（実行順に依存しない）
+        merged_ids = {article.news_event_id for article in (*first_pair, *second_pair)}
+        assert merged_ids == {min(first_id, second_id)}
+
+    def test_splits_into_distinct_ids_instead_of_reusing_one_for_both(self, db_session: Session):
+        # Arrange — 4 記事が 1 イベントとしてまとまった状態を作る
+        provider = FakeLLMProvider(DUMMY_LLM_RESPONSE)
+        articles = [
+            make_article(db_session, title=f"記事{index}", body_hash="hash-shared")
+            for index in range(4)
+        ]
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+        original_id = articles[0].news_event_id
+        assert original_id is not None
+        assert {article.news_event_id for article in articles} == {original_id}
+
+        # Act — 本文が更新されて 2 記事の body_hash が変わり、クラスタが分裂する
+        for article in articles[2:]:
+            article.body_hash = "hash-split"
+        db_session.flush()
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+
+        # Assert — 分裂後の 2 つのイベントが同じ ID を共有しない
+        left_ids = {article.news_event_id for article in articles[:2]}
+        right_ids = {article.news_event_id for article in articles[2:]}
+        assert len(left_ids) == 1
+        assert len(right_ids) == 1
+        assert left_ids != right_ids
+        assert original_id in (left_ids | right_ids)
+
+    def test_clears_the_id_when_the_event_shrinks_to_a_single_article(self, db_session: Session):
+        # Arrange — 2 記事のイベントを作る。片方は対象期間の外に置ける古さにする
+        provider = FakeLLMProvider(DUMMY_LLM_RESPONSE)
+        now = datetime.now(UTC)
+        recent = make_article(
+            db_session, title="新しい方", body_hash="hash-shrink", published_at=now
+        )
+        old = make_article(
+            db_session,
+            title="古い方",
+            body_hash="hash-shrink",
+            published_at=now - timedelta(days=5),
+        )
+        deduplicate_articles(db_session, provider, sleep=no_sleep)
+        assert recent.news_event_id is not None
+        assert old.news_event_id == recent.news_event_id
+
+        # Act — ルックバック窓を狭め、古い方を対象外にして再実行する
+        deduplicate_articles(db_session, provider, since=now - timedelta(days=1), sleep=no_sleep)
+
+        # Assert — 束ねる相手が居なくなった記事の ID は外れる
+        assert recent.news_event_id is None

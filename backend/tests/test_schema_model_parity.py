@@ -159,6 +159,10 @@ ARTICLE_SPEC = ModelParitySpec(
         "analysis_status": "記事解析パイプラインの内部進行状態",
         "duplicate_of_article_id": "重複記事クラスタリングの内部参照、API未公開",
         "duplicate_penalty": "重複記事の推薦スコア減点、内部スコアリング専用",
+        "news_event_id": (
+            "同一ニュースイベントのクラスタID（Issue #20）。重複判定の内部識別子であり、"
+            "APIでの公開は後続Issueで判断する"
+        ),
         "unique_value_judged_body_hash": "独自価値判定要否判定用の内部キャッシュキー",
         "has_unique_value": "独自価値判定結果は推薦スコアリング内部でのみ使用、API未公開",
     },
