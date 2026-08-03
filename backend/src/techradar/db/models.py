@@ -96,6 +96,13 @@ class Article(Base):
     )
     # 重複と判定された記事の推薦スコアを下げるための減点。代表記事は 0。
     duplicate_penalty: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    # 同一ニュースイベントのクラスタ ID（`PROJECT_SPEC.md` §17、Issue #20）。
+    # `duplicate_of_article_id` が「どの代表記事の重複か」を表すのに対し、こちらは
+    # 「どの出来事についての記事か」を表す。独自価値ありと判定されて別記事として
+    # 残した記事（`duplicate_of_article_id` が NULL）も同じ ID を持つため、重複には
+    # 畳まないが同一ニュースではある記事同士を後から辿れる。単独記事（同一イベント
+    # の記事が他に無い記事）は NULL。
+    news_event_id: Mapped[uuid.UUID | None] = mapped_column()
     # 独自価値判定 (LLM) を行った時点の body_hash。本文が更新されたら
     # 判定し直すために使う（analyzed_body_hash / embedding_body_hash と同じ役割）。
     unique_value_judged_body_hash: Mapped[str | None] = mapped_column(String(64))
@@ -111,6 +118,8 @@ class Article(Base):
         Index("ix_articles_source_domain", "source_domain"),
         # クラスタ単位の取得と、代表記事（IS NULL）だけを絞り込む用途で使う。
         Index("ix_articles_duplicate_of_article_id", "duplicate_of_article_id"),
+        # 同一ニュースイベントの記事をまとめて引く用途で使う（Issue #20）。
+        Index("ix_articles_news_event_id", "news_event_id"),
         # 近傍検索。コサイン距離で使うため vector_cosine_ops を指定する。
         Index(
             "ix_articles_embedding_hnsw",

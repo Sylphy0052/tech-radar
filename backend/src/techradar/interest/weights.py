@@ -13,9 +13,26 @@ from dataclasses import dataclass
 
 from techradar.db.enums import ArticleOrigin
 
-# 確信度（confidence）の実値算出は Issue #20 のスコープ。本 Issue（#15 段階 1）では
-# 未実装のため、常にこの既定値（＝確信度による補正なし）を渡す。
-DEFAULT_CONFIDENCE = 1.0
+# 確信度（confidence）の上限。全てのシグナルが揃った記事は補正を受けない。
+MAX_CONFIDENCE = 1.0
+
+
+@dataclass(frozen=True)
+class ConfidenceSettings:
+    """確信度の各シグナルの寄与（`config.ScoringConfig.confidence` 相当）。
+
+    3 つのシグナルの寄与の合計が `MAX_CONFIDENCE`（1.0）になるよう設定側で
+    検証する（`recommendation/config.py` の `ConfidenceConfig`）。
+    """
+
+    # embedding があるときの寄与。
+    has_embedding: float
+    # topics があるときの寄与。
+    has_topics: float
+    # 解析が完了しているときの寄与。
+    is_analyzed: float
+    # 全てのシグナルが欠けていても下回らない下限。
+    min_confidence: float
 
 
 @dataclass(frozen=True)
@@ -56,6 +73,40 @@ def compute_recency_decay(age_days: float, half_life_days: float) -> float:
     if age_days <= 0.0:
         return 1.0
     return 0.5 ** (age_days / half_life_days)
+
+
+def compute_confidence(
+    *,
+    has_embedding: bool,
+    has_topics: bool,
+    is_analyzed: bool,
+    settings: ConfidenceSettings,
+) -> float:
+    """記事のシグナル充足度から確信度を返す（`PROJECT_SPEC.md` §8、Issue #20）。
+
+    `confidence` は「その記事がユーザーの関心をどれだけ確かに表すか」を表す。
+    フィードバックの経路の強さ（`explicit_weight`）や新しさ（`recency_decay`）
+    とは独立に、その記事について手元にある情報がどれだけ揃っているかで決める。
+
+    * `has_embedding`: 関心プロファイル（`recommendation/service.py` の
+      `build_interest_profile`）と関心クラスタへ寄与できるか
+    * `has_topics`: トピック選好・既知トピック（`compute_novelty`）へ寄与できるか
+    * `is_analyzed`: 解析（`analysis/service.py`）が完了しているか。未解析の
+      記事は topics も embedding も後から付くため、現時点の情報は暫定である
+
+    クリックされただけで解析前の記事は全て欠けるが、それでもユーザーがその記事へ
+    到達したこと自体は事実のため、寄与をゼロにはせず `min_confidence` を下限に
+    する（「抑制はするが完全排除はしない」という §6.1 の既読減点と同じ考え方）。
+
+    設定側で寄与の合計が 1.0 になるよう検証しているが、純粋関数としては設定が
+    どうであれ係数が 1.0 を超えないよう上限で丸める。
+    """
+    satisfied = (
+        (settings.has_embedding if has_embedding else 0.0)
+        + (settings.has_topics if has_topics else 0.0)
+        + (settings.is_analyzed if is_analyzed else 0.0)
+    )
+    return min(max(satisfied, settings.min_confidence), MAX_CONFIDENCE)
 
 
 def compute_effective_interest(

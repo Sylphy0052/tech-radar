@@ -236,6 +236,47 @@ class InterestDecayConfig(BaseModel):
     half_life_days: float = Field(gt=0.0)
 
 
+class ConfidenceConfig(BaseModel):
+    """`effective_interest` の `confidence` の設定（`PROJECT_SPEC.md` §8、Issue #20）。
+
+    記事について手元にある情報の充足度から確信度を決める
+    （`interest/weights.py` の `compute_confidence`）。3 つのシグナルの寄与の
+    合計は 1.0 にする（全て揃った記事が減衰を受けないようにするため）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    has_embedding: float = Field(ge=0.0, le=1.0)
+    has_topics: float = Field(ge=0.0, le=1.0)
+    is_analyzed: float = Field(ge=0.0, le=1.0)
+    min_confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _validate_signals_sum_to_one(self) -> ConfidenceConfig:
+        total = self.has_embedding + self.has_topics + self.is_analyzed
+        if abs(total - 1.0) > _SUM_TOLERANCE:
+            message = f"confidence のシグナルの合計は 1.0 である必要があります（現在: {total}）"
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_min_confidence_below_every_signal(self) -> ConfidenceConfig:
+        """下限が個々のシグナルの寄与を上回らないことを確認する。
+
+        `min_confidence` が最小のシグナルより大きいと、「シグナルが 1 つだけ
+        揃った記事」と「1 つも揃っていない記事」の confidence が下限に潰れて
+        同じ値になり、充足度を段階的に反映するという設計が成り立たなくなる。
+        """
+        smallest_signal = min(self.has_embedding, self.has_topics, self.is_analyzed)
+        if self.min_confidence > smallest_signal:
+            message = (
+                "min_confidence は最も小さいシグナルの寄与以下である必要があります: "
+                f"min_confidence={self.min_confidence}, 最小のシグナル={smallest_signal}"
+            )
+            raise ValueError(message)
+        return self
+
+
 class TopicPreferenceConfig(BaseModel):
     """トピック単位の選好更新の設定（`PROJECT_SPEC.md` §7.2）。
 
@@ -409,6 +450,7 @@ class ScoringConfig(BaseModel):
     limits: LimitsConfig
     feedback_weights: FeedbackWeightsConfig
     interest_decay: InterestDecayConfig
+    confidence: ConfidenceConfig
     topic_preference: TopicPreferenceConfig
     source_preference: SourcePreferenceConfig
     bad_similarity: BadSimilarityConfig
