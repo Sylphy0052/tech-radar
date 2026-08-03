@@ -357,6 +357,35 @@ def deduplicate_articles(
     )
 
 
+def _resolve_news_event_id(
+    cluster: ArticleCluster, articles_by_id: dict[uuid.UUID, Article]
+) -> uuid.UUID | None:
+    """クラスタに割り当てるニュースイベント ID を決める（`PROJECT_SPEC.md` §17、Issue #20）。
+
+    単独記事のクラスタには ID を振らない（None を返す）。「同一ニュースイベント」は
+    複数記事を束ねる概念であり、1 件しかない記事に ID を振っても意味を持たない
+    ばかりか、後からその記事が別クラスタへ合流したときに ID が競合する。
+
+    既にメンバーの誰かが ID を持っていればそれを引き継ぐ。再実行や記事の追加で
+    ID が振り直されると、一度公開した ID を外部から参照できなくなるため。複数の
+    ID が混在する場合（別々のイベントとして扱われていたクラスタが、後から届いた
+    記事によって連結された場合）は、UUID の文字列順で最小のものへ寄せる。どれを
+    残しても意味は変わらないが、実行のたびに結果が変わらないよう決定的に選ぶ
+    （`select_representative` と同じ考え方）。
+    """
+    if len(cluster.members) < 2:
+        return None
+
+    existing_ids = {
+        article_id
+        for member in cluster.members
+        if (article_id := articles_by_id[member.id].news_event_id) is not None
+    }
+    if not existing_ids:
+        return uuid.uuid4()
+    return min(existing_ids, key=str)
+
+
 def _apply_cluster(
     cluster: ArticleCluster,
     *,
@@ -368,6 +397,13 @@ def _apply_cluster(
 ) -> int:
     """クラスタ 1 件分の判定を `Article` へ反映し、重複と判定した件数を返す。"""
     duplicate_count = 0
+    # 独自価値ありと判定された記事は `duplicate_of_article_id` が外れるため、
+    # ニュースイベント ID はメンバー全員へ先に振っておく（同一ニュースである
+    # 事実は重複判定の結果に関わらず残す、Issue #20）。
+    news_event_id = _resolve_news_event_id(cluster, articles_by_id)
+    for member in cluster.members:
+        articles_by_id[member.id].news_event_id = news_event_id
+
     for member in cluster.members:
         article = articles_by_id[member.id]
         if member.id == representative.id or member.id in unique_ids:
