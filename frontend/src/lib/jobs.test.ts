@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getJob } from "@/lib/jobs";
 import type { Job } from "@/lib/jobs";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -32,5 +33,5 @@ describe("getJob", () => {
     // Assert
     expect(result).toEqual(samplePayload);
     expect(fetchMock.mock.calls[0][0]).toContain(`/api/jobs/${samplePayload.id}`);
-  });
+  }, TEST_TIMEOUT_MS);
 });

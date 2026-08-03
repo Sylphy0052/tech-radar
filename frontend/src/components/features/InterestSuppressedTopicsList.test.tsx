@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { InterestSuppressedTopicsList } from "@/components/features/InterestSuppressedTopicsList";
 import type { SuppressedTopicItem } from "@/lib/interests";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("InterestSuppressedTopicsList", () => {
   it("renders the title and explicitly labels each topic as suppressed", () => {
@@ -18,7 +19,7 @@ describe("InterestSuppressedTopicsList", () => {
     expect(screen.getByRole("heading", { name: "抑制中のジャンル" })).toBeInTheDocument();
     expect(screen.getByText("広告")).toBeInTheDocument();
     expect(screen.getByText("抑制中（抑制度 0.80）")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an empty state when there are no suppressed topics", () => {
     // Arrange & Act
@@ -26,5 +27,5 @@ describe("InterestSuppressedTopicsList", () => {
 
     // Assert
     expect(screen.getByText("抑制中のトピックはありません。")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 });

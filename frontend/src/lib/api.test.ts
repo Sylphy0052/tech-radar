@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, apiFetch, getApiBaseUrl, getHealth, isRateLimitError } from "@/lib/api";
 import type { Health } from "@/lib/api";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 const ORIGINAL_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 
@@ -17,7 +18,7 @@ describe("getApiBaseUrl", () => {
 
     // Act / Assert
     expect(getApiBaseUrl()).toBe("http://localhost:8000");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("strips trailing slashes from the configured base url", () => {
     // Arrange
@@ -25,7 +26,7 @@ describe("getApiBaseUrl", () => {
 
     // Act / Assert
     expect(getApiBaseUrl()).toBe("https://api.example.com");
-  });
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("apiFetch", () => {
@@ -42,7 +43,7 @@ describe("apiFetch", () => {
     // Assert
     expect(result).toEqual({ status: "ok" });
     expect(fetchMock).toHaveBeenCalledOnce();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("throws ApiError carrying the status code when the response fails", async () => {
     // Arrange — Response のボディは 1 度しか読めないため呼び出しごとに生成する
@@ -57,7 +58,7 @@ describe("apiFetch", () => {
       status: 404,
       message: "not found",
     });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("carries the Retry-After seconds on a 429 response", async () => {
     // Arrange
@@ -74,7 +75,7 @@ describe("apiFetch", () => {
       status: 429,
       retryAfterSeconds: 30,
     });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("leaves retryAfterSeconds null when the Retry-After header is absent", async () => {
     // Arrange
@@ -88,7 +89,7 @@ describe("apiFetch", () => {
       status: 429,
       retryAfterSeconds: null,
     });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it.each([
     ["a negative value", "-1"],
@@ -111,7 +112,7 @@ describe("apiFetch", () => {
 
     // Act / Assert
     await expect(apiFetch("/api/feed")).rejects.toMatchObject({ retryAfterSeconds: null });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("keeps a Retry-After value exactly at the accepted upper bound", async () => {
     // Arrange
@@ -125,7 +126,7 @@ describe("apiFetch", () => {
 
     // Act / Assert
     await expect(apiFetch("/api/feed")).rejects.toMatchObject({ retryAfterSeconds: 300 });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("leaves retryAfterSeconds null when the Retry-After header is not delta-seconds", async () => {
     // Arrange — HTTP-date 形式（backend は返さないが、規格上は許容される）
@@ -142,7 +143,7 @@ describe("apiFetch", () => {
 
     // Act / Assert
     await expect(apiFetch("/api/feed")).rejects.toMatchObject({ retryAfterSeconds: null });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("resolves to undefined on a 204 No Content response without parsing json", async () => {
     // Arrange — 204 はボディを持たないため、body に null を渡した Response で再現する
@@ -153,7 +154,7 @@ describe("apiFetch", () => {
 
     // Assert
     expect(result).toBeUndefined();
-  });
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("isRateLimitError", () => {
@@ -162,7 +163,7 @@ describe("isRateLimitError", () => {
     expect(isRateLimitError(new ApiError(429, "too many requests"))).toBe(true);
     expect(isRateLimitError(new ApiError(404, "not found"))).toBe(false);
     expect(isRateLimitError(new TypeError("Failed to fetch"))).toBe(false);
-  });
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("getHealth", () => {
@@ -180,7 +181,7 @@ describe("getHealth", () => {
     // Assert
     expect(result).toEqual(payload);
     expect(fetchMock.mock.calls[0][0]).toContain("/api/health");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("resolves to a value assignable to the generated HealthResponse schema type", async () => {
     // Arrange — `satisfies` により、生成型 (openapi-typescript) からずれると
@@ -200,5 +201,5 @@ describe("getHealth", () => {
 
     // Assert
     expect(result).toEqual(payload);
-  });
+  }, TEST_TIMEOUT_MS);
 });

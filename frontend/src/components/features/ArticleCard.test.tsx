@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ArticleCard } from "@/components/features/ArticleCard";
 import type { FeedItem } from "@/lib/feed";
 import { BAD_REASON_LABELS } from "@/lib/feedback";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 function makeItem(overrides: Partial<FeedItem> = {}): FeedItem {
   return {
@@ -57,7 +58,7 @@ describe("ArticleCard", () => {
       <ArticleCard item={makeItem({ is_primary_source: true })} onFeedback={vi.fn()} onRemoveFeedback={vi.fn()} />,
     );
     expect(screen.getByText("公式・一次情報")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows a read marker for a read article", () => {
     // Arrange / Act
@@ -65,7 +66,7 @@ describe("ArticleCard", () => {
 
     // Assert
     expect(screen.getByText("既読")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not show the Japanese title row when translated_title is null", () => {
     // Arrange / Act
@@ -73,7 +74,7 @@ describe("ArticleCard", () => {
 
     // Assert
     expect(screen.queryByText("日本語タイトル")).not.toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("calls onFeedback with good when the Good button is pressed", () => {
     // Arrange
@@ -84,7 +85,7 @@ describe("ArticleCard", () => {
 
     // Assert
     expect(onFeedback).toHaveBeenCalledWith("good");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows the Good button as pressed when the article already has good feedback", () => {
     // Arrange / Act
@@ -92,7 +93,7 @@ describe("ArticleCard", () => {
 
     // Assert
     expect(screen.getByRole("button", { name: "Good" })).toHaveAttribute("aria-pressed", "true");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("opens the reason picker when the Bad button is pressed", () => {
     // Arrange
@@ -103,7 +104,7 @@ describe("ArticleCard", () => {
 
     // Assert
     expect(screen.getByLabelText(BAD_REASON_LABELS.too_shallow)).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("calls onFeedback with bad and no reason when submitted without selecting one", () => {
     // Arrange
@@ -115,7 +116,7 @@ describe("ArticleCard", () => {
 
     // Assert
     expect(onFeedback).toHaveBeenCalledWith("bad", undefined);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("calls onFeedback with bad and the selected reason when submitted", () => {
     // Arrange
@@ -128,7 +129,7 @@ describe("ArticleCard", () => {
 
     // Assert
     expect(onFeedback).toHaveBeenCalledWith("bad", "too_shallow");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("calls onFeedback with save when the save button is pressed", () => {
     // Arrange
@@ -139,7 +140,7 @@ describe("ArticleCard", () => {
 
     // Assert
     expect(onFeedback).toHaveBeenCalledWith("save");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("calls onRemoveFeedback when the existing feedback is withdrawn", () => {
     // Arrange
@@ -152,7 +153,7 @@ describe("ArticleCard", () => {
 
     // Assert
     expect(onRemoveFeedback).toHaveBeenCalled();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("links to the original article in a new tab without leaking window.opener", () => {
     // Arrange / Act
@@ -163,7 +164,7 @@ describe("ArticleCard", () => {
     expect(link).toHaveAttribute("href", "https://example.com/a?ref=1");
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noreferrer noopener");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not render a link when original_url uses an unsafe scheme (H)", () => {
     // Arrange / Act
@@ -171,7 +172,7 @@ describe("ArticleCard", () => {
 
     // Assert — 危険なスキームはリンク化せず、テキスト表示へフォールバックする
     expect(screen.queryByRole("link", { name: "元記事を開く" })).not.toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("keeps the score breakdown collapsed by default and reveals it on demand", () => {
     // Arrange
@@ -186,5 +187,5 @@ describe("ArticleCard", () => {
 
     // Assert (expanded)
     expect(screen.getByText("0.800")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 });

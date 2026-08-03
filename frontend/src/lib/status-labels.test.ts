@@ -6,6 +6,7 @@ import {
   getRegistrationStatusLabel,
   isTerminalStatus,
 } from "@/lib/status-labels";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("getRegistrationStatusLabel", () => {
   it.each([
@@ -21,7 +22,7 @@ describe("getRegistrationStatusLabel", () => {
 
     // Assert
     expect(label).toBe(expected);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("falls back to a generic label for an unknown status", () => {
     // Arrange
@@ -32,7 +33,7 @@ describe("getRegistrationStatusLabel", () => {
 
     // Assert
     expect(label).toBe("処理中");
-  });
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("getJobStatusLabel", () => {
@@ -47,7 +48,7 @@ describe("getJobStatusLabel", () => {
 
     // Assert
     expect(label).toBe(expected);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("falls back to a generic label for an unknown status", () => {
     // Arrange
@@ -58,14 +59,14 @@ describe("getJobStatusLabel", () => {
 
     // Assert
     expect(label).toBe("実行中");
-  });
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("isTerminalStatus", () => {
   it.each(["completed", "failed"])("treats %s as terminal", (status) => {
     // Act / Assert
     expect(isTerminalStatus(status)).toBe(true);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it.each(["pending", "fetching", "analyzing", "searching"])(
     "treats %s as non-terminal",
@@ -73,6 +74,7 @@ describe("isTerminalStatus", () => {
       // Act / Assert
       expect(isTerminalStatus(status)).toBe(false);
     },
+    TEST_TIMEOUT_MS,
   );
 });
 
@@ -88,7 +90,7 @@ describe("getRegistrationErrorMessage", () => {
 
     // Assert
     expect(message).toBe(expected);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("falls back to a generic message for an unknown error_reason", () => {
     // Arrange
@@ -99,7 +101,7 @@ describe("getRegistrationErrorMessage", () => {
 
     // Assert
     expect(message).toBe("登録処理に失敗しました。しばらくしてから再度お試しください。");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("falls back to a generic message when error_reason is null", () => {
     // Act
@@ -107,5 +109,5 @@ describe("getRegistrationErrorMessage", () => {
 
     // Assert
     expect(message).toBe("登録処理に失敗しました。しばらくしてから再度お試しください。");
-  });
+  }, TEST_TIMEOUT_MS);
 });

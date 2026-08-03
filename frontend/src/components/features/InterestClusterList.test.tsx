@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { InterestClusterList } from "@/components/features/InterestClusterList";
 import type { InterestClusterItem } from "@/lib/interests";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("InterestClusterList", () => {
   it("renders the title, cluster label, weight, and every topic in the cluster", () => {
@@ -26,7 +27,7 @@ describe("InterestClusterList", () => {
     expect(screen.getByText("llm")).toBeInTheDocument();
     expect(screen.getByText("rag")).toBeInTheDocument();
     expect(screen.getByText("embedding")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an empty state when there are no clusters", () => {
     // Arrange & Act
@@ -34,5 +35,5 @@ describe("InterestClusterList", () => {
 
     // Assert
     expect(screen.getByText("関心クラスタはまだありません。")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 });
