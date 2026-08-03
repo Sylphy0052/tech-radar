@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DiscoverFeed } from "@/components/features/DiscoverFeed";
@@ -53,10 +53,53 @@ class MockIntersectionObserver {
   }
 }
 
+/**
+ * センチネルが可視／不可視になったことを通知する。
+ *
+ * observer がまだ生成されていない場合は明示的に失敗させる。記事の描画（DOM の
+ * 変化）と observer を張る effect の実行順は保証されないため、負荷が高いと
+ * 通知の時点で observer が無いことがある。ここで黙って何もしないと、
+ * 呼び出し側は「通知したのに何も起きない」状態のまま `waitFor` で空回りし、
+ * 原因の分からないタイムアウトとして現れる（Issue #35）。
+ */
 function triggerIntersection(isIntersecting: boolean): void {
   const instance = MockIntersectionObserver.instances.at(-1);
-  instance?.callback([{ isIntersecting }]);
+  if (!instance) {
+    throw new Error(
+      "IntersectionObserver が未生成のまま通知しようとした。" +
+        "呼ぶ前に await waitForObserver() で observer が張られるのを待つこと。",
+    );
+  }
+  instance.callback([{ isIntersecting }]);
 }
+
+/** observer が張られるまで待つ。`triggerIntersection` の前提を満たすために使う。 */
+async function waitForObserver(): Promise<void> {
+  await waitFor(() => expect(MockIntersectionObserver.instances).toHaveLength(1));
+}
+
+/**
+ * このファイルの `waitFor` の持ち時間。
+ *
+ * 既定の 1 秒は、テストファイル並列実行で CPU が奪われているときに
+ * 「fetch のモックが解決 → state 更新 → 再レンダー」までを賄えないことがある
+ * （Issue #29, #30, #35 の失敗はいずれもこの形）。個々の `waitFor` へ都度
+ * 指定すると、付け忘れた待機だけが脆いまま残るため、ファイル単位で引き上げる。
+ */
+const WAIT_TIMEOUT_MS = 5_000;
+
+/**
+ * 上の待機を使うテストへ与える持ち時間。
+ *
+ * vitest の既定（5000ms）のままだと `WAIT_TIMEOUT_MS` と並んでしまい、待ち切る
+ * 前にテスト側が先にタイムアウトする（Issue #35）。待機が本当に失敗したときに、
+ * タイムアウトではなく assert の失敗として原因が読める形にするため引き上げる。
+ * グローバル設定（`vitest.config.mts`）は変えない。他のテストが実際にハング
+ * したときの検出まで一律に遅くなるため。
+ */
+const TEST_TIMEOUT_MS = 20_000;
+
+configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
 beforeEach(() => {
   MockIntersectionObserver.instances = [];
@@ -65,6 +108,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // `Date.now` の固定（レート制限のテスト）を後続のテストへ持ち越さない。
+  vi.restoreAllMocks();
 });
 
 describe("DiscoverFeed", () => {
@@ -111,8 +156,9 @@ describe("DiscoverFeed", () => {
     render(<DiscoverFeed />);
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
     // 記事の描画（DOM の変化）と observer を張る effect の実行順は保証されないため、
-    // observer が張られるまで待ってから通知する（未生成だと通知が握り潰される）。
-    await waitFor(() => expect(MockIntersectionObserver.instances).toHaveLength(1));
+    // observer が張られるまで待ってから通知する（未生成のまま呼ぶと
+    // `triggerIntersection` が例外を投げる）。
+    await waitForObserver();
 
     // Act — センチネルが可視になったことを通知する
     act(() => {
@@ -145,7 +191,7 @@ describe("DiscoverFeed", () => {
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
     // 記事の描画（DOM の変化）と observer を張る effect の実行順は保証されないため、
     // observer が張られるまで待ってから起点の件数を確定させる。
-    await waitFor(() => expect(MockIntersectionObserver.instances).toHaveLength(1));
+    await waitForObserver();
 
     // Act — 2 ページ目を読み込む（読み込み後も hasMore は true のまま）
     act(() => {
@@ -166,12 +212,13 @@ describe("DiscoverFeed", () => {
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(1));
     const callCountBefore = fetchMock.mock.calls.length;
 
-    // Act — hasMore が false のときにセンチネルが可視になっても何もしない
-    act(() => {
-      triggerIntersection(true);
-    });
-
-    // Assert
+    // Assert — hasMore が false なら監視自体を始めない（センチネルも描画されない）
+    // ため、可視になったことを通知する経路がそもそも存在しない。以前はここで
+    // `triggerIntersection` を呼んでいたが、observer が無い状態では何も起きず、
+    // 「通知しても追加ロードされない」ことを確かめたつもりで実際には何も
+    // 検証できていなかった（Issue #35）。
+    expect(MockIntersectionObserver.instances).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "さらに読み込む" })).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
     expect(screen.getByText("すべての記事を読み込みました")).toBeInTheDocument();
   });
@@ -246,15 +293,13 @@ describe("DiscoverFeed", () => {
     render(<DiscoverFeed />);
 
     // Assert — 一時的な制限を「記事が無い」と誤って伝えない
-    await waitFor(
-      () =>
-        expect(
-          screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
-        ).toBeInTheDocument(),
-      { timeout: 5_000 },
+    await waitFor(() =>
+      expect(
+        screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
+      ).toBeInTheDocument(),
     );
     expect(screen.queryByText("表示できる記事がありません。")).not.toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("stops loading more pages while the sentinel keeps intersecting after a 429", async () => {
     // Arrange
@@ -269,20 +314,26 @@ describe("DiscoverFeed", () => {
       return jsonResponse({ items: page1, next_cursor: "page-2" });
     });
     vi.stubGlobal("fetch", fetchMock);
+    // 429 のあと `useFeed` は残り時間を計算し直してメッセージを出す
+    // （`rateLimitedUntilRef - Date.now()`）。実時間で 1 秒以上経つと文言が
+    // 「約29秒後」へ変わり、負荷の高い環境でだけ検証が崩れるため時計を止める。
+    // `waitFor` のポーリングと打ち切りは setTimeout / MutationObserver で動いて
+    // おり `Date.now` を見ないため、完全に固定しても待機は壊れない。
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-08-03T00:00:00Z").getTime());
     render(<DiscoverFeed />);
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+    // 記事の描画と observer を張る effect の実行順は保証されないため、
+    // observer が張られるまで待ってから通知する。
+    await waitForObserver();
 
     // Act — センチネルが可視になり続ける（スクロール中の再通知）
     act(() => {
       triggerIntersection(true);
     });
-    await waitFor(
-      () =>
-        expect(
-          screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
-        ).toBeInTheDocument(),
-      // 既定の 1 秒では、テストファイル並列実行で負荷が高いときに間に合わないことがある。
-      { timeout: 5_000 },
+    await waitFor(() =>
+      expect(
+        screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
+      ).toBeInTheDocument(),
     );
     const callCountAfterRateLimit = fetchMock.mock.calls.length;
     act(() => {
@@ -295,7 +346,7 @@ describe("DiscoverFeed", () => {
     expect(
       screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
     ).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("marks the Good button as pressed optimistically when clicked", async () => {
     // Arrange
@@ -318,5 +369,5 @@ describe("DiscoverFeed", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Good" })).toHaveAttribute("aria-pressed", "true"),
     );
-  });
+  }, TEST_TIMEOUT_MS);
 });
