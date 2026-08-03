@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DiscoverFeed } from "@/components/features/DiscoverFeed";
 import type { FeedItem } from "@/lib/feed";
+import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -78,27 +79,6 @@ async function waitForObserver(): Promise<void> {
   await waitFor(() => expect(MockIntersectionObserver.instances).toHaveLength(1));
 }
 
-/**
- * このファイルの `waitFor` の持ち時間。
- *
- * 既定の 1 秒は、テストファイル並列実行で CPU が奪われているときに
- * 「fetch のモックが解決 → state 更新 → 再レンダー」までを賄えないことがある
- * （Issue #29, #30, #35 の失敗はいずれもこの形）。個々の `waitFor` へ都度
- * 指定すると、付け忘れた待機だけが脆いまま残るため、ファイル単位で引き上げる。
- */
-const WAIT_TIMEOUT_MS = 5_000;
-
-/**
- * 上の待機を使うテストへ与える持ち時間。
- *
- * vitest の既定（5000ms）のままだと `WAIT_TIMEOUT_MS` と並んでしまい、待ち切る
- * 前にテスト側が先にタイムアウトする（Issue #35）。待機が本当に失敗したときに、
- * タイムアウトではなく assert の失敗として原因が読める形にするため引き上げる。
- * グローバル設定（`vitest.config.mts`）は変えない。他のテストが実際にハング
- * したときの検出まで一律に遅くなるため。
- */
-const TEST_TIMEOUT_MS = 20_000;
-
 configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
 beforeEach(() => {
@@ -125,22 +105,19 @@ describe("DiscoverFeed", () => {
 
     // Assert
     expect(screen.getByRole("status")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("renders 20 article cards from the first page", async () => {
     // Arrange
     const items = makeItems(20, "page1");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(jsonResponse({ items, next_cursor: null })),
-    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ items, next_cursor: null })));
 
     // Act
     render(<DiscoverFeed />);
 
     // Assert
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(20));
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("appends the next page without duplicating articles when the sentinel becomes visible", async () => {
     // Arrange
@@ -169,7 +146,7 @@ describe("DiscoverFeed", () => {
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(4));
     const renderedIds = [...page1, ...page2].map((item) => item.article_id);
     expect(new Set(renderedIds).size).toBe(4);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not recreate the IntersectionObserver after loading a page that still has more (G-2)", async () => {
     // Arrange — 3 ページ用意し、2 ページ目を読み込んだ後も hasMore が true のまま
@@ -201,7 +178,7 @@ describe("DiscoverFeed", () => {
 
     // Assert — observer が作り直されていないこと
     expect(MockIntersectionObserver.instances).toHaveLength(1);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not request another page and shows the end message once hasMore is false", async () => {
     // Arrange
@@ -221,7 +198,7 @@ describe("DiscoverFeed", () => {
     expect(screen.queryByRole("button", { name: "さらに読み込む" })).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
     expect(screen.getByText("すべての記事を読み込みました")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an error message when the feed request fails", async () => {
     // Arrange
@@ -232,7 +209,7 @@ describe("DiscoverFeed", () => {
 
     // Assert
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an empty state message when there are no articles", async () => {
     // Arrange
@@ -248,7 +225,7 @@ describe("DiscoverFeed", () => {
     await waitFor(() =>
       expect(screen.getByText("表示できる記事がありません。")).toBeInTheDocument(),
     );
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("keeps loading the next page when a page is empty but more pages remain", async () => {
     // Arrange — ページ内が全件 Bad だと items が空でも next_cursor は返る
@@ -274,7 +251,7 @@ describe("DiscoverFeed", () => {
 
     // Assert
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows only the rate limit message when the initial fetch is rejected with 429", async () => {
     // Arrange
@@ -367,7 +344,60 @@ describe("DiscoverFeed", () => {
     // Assert — API 応答を待たずに押下状態になる。POST のモックは解決しない Promise を
     // 返すため、押下状態になるのは楽観的更新によるものだけ（応答による反映は起こらない）。
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Good" })).toHaveAttribute("aria-pressed", "true"),
+      expect(screen.getByRole("button", { name: "Good" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      ),
     );
+  }, TEST_TIMEOUT_MS);
+
+  it("marks the Good button as pressed even when clicked in the same tick it appears (Issue #37)", async () => {
+    // Arrange — 記事が DOM に出た瞬間（React の passive effect が走る前）に
+    // クリックする。MutationObserver のコールバックはマイクロタスク、passive
+    // effect はマクロタスク（MessageChannel）で走るため、この順序は必ず成立する
+    // （React のスケジューリング実装に依存する前提のため、React の major 更新時は
+    // この再現が生きているかを確認すること）。
+    // 以前はこの窓でクリックすると、hook が最新の items をまだ読めず、操作が
+    // 黙って捨てられていた（Issue #37）。
+    const items = makeItems(1, "only");
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return new Promise<Response>(() => {});
+      }
+      return jsonResponse({ items, next_cursor: null });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    let clicked = false;
+    const observer = new MutationObserver(() => {
+      if (clicked) {
+        return;
+      }
+      const button = screen.queryByRole("button", { name: "Good" });
+      if (button === null) {
+        return;
+      }
+      clicked = true;
+      fireEvent.click(button);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    try {
+      // Act
+      render(<DiscoverFeed />);
+
+      await waitFor(() => expect(clicked).toBe(true));
+
+      // Assert — API 応答を待たずに押下状態になる（描画直後のクリックが
+      // 黙って捨てられない）
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Good" })).toHaveAttribute(
+          "aria-pressed",
+          "true",
+        ),
+      );
+    } finally {
+      observer.disconnect();
+    }
   }, TEST_TIMEOUT_MS);
 });

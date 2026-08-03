@@ -65,10 +65,13 @@ function withFeedback(
  * フィードバックは先にローカル state を書き換えてから API を呼び、失敗時は
  * 呼び出し前の状態へロールバックする（ボタン押下への即時反応を優先するため）。
  *
- * 最新の items は `itemsRef` 経由で参照する。`setState` の関数形式アップデータ内で
- * API 呼び出しのような副作用を行うと、React が purity チェックのためアップデータを
- * 二重に呼ぶ場合に副作用も二重発火してしまうため、読み取りと更新を分離している
- * （`usePolling` の `fetchFnRef` と同じ狙い）。
+ * 最新の items はレンダー時の `items` を直接参照する（以前は `itemsRef` という
+ * `useEffect` 経由のミラーを使っていたが、DOM へのコミットと passive effect の
+ * 実行の間には窓があり、その間にクリックされると古い（空の場合もある）配列を
+ * 読んでフィードバックが黙って捨てられていた。Issue #37）。`setState` の関数形式
+ * アップデータ内で API 呼び出しのような副作用を行うと、React が purity チェックの
+ * ためアップデータを二重に呼ぶ場合に副作用も二重発火してしまうため、読み取りと
+ * 更新を分離している（`usePolling` の `fetchFnRef` と同じ狙い）。
  */
 export function useFeed(): UseFeedResult {
   const [items, setItems] = useState<FeedItem[]>([]);
@@ -77,15 +80,10 @@ export function useFeed(): UseFeedResult {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const itemsRef = useRef<FeedItem[]>(items);
-  useEffect(() => {
-    itemsRef.current = items;
-  }, [items]);
-
   // loadMore の参照を安定させるための最新値。state と二重管理になるが、
   // setState と同じタイミングで同期的に更新することで、
-  // 「setState 直後の再呼び出しでは古い値が見える」問題（itemsRef が
-  // useEffect 経由でしか更新されないことによるもの）を避ける。
+  // 「setState 直後の再呼び出しでは古い値が見える」問題（レンダー確定・
+  // passive effect 実行を待って初めて更新される値だけに頼ると起きうる）を避ける。
   const nextCursorRef = useRef<string | null>(null);
   const isLoadingMoreRef = useRef(false);
 
@@ -93,9 +91,9 @@ export function useFeed(): UseFeedResult {
   const rateLimitedUntilRef = useRef(0);
 
   // 送信中（pending）の article_id 集合。同じボタンを再レンダリングを挟まず
-  // 連打すると、itemsRef がまだ更新されていない古い feedback を読んでしまい、
-  // 既に取り消し済みの feedback へ再度 DELETE を送ってロールバックで復活させて
-  // しまう（サーバー側 404 → catch）。itemsRef の更新タイミングを直すよりも
+  // 連打すると、1回目の楽観的更新がまだレンダーに反映されていない古い feedback を
+  // 読んでしまい、既に取り消し済みの feedback へ再度 DELETE を送ってロールバックで
+  // 復活させてしまう（サーバー側 404 → catch）。読み取りタイミングを詰めるよりも
   // 「送信中は同じ記事への操作を無視する」方が意図が明確で、他の更新経路が
   // 増えても壊れにくいためこちらを選ぶ。
   const pendingArticleIdsRef = useRef<Set<string>>(new Set());
@@ -196,7 +194,7 @@ export function useFeed(): UseFeedResult {
         return;
       }
 
-      const target = itemsRef.current.find((item) => item.article_id === articleId);
+      const target = items.find((item) => item.article_id === articleId);
       if (!target) {
         return;
       }
@@ -237,42 +235,45 @@ export function useFeed(): UseFeedResult {
           pendingArticleIdsRef.current.delete(articleId);
         });
     },
-    [],
+    [items],
   );
 
-  const removeFeedback = useCallback((articleId: string) => {
-    if (pendingArticleIdsRef.current.has(articleId)) {
-      // 送信中の同じ記事への再クリックは無視する（applyFeedback と同じ理由、G-1 参照）。
-      return;
-    }
+  const removeFeedback = useCallback(
+    (articleId: string) => {
+      if (pendingArticleIdsRef.current.has(articleId)) {
+        // 送信中の同じ記事への再クリックは無視する（applyFeedback と同じ理由、G-1 参照）。
+        return;
+      }
 
-    const target = itemsRef.current.find((item) => item.article_id === articleId);
-    if (!target || target.feedback === null) {
-      return;
-    }
-    const previousFeedback = target.feedback;
+      const target = items.find((item) => item.article_id === articleId);
+      if (!target || target.feedback === null) {
+        return;
+      }
+      const previousFeedback = target.feedback;
 
-    setItems((current) => withFeedback(current, articleId, null));
-    pendingArticleIdsRef.current.add(articleId);
+      setItems((current) => withFeedback(current, articleId, null));
+      pendingArticleIdsRef.current.add(articleId);
 
-    deleteFeedback(articleId)
-      .then(() => {
-        if (!isMountedRef.current) {
-          return;
-        }
-        setError(null);
-      })
-      .catch((err: unknown) => {
-        if (!isMountedRef.current) {
-          return;
-        }
-        setItems((current) => withFeedback(current, articleId, previousFeedback));
-        setError(getRequestErrorMessage(err));
-      })
-      .finally(() => {
-        pendingArticleIdsRef.current.delete(articleId);
-      });
-  }, []);
+      deleteFeedback(articleId)
+        .then(() => {
+          if (!isMountedRef.current) {
+            return;
+          }
+          setError(null);
+        })
+        .catch((err: unknown) => {
+          if (!isMountedRef.current) {
+            return;
+          }
+          setItems((current) => withFeedback(current, articleId, previousFeedback));
+          setError(getRequestErrorMessage(err));
+        })
+        .finally(() => {
+          pendingArticleIdsRef.current.delete(articleId);
+        });
+    },
+    [items],
+  );
 
   return {
     items,
