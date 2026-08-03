@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { BadReasonPicker } from "@/components/features/BadReasonPicker";
 import { BAD_REASON_LABELS } from "@/lib/feedback";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("BadReasonPicker", () => {
   it("shows every bad reason as a selectable option", () => {
@@ -13,7 +14,7 @@ describe("BadReasonPicker", () => {
     for (const label of Object.values(BAD_REASON_LABELS)) {
       expect(screen.getByLabelText(label)).toBeInTheDocument();
     }
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("submits without a reason when nothing is selected", () => {
     // Arrange
@@ -25,7 +26,7 @@ describe("BadReasonPicker", () => {
 
     // Assert
     expect(onSubmit).toHaveBeenCalledWith(undefined);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("submits the selected reason", () => {
     // Arrange
@@ -38,7 +39,7 @@ describe("BadReasonPicker", () => {
 
     // Assert
     expect(onSubmit).toHaveBeenCalledWith("too_shallow");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("calls onCancel when the close operation is used", () => {
     // Arrange
@@ -50,5 +51,5 @@ describe("BadReasonPicker", () => {
 
     // Assert
     expect(onCancel).toHaveBeenCalled();
-  });
+  }, TEST_TIMEOUT_MS);
 });

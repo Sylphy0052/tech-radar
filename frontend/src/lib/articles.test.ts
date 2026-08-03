@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getArticleRegistration, registerArticle } from "@/lib/articles";
 import type { ArticleRegistration } from "@/lib/articles";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -34,7 +35,7 @@ describe("registerArticle", () => {
     expect(url).toContain("/api/articles");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body as string)).toEqual({ url: "https://example.com/a" });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not throw when the backend returns 200 for an already-registered url", async () => {
     // Arrange — 同一 URL の再登録は 200 で既存登録を返す。
@@ -48,7 +49,7 @@ describe("registerArticle", () => {
 
     // Assert
     expect(result).toEqual(samplePayload);
-  });
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("getArticleRegistration", () => {
@@ -67,5 +68,5 @@ describe("getArticleRegistration", () => {
     expect(fetchMock.mock.calls[0][0]).toContain(
       `/api/articles/registrations/${samplePayload.id}`,
     );
-  });
+  }, TEST_TIMEOUT_MS);
 });

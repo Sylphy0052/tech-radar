@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { InterestChartCard } from "@/components/features/InterestChartCard";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("InterestChartCard", () => {
   it("renders the title and children when not empty", () => {
@@ -15,7 +16,7 @@ describe("InterestChartCard", () => {
     // Assert
     expect(screen.getByRole("heading", { name: "ジャンル別関心度" })).toBeInTheDocument();
     expect(screen.getByText("グラフ本体")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("renders the description when given", () => {
     // Arrange & Act
@@ -27,7 +28,7 @@ describe("InterestChartCard", () => {
 
     // Assert
     expect(screen.getByText("Good・保存した記事のみを対象")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows the default empty message and hides children when isEmpty is true", () => {
     // Arrange & Act
@@ -40,7 +41,7 @@ describe("InterestChartCard", () => {
     // Assert
     expect(screen.getByText("まだデータがありません。")).toBeInTheDocument();
     expect(screen.queryByText("グラフ本体")).not.toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows a custom empty message when given", () => {
     // Arrange & Act
@@ -52,5 +53,5 @@ describe("InterestChartCard", () => {
 
     // Assert
     expect(screen.getByText("抑制中のトピックはありません。")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 });
