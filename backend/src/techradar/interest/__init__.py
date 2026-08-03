@@ -19,8 +19,10 @@ from techradar.interest.topics import (
     increase_positive_weight,
 )
 from techradar.interest.weights import (
-    DEFAULT_CONFIDENCE,
+    MAX_CONFIDENCE,
+    ConfidenceSettings,
     FeedbackWeights,
+    compute_confidence,
     compute_effective_interest,
     compute_recency_decay,
     explicit_weight_for_origin,
@@ -31,9 +33,10 @@ from techradar.interest.weights import (
 # のようにモジュールごと取り込んで使う（どちらの選好を更新しているのかを
 # 呼び出し側で読み取れるようにするため）。
 __all__ = [
-    "DEFAULT_CONFIDENCE",
+    "MAX_CONFIDENCE",
     "ClusterSource",
     "ClusteringSettings",
+    "ConfidenceSettings",
     "FeedbackWeights",
     "InterestCluster",
     "PreferenceDecaySettings",
@@ -41,6 +44,7 @@ __all__ = [
     "TopicWeights",
     "apply_bad_feedback",
     "build_interest_clusters",
+    "compute_confidence",
     "compute_effective_interest",
     "compute_effective_weight",
     "compute_negative_weight",

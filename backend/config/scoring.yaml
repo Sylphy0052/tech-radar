@@ -16,6 +16,7 @@
 #   limits         : ランキング処理の安全弁とページングの既定値
 #   feedback_weights: フィードバック種別ごとの重み（PROJECT_SPEC.md §7.1, §7.2）
 #   interest_decay : 関心の時間減衰の設定（§8）
+#   confidence     : effective_interest の confidence（記事シグナルの充足度、§8）
 #   topic_preference: トピック単位の選好更新（Good/Bad の反映）の設定（§7.1, §7.2）
 #   source_preference: 情報源単位の選好更新と、その推薦スコアへの反映の設定（§7.1 手順 4）
 #   bad_similarity : Bad 記事と意味的に近い記事を抑制する設定（§7.2）
@@ -154,6 +155,21 @@ interest_decay:
   # 関心の時間減衰の半減期（PROJECT_SPEC.md §8 の recency_decay）。日次で巡回する
   # 運用（サーバー常駐なし）を踏まえ、数週間スパンで緩やかに関心が薄れる値にする
   half_life_days: 30
+
+confidence:
+  # effective_interest の confidence（PROJECT_SPEC.md §8）。「その記事がユーザーの
+  # 関心をどれだけ確かに表すか」を、記事について手元にある情報の充足度で決める。
+  # 3 項目の合計は 1.0（全て揃った記事は confidence による減衰を受けない）
+  #
+  # embedding は関心プロファイル・関心クラスタへ直接寄与するため最も重く見る
+  has_embedding: 0.4
+  # topics はトピック選好と新規性判定へ寄与する
+  has_topics: 0.3
+  # 解析未完了の記事は topics も embedding も後から付くため、現時点の情報は暫定
+  is_analyzed: 0.3
+  # 全てのシグナルが欠けていても（クリック直後の未解析記事など）寄与をゼロには
+  # しない下限。ユーザーがその記事へ到達した事実自体は消えないため
+  min_confidence: 0.3
 
 topic_preference:
   # トピック重み低下の判定に見る直近フィードバック件数（§7.2 の例「直近5記事」）

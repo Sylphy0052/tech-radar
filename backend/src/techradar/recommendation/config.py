@@ -236,6 +236,30 @@ class InterestDecayConfig(BaseModel):
     half_life_days: float = Field(gt=0.0)
 
 
+class ConfidenceConfig(BaseModel):
+    """`effective_interest` の `confidence` の設定（`PROJECT_SPEC.md` §8、Issue #20）。
+
+    記事について手元にある情報の充足度から確信度を決める
+    （`interest/weights.py` の `compute_confidence`）。3 つのシグナルの寄与の
+    合計は 1.0 にする（全て揃った記事が減衰を受けないようにするため）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    has_embedding: float = Field(ge=0.0, le=1.0)
+    has_topics: float = Field(ge=0.0, le=1.0)
+    is_analyzed: float = Field(ge=0.0, le=1.0)
+    min_confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _validate_signals_sum_to_one(self) -> ConfidenceConfig:
+        total = self.has_embedding + self.has_topics + self.is_analyzed
+        if abs(total - 1.0) > _SUM_TOLERANCE:
+            message = f"confidence のシグナルの合計は 1.0 である必要があります（現在: {total}）"
+            raise ValueError(message)
+        return self
+
+
 class TopicPreferenceConfig(BaseModel):
     """トピック単位の選好更新の設定（`PROJECT_SPEC.md` §7.2）。
 
@@ -409,6 +433,7 @@ class ScoringConfig(BaseModel):
     limits: LimitsConfig
     feedback_weights: FeedbackWeightsConfig
     interest_decay: InterestDecayConfig
+    confidence: ConfidenceConfig
     topic_preference: TopicPreferenceConfig
     source_preference: SourcePreferenceConfig
     bad_similarity: BadSimilarityConfig

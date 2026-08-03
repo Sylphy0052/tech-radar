@@ -71,6 +71,29 @@ source_authority_contribution =
 権威性がゼロまで落ちてしまう（「抑制はするが完全排除はしない」という §6.1 の
 既読減点と同じ設計思想）。
 
+### confidence を DB 列として保存しない理由（Issue #20）
+
+`effective_interest = explicit_weight × feedback_weight × recency_decay × confidence`（`PROJECT_SPEC.md` §8）の
+`confidence` は、「その記事がユーザーの関心をどれだけ確かに表すか」を、記事について手元にある情報の充足度から求める
+（`interest/weights.py` の `compute_confidence`）。
+
+| シグナル | 寄与 | 意味 |
+| --- | --- | --- |
+| `embedding` がある | 0.4 | 関心プロファイル・関心クラスタへ直接寄与できる |
+| `topics` がある | 0.3 | トピック選好・新規性判定へ寄与できる |
+| 解析が完了している | 0.3 | 未解析なら topics も embedding も後から付くため、現時点の情報は暫定 |
+
+値は `config/scoring.yaml` の `confidence` セクションで管理し、`user_interest_clusters` や
+`user_topic_preferences` へ列としては**保存しない**。理由:
+
+- 上記の定義は `articles` の既存列から一意に導出できる。保存すると記事の再取得・再解析で古びる二重管理になる
+- 受入基準「`effective_interest` の計算に confidence が反映される」は、プロファイル構築時に毎回導出すれば満たせる
+- Issue #20 の本文は「追加マイグレーションで列を追加する」と書いていたが、これは Issue #2 の時点で confidence の
+  算出方法が未定だったための申し送りであり、算出方法が「記事の既存列からの導出」に決まった以上、列は不要と判断した
+
+全てのシグナルが欠けた記事（クリック直後の未解析記事など）も `min_confidence`（0.3）を下限として寄与をゼロには
+しない。ユーザーがその記事へ到達した事実自体は消えないため（§6.1 の既読減点と同じ「抑制はするが完全排除はしない」）。
+
 ## データ保持
 
 | 項目 | 決定 |
