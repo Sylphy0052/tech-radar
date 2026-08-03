@@ -287,6 +287,18 @@ class TestLoading:
         with pytest.raises(ValueError, match="min_factor"):
             load_scoring_config(path)
 
+    def test_rejects_a_source_preference_range_that_excludes_the_neutral_factor(
+        self, tmp_path: Path
+    ):
+        # Arrange — 範囲が 1.0 を含まないと、選好が無い情報源にも係数が掛かり
+        # 「学習前は従来と同じスコア」という前提が崩れる
+        broken = VALID_YAML.replace("min_factor: 0.5", "min_factor: 1.1")
+        path = write_config(tmp_path, broken)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match=r"1\.0"):
+            load_scoring_config(path)
+
     def test_loads_the_bundled_bad_similarity(self, config: ScoringConfig):
         # Arrange / Act / Assert
         assert config.bad_similarity.min_similarity == 0.7
