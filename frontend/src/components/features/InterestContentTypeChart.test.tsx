@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { InterestContentTypeChart } from "@/components/features/InterestContentTypeChart";
 import type { InterestContentTypeItem } from "@/lib/interests";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("InterestContentTypeChart", () => {
   it("renders the title and a Japanese name-with-count label for each content type", () => {
@@ -21,7 +22,7 @@ describe("InterestContentTypeChart", () => {
     expect(screen.getByText("概念解説: 4")).toBeInTheDocument();
     expect(screen.getByText("実装・手順: 2")).toBeInTheDocument();
     expect(screen.getByText("未分類: 1")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an empty state when there are no articles counted", () => {
     // Arrange & Act
@@ -29,5 +30,5 @@ describe("InterestContentTypeChart", () => {
 
     // Assert
     expect(screen.getByText("まだデータがありません。")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 });

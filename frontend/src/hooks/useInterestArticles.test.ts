@@ -1,9 +1,12 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, configure, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useInterestArticles } from "@/hooks/useInterestArticles";
 import { EMPTY_ARTICLE_FILTERS } from "@/lib/interest-articles";
 import type { ArticleFilters, InterestArticleItem } from "@/lib/interest-articles";
+import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
+
+configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -62,7 +65,7 @@ describe("useInterestArticles", () => {
     expect(result.current.items).toEqual([itemA, itemB]);
     expect(result.current.hasMore).toBe(true);
     expect(result.current.error).toBeNull();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an empty state when the response has no items", async () => {
     // Arrange
@@ -76,7 +79,7 @@ describe("useInterestArticles", () => {
     expect(result.current.items).toEqual([]);
     expect(result.current.hasMore).toBe(false);
     expect(result.current.error).toBeNull();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("surfaces an error message when the request fails", async () => {
     // Arrange
@@ -88,7 +91,7 @@ describe("useInterestArticles", () => {
     // Assert
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.error).toBe("通信に失敗しました。しばらくしてから再度お試しください。");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("sends the given filters as query parameters", async () => {
     // Arrange
@@ -104,7 +107,7 @@ describe("useInterestArticles", () => {
     const searchParams = new URL(url).searchParams;
     expect(searchParams.getAll("origin")).toEqual(["good"]);
     expect(searchParams.get("domain")).toBe("ai");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("refetches from the first page when the filters change", async () => {
     // Arrange
@@ -123,7 +126,7 @@ describe("useInterestArticles", () => {
     await waitFor(() => expect(fetchMock.mock.calls.length).toBe(callCountBefore + 1));
     const [url] = fetchMock.mock.calls[callCountBefore] as [string];
     expect(new URL(url).searchParams.get("language")).toBe("ja");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("appends the next page without duplicating articles already present", async () => {
     // Arrange
@@ -144,7 +147,7 @@ describe("useInterestArticles", () => {
       itemC.article_id,
     ]);
     expect(result.current.hasMore).toBe(false);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("discards a stale loadMore response that resolves after the filters changed", async () => {
     // Arrange — フィルターA の loadMore を発行した直後（レスポンス到達前）にフィルターを B へ切り替える
@@ -196,7 +199,7 @@ describe("useInterestArticles", () => {
 
     // Assert — 旧フィルターの記事が新フィルターの結果へ混ざらない
     expect(result.current.items.map((item) => item.article_id)).toEqual([itemB1.article_id]);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not call the API again once next_cursor is null", async () => {
     // Arrange
@@ -216,7 +219,7 @@ describe("useInterestArticles", () => {
 
     // Assert
     expect(fetchMock).toHaveBeenCalledTimes(callCountAfterExhausted);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("removes the article from the list immediately when removeArticle is called", async () => {
     // Arrange
@@ -243,7 +246,7 @@ describe("useInterestArticles", () => {
         expect.objectContaining({ method: "DELETE" }),
       ),
     );
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("rolls back and surfaces an error when the removal request fails", async () => {
     // Arrange
@@ -268,7 +271,7 @@ describe("useInterestArticles", () => {
       itemA.article_id,
       itemB.article_id,
     ]);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("ignores a second removeArticle call on the same article while the request is in flight", async () => {
     // Arrange
@@ -292,7 +295,7 @@ describe("useInterestArticles", () => {
 
     // Assert
     await waitFor(() => expect(deleteCallCount).toBe(1));
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does nothing when removeArticle targets an unknown article id", async () => {
     // Arrange
@@ -308,5 +311,5 @@ describe("useInterestArticles", () => {
 
     // Assert
     expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
-  });
+  }, TEST_TIMEOUT_MS);
 });

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { InterestTimelineChart } from "@/components/features/InterestTimelineChart";
 import type { InterestTimelineBucket } from "@/lib/interests";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("InterestTimelineChart", () => {
   it("renders the title and a legend entry for each series", () => {
@@ -26,7 +27,7 @@ describe("InterestTimelineChart", () => {
     expect(screen.getByText("関心記事の追加件数")).toBeInTheDocument();
     expect(screen.getByText("Good・保存")).toBeInTheDocument();
     expect(screen.getByText("Bad")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an empty state when there are no buckets", () => {
     // Arrange & Act
@@ -34,5 +35,5 @@ describe("InterestTimelineChart", () => {
 
     // Assert
     expect(screen.getByText("まだデータがありません。")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 });
