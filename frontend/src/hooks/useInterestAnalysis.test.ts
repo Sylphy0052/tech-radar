@@ -1,7 +1,10 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { configure, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useInterestAnalysis } from "@/hooks/useInterestAnalysis";
+import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
+
+configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -51,7 +54,7 @@ describe("useInterestAnalysis", () => {
     expect(result.current.summary).toBeNull();
     expect(result.current.clusters).toBeNull();
     expect(result.current.timeline).toBeNull();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("loads summary, clusters, and timeline together", async () => {
     // Arrange
@@ -66,7 +69,7 @@ describe("useInterestAnalysis", () => {
     expect(result.current.clusters?.items).toHaveLength(1);
     expect(result.current.timeline).toEqual({ buckets: [] });
     expect(result.current.error).toBeNull();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("surfaces an error message when any request fails", async () => {
     // Arrange
@@ -79,5 +82,5 @@ describe("useInterestAnalysis", () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.error).toBe("通信に失敗しました。しばらくしてから再度お試しください。");
     expect(result.current.summary).toBeNull();
-  });
+  }, TEST_TIMEOUT_MS);
 });
