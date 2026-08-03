@@ -159,7 +159,7 @@ class TestConfidenceReflectsConfigChanges:
     def test_changing_min_confidence_in_scoring_yaml_changes_the_floor(self, tmp_path):
         # Arrange
         original = DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
-        modified = original.replace("min_confidence: 0.3", "min_confidence: 0.6")
+        modified = original.replace("min_confidence: 0.3", "min_confidence: 0.2")
         assert modified != original
         path = tmp_path / "scoring.yaml"
         path.write_text(modified, encoding="utf-8")
@@ -176,8 +176,8 @@ class TestConfidenceReflectsConfigChanges:
             has_embedding=False, has_topics=False, is_analyzed=False, settings=settings
         )
 
-        # Assert
-        assert confidence == pytest.approx(0.6)
+        # Assert — min_confidence を 0.3 から 0.2 へ下げた結果が反映される
+        assert confidence == pytest.approx(0.2)
 
 
 class TestExplicitWeightForOrigin:

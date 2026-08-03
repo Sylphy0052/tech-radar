@@ -260,6 +260,13 @@ def deduplicate_articles(
     ただし推薦自体が 7 日フィルター（`PROJECT_SPEC.md` §15）を持ち窓外の記事は
     表示対象にならないため、窓内で見える記事の中から代表を選び直すのは
     意図した挙動である。
+
+    `news_event_id`（Issue #20）も同じくクラスタ判定のたびに解決し直す
+    （`_resolve_news_event_id`）。同じ対象記事集合なら既存 ID を引き継ぐため
+    変わらないが、クラスタが単独記事へ縮小した場合（同一イベントの他の記事が
+    窓外へ出た等）は `None` へ戻る。1 件しか見えていない記事に「同一ニュース
+    イベント」の ID を残しても束ねる相手がおらず、後からその記事が別のクラスタ
+    へ合流したときに古い ID と競合するため。
     """
     resolved_since = since or (datetime.now(UTC) - timedelta(days=lookback_days))
     config = get_dedup_config()
@@ -277,6 +284,8 @@ def deduplicate_articles(
     llm_call_count = 0
     llm_cache_hit_count = 0
     llm_call_limit_reached = False
+    # この実行で既に割り当てたニュースイベント ID（`_resolve_news_event_id`）。
+    used_news_event_ids: set[uuid.UUID] = set()
 
     for cluster in clusters:
         representative = select_representative(cluster)
@@ -328,6 +337,7 @@ def deduplicate_articles(
             unique_ids=unique_ids,
             match_by_member_id=match_by_member_id,
             penalties=penalties,
+            used_news_event_ids=used_news_event_ids,
         )
         _log_cluster_decision(
             session,
@@ -358,7 +368,9 @@ def deduplicate_articles(
 
 
 def _resolve_news_event_id(
-    cluster: ArticleCluster, articles_by_id: dict[uuid.UUID, Article]
+    cluster: ArticleCluster,
+    articles_by_id: dict[uuid.UUID, Article],
+    used_ids: set[uuid.UUID],
 ) -> uuid.UUID | None:
     """クラスタに割り当てるニュースイベント ID を決める（`PROJECT_SPEC.md` §17、Issue #20）。
 
@@ -369,9 +381,18 @@ def _resolve_news_event_id(
     既にメンバーの誰かが ID を持っていればそれを引き継ぐ。再実行や記事の追加で
     ID が振り直されると、一度公開した ID を外部から参照できなくなるため。複数の
     ID が混在する場合（別々のイベントとして扱われていたクラスタが、後から届いた
-    記事によって連結された場合）は、UUID の文字列順で最小のものへ寄せる。どれを
-    残しても意味は変わらないが、実行のたびに結果が変わらないよう決定的に選ぶ
+    記事によって連結された場合）は最小のものへ寄せる。どれを残しても意味は
+    変わらないが、実行のたびに結果が変わらないよう決定的に選ぶ
     （`select_representative` と同じ考え方）。
+
+    `used_ids` はこの実行で既に別のクラスタへ割り当てた ID。既存 ID の引き継ぎは
+    ここを除外してから行う。1 つのクラスタが分裂した場合（本文の更新で
+    `body_hash` が変わった、閾値設定を変えた等）、分裂後の各クラスタが同じ既存
+    ID を主張してしまい「1 イベント 1 ID」が壊れるため。除外した結果 ID が残ら
+    なかったクラスタには新しい ID を発行する（分裂後にどちらが元の ID を保つかは
+    `cluster_articles` が返すクラスタの順序で決まり、その順序は対象記事の
+    取得順（`_target_articles` の記事 ID 昇順）から決まるため実行のたびには
+    変わらない）。
     """
     if len(cluster.members) < 2:
         return None
@@ -380,10 +401,10 @@ def _resolve_news_event_id(
         article_id
         for member in cluster.members
         if (article_id := articles_by_id[member.id].news_event_id) is not None
-    }
-    if not existing_ids:
-        return uuid.uuid4()
-    return min(existing_ids, key=str)
+    } - used_ids
+    resolved = min(existing_ids) if existing_ids else uuid.uuid4()
+    used_ids.add(resolved)
+    return resolved
 
 
 def _apply_cluster(
@@ -394,13 +415,14 @@ def _apply_cluster(
     unique_ids: set[uuid.UUID],
     match_by_member_id: dict[uuid.UUID, DuplicateMatch],
     penalties: DuplicatePenalties,
+    used_news_event_ids: set[uuid.UUID],
 ) -> int:
     """クラスタ 1 件分の判定を `Article` へ反映し、重複と判定した件数を返す。"""
     duplicate_count = 0
     # 独自価値ありと判定された記事は `duplicate_of_article_id` が外れるため、
     # ニュースイベント ID はメンバー全員へ先に振っておく（同一ニュースである
     # 事実は重複判定の結果に関わらず残す、Issue #20）。
-    news_event_id = _resolve_news_event_id(cluster, articles_by_id)
+    news_event_id = _resolve_news_event_id(cluster, articles_by_id, used_news_event_ids)
     for member in cluster.members:
         articles_by_id[member.id].news_event_id = news_event_id
 
