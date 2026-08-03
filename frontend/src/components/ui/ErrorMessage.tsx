@@ -9,7 +9,7 @@ export function ErrorMessage({ message }: ErrorMessageProps) {
   return (
     <p
       role="alert"
-      className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+      className="border-l-2 border-danger bg-surface-raised py-2 pl-3 pr-3 text-sm text-danger"
     >
       {message}
     </p>

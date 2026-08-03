@@ -3,7 +3,16 @@
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { InterestChartCard } from "@/components/features/InterestChartCard";
-import { CHART_ANIMATION_ACTIVE, CHART_AXIS, CHART_GRID, CHART_MUTED, CHART_ORDINAL } from "@/lib/chart-colors";
+import {
+  CHART_ANIMATION_ACTIVE,
+  CHART_AXIS,
+  CHART_GRID,
+  CHART_MUTED,
+  CHART_ORDINAL,
+  CHART_TICK_FILL,
+  CHART_TOOLTIP_CONTENT_STYLE,
+  CHART_TOOLTIP_LABEL_STYLE,
+} from "@/lib/chart-colors";
 import { DIFFICULTY_LABELS, formatNullableLabel, GOOD_OR_SAVED_ONLY_NOTE } from "@/lib/interests";
 import type { InterestDifficultyItem } from "@/lib/interests";
 
@@ -68,9 +77,9 @@ export function InterestDifficultyChart({ difficulties }: InterestDifficultyChar
       <ResponsiveContainer width="100%" height={280}>
         <BarChart data={rows}>
           <CartesianGrid stroke={CHART_GRID} vertical={false} />
-          <XAxis dataKey="difficulty" stroke={CHART_AXIS} tick={{ fontSize: 12 }} />
-          <YAxis stroke={CHART_AXIS} allowDecimals={false} />
-          <Tooltip />
+          <XAxis dataKey="difficulty" stroke={CHART_AXIS} tick={{ fontSize: 12, fill: CHART_TICK_FILL }} />
+          <YAxis stroke={CHART_AXIS} allowDecimals={false} tick={{ fill: CHART_TICK_FILL }} />
+          <Tooltip contentStyle={CHART_TOOLTIP_CONTENT_STYLE} labelStyle={CHART_TOOLTIP_LABEL_STYLE} />
           <Bar dataKey="count" name="件数" radius={[4, 4, 0, 0]} isAnimationActive={CHART_ANIMATION_ACTIVE}>
             {rows.map((row) => (
               <Cell key={row.difficulty} fill={row.color} />

@@ -1,4 +1,5 @@
 import { InterestAnalysisDashboard } from "@/components/features/InterestAnalysisDashboard";
+import { PageShell } from "@/components/ui/PageShell";
 
 /**
  * 関心分析画面（Issue #16、`PROJECT_SPEC.md` §7, §8）。
@@ -10,15 +11,12 @@ import { InterestAnalysisDashboard } from "@/components/features/InterestAnalysi
  */
 export default function InterestsPage() {
   return (
-    <main className="mx-auto flex min-h-screen max-w-4xl flex-col gap-8 p-8 font-sans">
-      <div className="flex flex-col gap-4">
-        <h1 className="text-3xl font-bold">関心分析</h1>
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">
-          フィードバックと登録履歴から、関心の傾向・時間変化・クラスタをまとめて確認できます。
-        </p>
-      </div>
-
+    <PageShell
+      current="interests"
+      title="関心分析"
+      description="フィードバックと登録履歴から、関心の傾向・時間変化・クラスタをまとめて確認できます。"
+    >
       <InterestAnalysisDashboard />
-    </main>
+    </PageShell>
   );
 }

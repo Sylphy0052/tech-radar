@@ -3,7 +3,14 @@
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 
 import { InterestChartCard } from "@/components/features/InterestChartCard";
-import { CHART_ANIMATION_ACTIVE, CHART_SERIES, renderPieSliceLabel } from "@/lib/chart-colors";
+import {
+  CHART_ANIMATION_ACTIVE,
+  CHART_PIE_STROKE,
+  CHART_SERIES,
+  CHART_TOOLTIP_CONTENT_STYLE,
+  CHART_TOOLTIP_LABEL_STYLE,
+  renderPieSliceLabel,
+} from "@/lib/chart-colors";
 import type { ChartPieSlice } from "@/lib/chart-colors";
 import { GOOD_OR_SAVED_ONLY_NOTE } from "@/lib/interests";
 import type { InterestPrimarySourceRatio } from "@/lib/interests";
@@ -45,12 +52,13 @@ export function InterestPrimarySourceChart({ primarySourceRatio }: InterestPrima
             nameKey="name"
             label={renderPieSliceLabel}
             isAnimationActive={CHART_ANIMATION_ACTIVE}
+            stroke={CHART_PIE_STROKE}
           >
             {slices.map((slice) => (
               <Cell key={slice.name} fill={slice.color} />
             ))}
           </Pie>
-          <Tooltip />
+          <Tooltip contentStyle={CHART_TOOLTIP_CONTENT_STYLE} labelStyle={CHART_TOOLTIP_LABEL_STYLE} />
         </PieChart>
       </ResponsiveContainer>
     </InterestChartCard>
