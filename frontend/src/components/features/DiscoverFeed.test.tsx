@@ -53,9 +53,29 @@ class MockIntersectionObserver {
   }
 }
 
+/**
+ * センチネルが可視／不可視になったことを通知する。
+ *
+ * observer がまだ生成されていない場合は明示的に失敗させる。記事の描画（DOM の
+ * 変化）と observer を張る effect の実行順は保証されないため、負荷が高いと
+ * 通知の時点で observer が無いことがある。ここで黙って何もしないと、
+ * 呼び出し側は「通知したのに何も起きない」状態のまま `waitFor` で空回りし、
+ * 原因の分からないタイムアウトとして現れる（Issue #35）。
+ */
 function triggerIntersection(isIntersecting: boolean): void {
   const instance = MockIntersectionObserver.instances.at(-1);
-  instance?.callback([{ isIntersecting }]);
+  if (!instance) {
+    throw new Error(
+      "IntersectionObserver が未生成のまま通知しようとした。" +
+        "observer が張られるまで待ってから呼ぶこと（waitFor で instances を待つ）。",
+    );
+  }
+  instance.callback([{ isIntersecting }]);
+}
+
+/** observer が張られるまで待つ。`triggerIntersection` の前提を満たすために使う。 */
+async function waitForObserver(count = 1): Promise<void> {
+  await waitFor(() => expect(MockIntersectionObserver.instances).toHaveLength(count));
 }
 
 beforeEach(() => {
@@ -65,6 +85,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // `Date.now` の固定（レート制限のテスト）を後続のテストへ持ち越さない。
+  vi.restoreAllMocks();
 });
 
 describe("DiscoverFeed", () => {
@@ -112,7 +134,7 @@ describe("DiscoverFeed", () => {
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
     // 記事の描画（DOM の変化）と observer を張る effect の実行順は保証されないため、
     // observer が張られるまで待ってから通知する（未生成だと通知が握り潰される）。
-    await waitFor(() => expect(MockIntersectionObserver.instances).toHaveLength(1));
+    await waitForObserver();
 
     // Act — センチネルが可視になったことを通知する
     act(() => {
@@ -145,7 +167,7 @@ describe("DiscoverFeed", () => {
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
     // 記事の描画（DOM の変化）と observer を張る effect の実行順は保証されないため、
     // observer が張られるまで待ってから起点の件数を確定させる。
-    await waitFor(() => expect(MockIntersectionObserver.instances).toHaveLength(1));
+    await waitForObserver();
 
     // Act — 2 ページ目を読み込む（読み込み後も hasMore は true のまま）
     act(() => {
@@ -166,12 +188,13 @@ describe("DiscoverFeed", () => {
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(1));
     const callCountBefore = fetchMock.mock.calls.length;
 
-    // Act — hasMore が false のときにセンチネルが可視になっても何もしない
-    act(() => {
-      triggerIntersection(true);
-    });
-
-    // Assert
+    // Assert — hasMore が false なら監視自体を始めない（センチネルも描画されない）
+    // ため、可視になったことを通知する経路がそもそも存在しない。以前はここで
+    // `triggerIntersection` を呼んでいたが、observer が無い状態では何も起きず、
+    // 「通知しても追加ロードされない」ことを確かめたつもりで実際には何も
+    // 検証できていなかった（Issue #35）。
+    expect(MockIntersectionObserver.instances).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "さらに読み込む" })).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
     expect(screen.getByText("すべての記事を読み込みました")).toBeInTheDocument();
   });
@@ -269,8 +292,16 @@ describe("DiscoverFeed", () => {
       return jsonResponse({ items: page1, next_cursor: "page-2" });
     });
     vi.stubGlobal("fetch", fetchMock);
+    // 429 のあと `useFeed` は残り時間を計算し直してメッセージを出す
+    // （`rateLimitedUntilRef - Date.now()`）。実時間で 1 秒以上経つと文言が
+    // 「約29秒後」へ変わり、負荷の高い環境でだけ検証が崩れるため時計を止める。
+    // 実タイマー（`waitFor` の待機）には影響しない。
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-08-03T00:00:00Z").getTime());
     render(<DiscoverFeed />);
     await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+    // 記事の描画と observer を張る effect の実行順は保証されないため、
+    // observer が張られるまで待ってから通知する。
+    await waitForObserver();
 
     // Act — センチネルが可視になり続ける（スクロール中の再通知）
     act(() => {
@@ -281,7 +312,9 @@ describe("DiscoverFeed", () => {
         expect(
           screen.getByText("リクエストが多すぎます。約30秒後に再度お試しください。"),
         ).toBeInTheDocument(),
-      // 既定の 1 秒では、テストファイル並列実行で負荷が高いときに間に合わないことがある。
+      // 既定の 1 秒では、テストファイル並列実行で負荷が高いときに間に合わない
+      // ことがある。テスト全体の持ち時間（vitest.config.mts の testTimeout）は
+      // これより長く取ってあるため、待ち切る前にテスト側が落ちることはない。
       { timeout: 5_000 },
     );
     const callCountAfterRateLimit = fetchMock.mock.calls.length;
