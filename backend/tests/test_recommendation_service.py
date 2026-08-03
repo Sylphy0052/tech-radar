@@ -18,6 +18,7 @@ from techradar.db import (
     RecommendationRun,
     SourceRegistry,
     UserArticle,
+    UserSourcePreference,
 )
 from techradar.db.enums import ArticleOrigin, FeedbackAction, RecommendationMode, SourceType
 from techradar.recommendation.config import get_scoring_config
@@ -341,6 +342,61 @@ class TestLoadCandidatesResolvesSourceEntityNames:
         # Assert
         assert set(by_id[article.id].source_entity_names) == {"Anthropic", "anthropics"}
         assert by_id[unrelated_article.id].source_entity_names == ()
+
+
+class TestLoadCandidatesResolvesSourcePreferences:
+    """受入基準: 学習済みの情報源選好が採点対象（`CandidateSignature`）へ載る（Issue #34）。"""
+
+    def test_attaches_the_users_preference_for_the_articles_source(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange
+        user_id = uuid.uuid4()
+        preferred = make_article(db_session, title="好みの情報源", source_domain="blog.example.jp")
+        neutral = make_article(db_session, title="選好なし", source_domain="other.example.jp")
+        db_session.add(
+            UserSourcePreference(
+                user_id=user_id,
+                source_domain="blog.example.jp",
+                positive_weight=1.6,
+                negative_weight=0.0,
+                effective_weight=1.6,
+                updated_at=NOW,
+            )
+        )
+        db_session.flush()
+
+        # Act
+        candidates = load_candidates(db_session, user_id, NOW, settings)
+        by_id = {candidate.id: candidate for candidate in candidates}
+
+        # Assert — 行が無いドメインは中立（0.0）
+        assert by_id[preferred.id].source_preference == pytest.approx(1.6)
+        assert by_id[neutral.id].source_preference == pytest.approx(0.0)
+
+    def test_ignores_another_users_preference(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        other_user_id = uuid.uuid4()
+        article = make_article(db_session, source_domain="blog.example.jp")
+        db_session.add(
+            UserSourcePreference(
+                user_id=other_user_id,
+                source_domain="blog.example.jp",
+                positive_weight=1.6,
+                negative_weight=0.0,
+                effective_weight=1.6,
+                updated_at=NOW,
+            )
+        )
+        db_session.flush()
+
+        # Act
+        candidates = load_candidates(db_session, user_id, NOW, settings)
+        by_id = {candidate.id: candidate for candidate in candidates}
+
+        # Assert
+        assert by_id[article.id].source_preference == pytest.approx(0.0)
 
 
 class TestLoadCandidatesDeterministicOrder:

@@ -21,22 +21,26 @@ from techradar.api.feedback import (
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, UserArticle
 from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction, JobStatus, JobType
-from techradar.db.models import Job, UserTopicPreference
+from techradar.db.models import Job, UserSourcePreference, UserTopicPreference
 from techradar.main import create_app
 
 NOW = datetime(2026, 8, 1, tzinfo=UTC)
 
 
 def make_article(
-    session: Session, *, title: str = "記事タイトル", topics: Sequence[str] = ()
+    session: Session,
+    *,
+    title: str = "記事タイトル",
+    topics: Sequence[str] = (),
+    source_domain: str = "example.com",
 ) -> Article:
     """フィードバック対象として使う記事を DB へ保存する。"""
-    canonical_url = f"https://example.com/{uuid.uuid4().hex[:10]}"
+    canonical_url = f"https://{source_domain}/{uuid.uuid4().hex[:10]}"
     article = Article(
         canonical_url=canonical_url,
         original_url=canonical_url,
         title=title,
-        source_domain="example.com",
+        source_domain=source_domain,
         topics=list(topics),
         fetched_at=NOW,
     )
@@ -507,6 +511,12 @@ def _get_topic_preference(
     return db_session.get(UserTopicPreference, (user_id, topic))
 
 
+def _get_source_preference(
+    db_session: Session, user_id: uuid.UUID, source_domain: str
+) -> UserSourcePreference | None:
+    return db_session.get(UserSourcePreference, (user_id, source_domain))
+
+
 def _rebuild_jobs(db_session: Session) -> list[Job]:
     return list(
         db_session.scalars(
@@ -693,3 +703,84 @@ class TestDeleteArticleFeedbackRecomputesTopicPreferences:
         after = _get_topic_preference(db_session, settings.default_user_id, "llm")
         assert after is not None
         assert after.positive_weight == pytest.approx(positive_before)
+
+
+class TestCreateArticleFeedbackUpdatesSourcePreferences:
+    """受入基準: Good でその記事の情報源の選好が増える（Issue #34）。"""
+
+    def test_good_increases_the_sources_positive_and_effective_weight(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        article = make_article(db_session, source_domain="blog.example.jp")
+
+        # Act
+        client.post(f"/api/articles/{article.id}/feedback", json={"action": "good"})
+
+        # Assert
+        preference = _get_source_preference(db_session, settings.default_user_id, "blog.example.jp")
+        assert preference is not None
+        assert preference.positive_weight > 0.0
+        assert preference.effective_weight > 0.0
+
+    def test_a_single_bad_does_not_lower_an_existing_source_weight(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: 単発の Bad では情報源選好が下がらない。"""
+        # Arrange — 先に Good で情報源選好を作っておく
+        article = make_article(db_session, source_domain="blog.example.jp")
+        client.post(f"/api/articles/{article.id}/feedback", json={"action": "good"})
+        before = _get_source_preference(db_session, settings.default_user_id, "blog.example.jp")
+        assert before is not None
+
+        # Act — 同じ情報源の別記事を単発で Bad にする
+        other = make_article(db_session, title="別記事", source_domain="blog.example.jp")
+        client.post(f"/api/articles/{other.id}/feedback", json={"action": "bad"})
+
+        # Assert
+        after = _get_source_preference(db_session, settings.default_user_id, "blog.example.jp")
+        assert after is not None
+        assert after.negative_weight == pytest.approx(0.0)
+        assert after.effective_weight == pytest.approx(before.effective_weight)
+
+    def test_repeated_bad_lowers_the_source_weight(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: 同一情報源で Bad が繰り返された場合にのみ下がる。"""
+        # Arrange / Act — 同じ情報源の記事3件を Bad にして閾値（3/5）を満たす
+        for index in range(3):
+            article = make_article(
+                db_session, title=f"bad-{index}", source_domain="blog.example.jp"
+            )
+            client.post(f"/api/articles/{article.id}/feedback", json={"action": "bad"})
+
+        # Assert
+        preference = _get_source_preference(db_session, settings.default_user_id, "blog.example.jp")
+        assert preference is not None
+        assert preference.negative_weight > 0.0
+        assert preference.effective_weight < 0.0
+
+
+class TestDeleteArticleFeedbackRecomputesSourcePreferences:
+    def test_lowers_negative_weight_below_the_threshold_after_removing_one_bad(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        articles = [
+            make_article(db_session, title=f"bad-{i}", source_domain="blog.example.jp")
+            for i in range(3)
+        ]
+        for article in articles:
+            client.post(f"/api/articles/{article.id}/feedback", json={"action": "bad"})
+        before = _get_source_preference(db_session, settings.default_user_id, "blog.example.jp")
+        assert before is not None
+        assert before.negative_weight > 0.0
+
+        # Act — 1件だけ取り消す
+        response = client.delete(f"/api/articles/{articles[0].id}/feedback")
+
+        # Assert — 残り2件は閾値未満のため negative_weight が下がる
+        assert response.status_code == 204
+        after = _get_source_preference(db_session, settings.default_user_id, "blog.example.jp")
+        assert after is not None
+        assert after.negative_weight == pytest.approx(0.0)

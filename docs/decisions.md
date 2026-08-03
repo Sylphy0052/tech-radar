@@ -35,6 +35,41 @@
 | 既読記事の再表示 | 再表示するがスコアを減点する |
 | 保存と Good | 分ける（保存 +0.5 / Good +0.8） |
 | Bad 理由 | 任意。未選択でも Bad は成立する |
+| 情報源選好の推薦スコアへの合成 | 新しい重み項を足さず、`source_authority` の寄与に掛ける係数として合成する（下記） |
+
+### 情報源選好を `source_authority` の係数として合成する理由（Issue #34）
+
+`PROJECT_SPEC.md` §14 の式にある `source_authority` は `source_registry.authority_score`
+由来のユーザー横断で静的なスコアである。これに対し Good / Bad の履歴から学習する
+ユーザー固有の情報源選好（`user_source_preferences`）を、`recommendation_score` の
+7 番目の重み項として足すのではなく、`source_authority` の寄与に掛ける係数として
+合成する（`recommendation/ranking.py` の `SourcePreferenceGate`）。
+
+```text
+source_authority_contribution =
+    source_authority
+  × weights.source_authority   (0.30)
+  × authority_gate_factor      (既存: 関心一致度が低い公式記事を上位に出さない補正)
+  × source_preference_factor   (新規: clamp(1 + weight_scale × effective_weight, min, max))
+```
+
+理由:
+
+- 重み項として足すと、合計 1.0 という既存の制約（`recommendation/config.py` の
+  `_validate_weights_sum_to_one`）を満たすために既存 6 項目の配分を全面的に
+  引き直すことになり、Issue #11 以来調整してきた重み配分と、それを固定している
+  既存テストの期待値が一斉に変わる
+- 合計の外側で加点・減点する形にすると、`recommendation_score` が [0, 1] の
+  レンジから外れ、他の減点（`bad_penalty` 等）との大小比較の目安が崩れる
+- 「同じ情報源に対する評価」という意味で `source_authority` と対象が同じであり、
+  既存の `authority_gate`（同じ項に掛ける係数）と同じ流儀に揃うため、
+  スコア内訳（`recommendations.reasons`）を読むときの解釈も一貫する
+
+係数は上下限（`config/scoring.yaml` の `source_preference.min_factor` /
+`max_factor`）で挟む。`positive_weight` は Good のたびに累積し続けるため上限が
+無いと 1 つの情報源の寄与が青天井になり、逆に下限が無いと Bad が続いた情報源の
+権威性がゼロまで落ちてしまう（「抑制はするが完全排除はしない」という §6.1 の
+既読減点と同じ設計思想）。
 
 ## データ保持
 

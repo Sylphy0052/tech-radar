@@ -17,6 +17,7 @@
 #   feedback_weights: フィードバック種別ごとの重み（PROJECT_SPEC.md §7.1, §7.2）
 #   interest_decay : 関心の時間減衰の設定（§8）
 #   topic_preference: トピック単位の選好更新（Good/Bad の反映）の設定（§7.1, §7.2）
+#   source_preference: 情報源単位の選好更新と、その推薦スコアへの反映の設定（§7.1 手順 4）
 #   bad_similarity : Bad 記事と意味的に近い記事を抑制する設定（§7.2）
 #   clustering     : 関心クラスタ構築（KMeans）の設定（§8）
 #   interest_timeline: 関心タイムライン（GET /api/interests/timeline）の週数の既定値・上限値
@@ -163,6 +164,34 @@ topic_preference:
   # 1 段階あたりのトピック重み低下量。1 回のペナルティで重みが消し飛ばない
   # 程度に留め、繰り返しの Bad で段階的に下がるようにする
   decay_step: 0.2
+
+source_preference:
+  # 情報源選好の低下判定に見る、同一情報源の直近フィードバック件数。
+  # topic_preference と別管理にするのは、同一ドメインの記事はトピックより頻繁に
+  # 候補へ現れるため、閾値と低下量を独立に調整したいから（Issue #34）
+  recent_window: 5
+  # 直近 recent_window 件中この件数以上が Bad なら情報源選好を下げる
+  # （§7.2 の「一件のBadだけでは抑制しない」を情報源にも適用する）
+  bad_threshold: 3
+  # 1 段階あたりの情報源選好の低下量。effective_weight は
+  # positive_weight - negative_weight（符号付き）のため、feedback_weights.good
+  # （0.8）と比べて「閾値を1段階超えた Bad は Good 1〜2回分を打ち消す」程度の
+  # 効き方になる値にする
+  decay_step: 1.0
+  # effective_weight を source_authority の寄与へ掛ける係数に変換するときの傾き。
+  # Good 1 回（feedback_weights.good = 0.8）で係数が 1.12 になる程度に留め、
+  # 関心一致度など他の signal を情報源選好だけで押しのけないようにする。
+  # 0 を指定すると係数が常に 1.0 になり、情報源選好が推薦スコアへ効かなくなる
+  # （機能を無効化したいときの手段として許容する）
+  weight_scale: 0.15
+  # 係数の下限。Bad が続いた情報源でも、権威ある情報源というシグナル自体は
+  # 無価値ではないため寄与を完全にゼロにはしない（authority_gate.min_factor と同じ考え方）
+  min_factor: 0.5
+  # 係数の上限。positive_weight は Good のたびに累積し続けるため、
+  # 上限が無いと1つの情報源の寄与が青天井になる。
+  # min_factor と max_factor の範囲は 1.0（選好なしの中立値）を含む必要がある
+  # （含まないと、まだ学習していない情報源のスコアまで一律に動いてしまう）
+  max_factor: 1.5
 
 bad_similarity:
   # Bad 記事とのコサイン類似度がこれ以上なら抑制対象にする。緩すぎる閾値だと

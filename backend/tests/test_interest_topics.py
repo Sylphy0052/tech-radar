@@ -1,6 +1,8 @@
 """トピック単位の選好更新を検証する（`PROJECT_SPEC.md` §7.1, §7.2）。
 
-判定は純粋関数として実装するため、DB を使わずに検証できる。
+判定は純粋関数として実装するため、DB を使わずに検証できる。トピックと情報源
+（`interest/sources.py`）で共有する Bad 判定そのものの検証は
+`test_interest_preferences.py` が担う。
 """
 
 from __future__ import annotations
@@ -8,59 +10,19 @@ from __future__ import annotations
 import pytest
 
 from techradar.db.enums import FeedbackAction
+from techradar.interest.preferences import PreferenceDecaySettings, compute_negative_weight
 from techradar.interest.topics import (
-    TopicPreferenceSettings,
     TopicWeights,
     apply_bad_feedback,
     compute_effective_weight,
-    compute_negative_weight,
     increase_positive_weight,
-    should_penalize_topic,
 )
 from techradar.recommendation.config import DEFAULT_CONFIG_PATH, load_scoring_config
 
 GOOD = FeedbackAction.GOOD
 BAD = FeedbackAction.BAD
 
-SETTINGS = TopicPreferenceSettings(recent_window=5, bad_threshold=3, decay_step=0.2)
-
-
-class TestShouldPenalizeTopic:
-    def test_does_not_penalize_when_one_of_five_recent_is_bad(self):
-        # Arrange
-        recent = (BAD, GOOD, GOOD, GOOD, GOOD)
-        # Act / Assert — 直近5記事中1記事がBad
-        assert should_penalize_topic(recent, recent_window=5, bad_threshold=3) is False
-
-    def test_does_not_penalize_when_two_of_five_recent_are_bad(self):
-        # Arrange
-        recent = (BAD, BAD, GOOD, GOOD, GOOD)
-        # Act / Assert — 直近5記事中2記事がBad
-        assert should_penalize_topic(recent, recent_window=5, bad_threshold=3) is False
-
-    def test_penalizes_when_three_of_five_recent_are_bad(self):
-        # Arrange
-        recent = (BAD, BAD, BAD, GOOD, GOOD)
-        # Act / Assert — 直近5記事中3記事以上がBad（PROJECT_SPEC.md §7.2 の例）
-        assert should_penalize_topic(recent, recent_window=5, bad_threshold=3) is True
-
-    def test_penalizes_when_four_of_five_recent_are_bad(self):
-        # Arrange
-        recent = (BAD, BAD, BAD, BAD, GOOD)
-        # Act / Assert
-        assert should_penalize_topic(recent, recent_window=5, bad_threshold=3) is True
-
-    def test_penalizes_when_five_of_five_recent_are_bad(self):
-        # Arrange
-        recent = (BAD, BAD, BAD, BAD, BAD)
-        # Act / Assert
-        assert should_penalize_topic(recent, recent_window=5, bad_threshold=3) is True
-
-    def test_ignores_bad_feedback_outside_the_recent_window(self):
-        # Arrange — recent_window より古い（先頭から6件目以降の）Bad は数えない
-        recent = (GOOD, GOOD, GOOD, GOOD, GOOD, BAD, BAD, BAD)
-        # Act / Assert
-        assert should_penalize_topic(recent, recent_window=5, bad_threshold=3) is False
+SETTINGS = PreferenceDecaySettings(recent_window=5, bad_threshold=3, decay_step=0.2)
 
 
 class TestIncreasePositiveWeight:
@@ -125,43 +87,14 @@ class TestApplyBadFeedback:
 
 
 class TestComputeNegativeWeight:
-    """`negative_weight` を直近フィードバック集合から一意に導出することを検証する。
+    """トピック側の増加方向（`apply_bad_feedback`）が共有の導出関数と一致することを検証する。
 
-    「これまでの増分の累積」ではなく「今の直近集合が示す値」であることが、
-    フィードバック取り消し後の再計算（`interest/service.py` の
-    `recompute_topic_preferences_after_removal`）と整合する前提（Issue #15
-    自己レビュー 1）。
+    `negative_weight` を「これまでの増分の累積」ではなく「今の直近集合が示す値」
+    として導出すること自体の検証は `test_interest_preferences.py` が担う。ここで
+    見るのは、その共有関数と取り消し後の再計算（`interest/service.py` の
+    `recompute_topic_preferences_after_removal`）が食い違わない前提（Issue #15
+    自己レビュー 1）だけ。
     """
-
-    def test_returns_zero_when_below_the_threshold(self):
-        # Arrange
-        recent = (BAD, BAD, GOOD, GOOD, GOOD)
-        # Act / Assert — 直近5件中2件のBadでは抑制しない
-        assert compute_negative_weight(recent, SETTINGS) == pytest.approx(0.0)
-
-    def test_returns_one_step_at_the_exact_threshold(self):
-        # Arrange
-        recent = (BAD, BAD, BAD, GOOD, GOOD)
-        # Act / Assert — ちょうど閾値（3/5）で decay_step 1 段階分
-        assert compute_negative_weight(recent, SETTINGS) == pytest.approx(0.2)
-
-    def test_returns_more_steps_when_more_bad_than_the_threshold(self):
-        # Arrange
-        recent = (BAD, BAD, BAD, BAD, BAD)
-        # Act / Assert — 5/5 が Bad（閾値を2件超過）で decay_step 3 段階分
-        assert compute_negative_weight(recent, SETTINGS) == pytest.approx(0.6)
-
-    def test_is_not_cumulative_across_calls(self):
-        """状態が呼び出し回数ではなく「今の直近集合」だけから定まることを固定する。"""
-        # Arrange
-        below_threshold = (BAD, BAD, GOOD, GOOD, GOOD)
-        at_threshold = (BAD, BAD, BAD, GOOD, GOOD)
-        # Act — 同じ入力なら、直前に別の入力で何度呼んでいても結果は変わらない
-        compute_negative_weight(at_threshold, SETTINGS)
-        compute_negative_weight(at_threshold, SETTINGS)
-        result = compute_negative_weight(below_threshold, SETTINGS)
-        # Assert
-        assert result == pytest.approx(0.0)
 
     def test_is_consistent_with_apply_bad_feedback(self):
         """`apply_bad_feedback`（増加方向）と同じ値を返すことを固定する。"""
@@ -186,7 +119,7 @@ class TestTopicPreferenceReflectsConfigChanges:
         path = tmp_path / "scoring.yaml"
         path.write_text(modified, encoding="utf-8")
         config = load_scoring_config(path)
-        settings = TopicPreferenceSettings(
+        settings = PreferenceDecaySettings(
             recent_window=config.topic_preference.recent_window,
             bad_threshold=config.topic_preference.bad_threshold,
             decay_step=config.topic_preference.decay_step,

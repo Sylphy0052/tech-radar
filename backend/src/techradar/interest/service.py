@@ -23,15 +23,17 @@ from techradar.db.models import (
     ArticleFeedback,
     UserArticle,
     UserInterestCluster,
+    UserSourcePreference,
     UserTopicPreference,
 )
+from techradar.interest import sources
 from techradar.interest.clusters import ClusteringSettings, ClusterSource, build_interest_clusters
+from techradar.interest.preferences import PreferenceDecaySettings, compute_negative_weight
+from techradar.interest.sources import SourceWeights
 from techradar.interest.topics import (
-    TopicPreferenceSettings,
     TopicWeights,
     apply_bad_feedback,
     compute_effective_weight,
-    compute_negative_weight,
     increase_positive_weight,
 )
 from techradar.interest.weights import (
@@ -393,16 +395,30 @@ def update_topic_preferences(
         _upsert_topic_preference(session, user_id, topic, updated, now)
 
 
-def _topic_preference_settings(config: ScoringConfig) -> TopicPreferenceSettings:
-    """`get_scoring_config()` の `topic_preference` を `TopicPreferenceSettings` へ変換する。
+def _topic_preference_settings(config: ScoringConfig) -> PreferenceDecaySettings:
+    """`get_scoring_config()` の `topic_preference` を `PreferenceDecaySettings` へ変換する。
 
     `update_topic_preferences` と `recompute_topic_preferences_after_removal`
     の両方が同じ変換を必要とするための共有ヘルパー（DRY）。
     """
-    return TopicPreferenceSettings(
+    return PreferenceDecaySettings(
         recent_window=config.topic_preference.recent_window,
         bad_threshold=config.topic_preference.bad_threshold,
         decay_step=config.topic_preference.decay_step,
+    )
+
+
+def _source_preference_settings(config: ScoringConfig) -> PreferenceDecaySettings:
+    """`get_scoring_config()` の `source_preference` を `PreferenceDecaySettings` へ変換する。
+
+    トピック側（`_topic_preference_settings`）とは別の設定セクションから読む。
+    同一ドメインの記事はトピックより頻繁に候補へ現れるため、閾値と低下量を
+    トピックと共用せず独立して調整できるようにしている（Issue #34）。
+    """
+    return PreferenceDecaySettings(
+        recent_window=config.source_preference.recent_window,
+        bad_threshold=config.source_preference.bad_threshold,
+        decay_step=config.source_preference.decay_step,
     )
 
 
@@ -477,6 +493,193 @@ def recompute_topic_preferences_after_removal(
             effective=compute_effective_weight(current.positive, new_negative),
         )
         _upsert_topic_preference(session, user_id, topic, updated, now)
+
+
+def _current_source_weights(preference: UserSourcePreference | None) -> SourceWeights:
+    """既存行から `SourceWeights` を組み立てる。行が無ければ全て 0（初期状態）。"""
+    if preference is None:
+        return SourceWeights(positive=0.0, negative=0.0, effective=0.0)
+    return SourceWeights(
+        positive=preference.positive_weight,
+        negative=preference.negative_weight,
+        effective=preference.effective_weight,
+    )
+
+
+def _upsert_source_preference(
+    session: Session,
+    user_id: uuid.UUID,
+    source_domain: str,
+    weights: SourceWeights,
+    now: datetime,
+) -> None:
+    """`SourceWeights` を `user_source_preferences` へ upsert する。
+
+    TOCTOU の扱い（SAVEPOINT で一意制約違反を吸収する）と lost update に対する
+    判断は `_upsert_topic_preference` と同じ。単一ユーザー・ローカル実行が前提
+    （`CLAUDE.md` の制約）のため、行ロックまでは取らない。
+    """
+    existing = session.get(UserSourcePreference, (user_id, source_domain))
+    if existing is not None:
+        existing.positive_weight = weights.positive
+        existing.negative_weight = weights.negative
+        existing.effective_weight = weights.effective
+        existing.updated_at = now
+        session.flush()
+        return
+
+    preference = UserSourcePreference(
+        user_id=user_id,
+        source_domain=source_domain,
+        positive_weight=weights.positive,
+        negative_weight=weights.negative,
+        effective_weight=weights.effective,
+        updated_at=now,
+    )
+    try:
+        with session.begin_nested():
+            session.add(preference)
+    except IntegrityError as exc:
+        if not is_unique_violation(exc):
+            raise
+        # 同時リクエストで既に他方が挿入済み。既存行を読み直して更新する。
+        existing = session.get(UserSourcePreference, (user_id, source_domain))
+        if existing is None:
+            # 一意制約違反の直後のため理論上ここには来ない。到達した場合に
+            # 原因を追えるよう対象を記録する（`_upsert_topic_preference` と同じ方針）。
+            logger.error(
+                "一意制約違反の後に対象の情報源選好を再取得できませんでした: "
+                "user_id=%s source_domain=%s",
+                user_id,
+                source_domain,
+            )
+            raise
+        existing.positive_weight = weights.positive
+        existing.negative_weight = weights.negative
+        existing.effective_weight = weights.effective
+        existing.updated_at = now
+        session.flush()
+
+
+def _load_recent_source_actions(
+    session: Session, user_id: uuid.UUID, source_domain: str, limit: int
+) -> tuple[FeedbackAction, ...]:
+    """その情報源に関する直近 `limit` 件のフィードバックを新しい順で読む。
+
+    「その情報源に関する」は記事の `source_domain` の一致で判定する
+    （`articles.source_domain` にはインデックスがある）。SQL 側で `LIMIT` まで
+    絞ってから読むため、Python 側へ全件ロードしない（`_load_recent_topic_actions`
+    と同じ方針）。
+    """
+    rows = session.execute(
+        select(ArticleFeedback.action)
+        .join(Article, Article.id == ArticleFeedback.article_id)
+        .where(
+            ArticleFeedback.user_id == user_id,
+            Article.source_domain == source_domain,
+        )
+        .order_by(ArticleFeedback.created_at.desc(), ArticleFeedback.article_id.desc())
+        .limit(limit)
+    ).all()
+    return tuple(FeedbackAction(action) for (action,) in rows)
+
+
+def update_source_preferences(
+    session: Session,
+    user_id: uuid.UUID,
+    article_id: uuid.UUID,
+    action: FeedbackAction,
+    now: datetime,
+) -> None:
+    """フィードバックを対象記事の情報源単位の選好へ反映する（`PROJECT_SPEC.md` §7.1 手順 4）。
+
+    対象は記事の `source_domain` 1 件のみ（トピックと違い記事あたり 1 つに
+    定まる）。
+
+    * Good / 保存: `positive_weight` を増やす（増分は `config/scoring.yaml` の
+      `feedback_weights.good` / `save`。トピック側と同じ増分を使う。フィード
+      バックの強さは経路で決まるものであり、反映先がトピックか情報源かで
+      変わる性質ではないため）。
+    * Bad: 直近 `source_preference.recent_window` 件中
+      `source_preference.bad_threshold` 件以上が Bad のときだけ
+      `negative_weight` を段階的に増やす（`interest/sources.py` の
+      `apply_bad_feedback`）。条件を満たさない場合は書き込みすら行わない。
+
+    呼び出し規約は `update_topic_preferences` と同じ。呼び出し側
+    （`api/feedback.py`）は対象記事の `article_feedback` 行を upsert 済みの
+    状態で呼ぶこと（Bad の閾値判定にこの記事自身のフィードバックを含めるため）。
+    取り消し（DELETE）からは呼ばない（`recompute_source_preferences_after_removal`
+    が担う）。
+
+    記事が見つからない場合は何もしない。
+    """
+    article = session.get(Article, article_id)
+    if article is None:
+        return
+
+    if action not in _POSITIVE_FEEDBACK_ACTIONS and action is not FeedbackAction.BAD:
+        return
+
+    config = get_scoring_config()
+    source_domain = article.source_domain
+    current = _current_source_weights(session.get(UserSourcePreference, (user_id, source_domain)))
+
+    if action in _POSITIVE_FEEDBACK_ACTIONS:
+        increment = (
+            config.feedback_weights.good
+            if action is FeedbackAction.GOOD
+            else config.feedback_weights.save
+        )
+        updated = sources.increase_positive_weight(current, increment)
+        _upsert_source_preference(session, user_id, source_domain, updated, now)
+        return
+
+    settings = _source_preference_settings(config)
+    recent_actions = _load_recent_source_actions(
+        session, user_id, source_domain, settings.recent_window
+    )
+    updated = sources.apply_bad_feedback(current, recent_actions, settings)
+    if updated == current:
+        return
+    _upsert_source_preference(session, user_id, source_domain, updated, now)
+
+
+def recompute_source_preferences_after_removal(
+    session: Session, user_id: uuid.UUID, article_id: uuid.UUID, now: datetime
+) -> None:
+    """フィードバック取り消し後に情報源選好を再計算する。
+
+    `recompute_topic_preferences_after_removal` の情報源版で、判断も同じ。
+    取り消し後の直近フィードバック集合から `negative_weight` をゼロから
+    再計算し（差し引きではない）、`positive_weight` は据え置く。行も削除しない。
+
+    呼び出し側（`api/feedback.py` の `delete_article_feedback`）は、対象の
+    `article_feedback` 行を削除して `session.flush()` で確定させた **後** に
+    呼ぶこと（`_load_recent_source_actions` が読む直近集合から削除対象自身が
+    除かれている必要があるため）。
+
+    記事が見つからない場合は何もしない。
+    """
+    article = session.get(Article, article_id)
+    if article is None:
+        return
+
+    config = get_scoring_config()
+    settings = _source_preference_settings(config)
+    source_domain = article.source_domain
+    current = _current_source_weights(session.get(UserSourcePreference, (user_id, source_domain)))
+    new_negative = compute_negative_weight(
+        _load_recent_source_actions(session, user_id, source_domain, settings.recent_window),
+        settings,
+    )
+    if new_negative == current.negative:
+        return
+    updated = SourceWeights(
+        positive=current.positive,
+        negative=new_negative,
+        effective=sources.compute_effective_weight(current.positive, new_negative),
+    )
+    _upsert_source_preference(session, user_id, source_domain, updated, now)
 
 
 def _load_cluster_sources(

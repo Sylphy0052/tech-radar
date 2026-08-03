@@ -13,6 +13,7 @@ from techradar.db.models import (
     SourceRegistry,
     UserArticle,
     UserInterestCluster,
+    UserSourcePreference,
     UserTopicPreference,
 )
 from techradar.db.session import get_engine, get_session_factory, session_scope
@@ -30,6 +31,7 @@ __all__ = [
     "SourceRegistry",
     "UserArticle",
     "UserInterestCluster",
+    "UserSourcePreference",
     "UserTopicPreference",
     "get_engine",
     "get_session_factory",

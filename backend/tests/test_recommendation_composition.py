@@ -31,6 +31,7 @@ from techradar.recommendation.ranking import (
     ScorePenalties,
     ScoreWeights,
     ScoringSettings,
+    SourcePreferenceGate,
 )
 
 NOW = datetime(2026, 8, 1, tzinfo=UTC)
@@ -71,6 +72,7 @@ SETTINGS = ScoringSettings(
     feed_composition=FEED_COMPOSITION,
     limits=LIMITS,
     bad_similarity=BAD_SIMILARITY_SETTINGS,
+    source_preference=SourcePreferenceGate(weight_scale=0.15, min_factor=0.5, max_factor=1.5),
 )
 
 PAGE_SIZE = 20
@@ -91,6 +93,7 @@ def make_breakdown(
         technical_quality=0.0,
         novelty=novelty,
         authority_gate_factor=1.0,
+        source_preference_factor=1.0,
         interest_similarity_contribution=0.0,
         source_authority_contribution=0.0,
         source_article_match_contribution=0.0,

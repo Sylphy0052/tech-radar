@@ -49,6 +49,10 @@ class CandidateSignature:
     duplicate_penalty: float
     is_bad: bool
     is_read: bool
+    # この user がこの情報源に対して持つ選好（`user_source_preferences.effective_weight`、
+    # `interest/sources.py`）。正なら Good を重ねた情報源、負なら Bad が繰り返された
+    # 情報源。選好が無い（学習前の）情報源は 0.0（中立）で、既定値もそれに揃える。
+    source_preference: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -119,6 +123,27 @@ class AuthorityGate:
 
     min_interest_similarity: float
     min_factor: float
+
+
+@dataclass(frozen=True)
+class SourcePreferenceGate:
+    """情報源選好を `source_authority` の寄与へ反映する設定（Issue #34）。
+
+    `PROJECT_SPEC.md` §14 の式は `source_authority` をユーザー横断で静的な項と
+    して持つ。ユーザー固有の学習結果（`user_source_preferences`、
+    `interest/sources.py`）は新しい重み項として足すのではなく、この項に掛ける
+    係数として合成する。`AuthorityGate` と同じ乗算合成にすることで、重みの合計を
+    1.0 に保つ既存の制約（`recommendation/config.py` の
+    `_validate_weights_sum_to_one`）と既存の重み配分をそのまま維持できるため。
+    """
+
+    # `effective_weight` を係数へ変換するときの傾き。選好 1.0 あたりこの分だけ
+    # 係数が 1.0 から離れる。
+    weight_scale: float
+    # 係数の下限。Bad が続いた情報源でも権威性の寄与を完全にゼロにはしない。
+    min_factor: float
+    # 係数の上限。`positive_weight` は累積し続けるため、寄与が青天井にならないよう頭打ちにする。
+    max_factor: float
 
 
 @dataclass(frozen=True)
@@ -212,6 +237,7 @@ class ScoringSettings:
     feed_composition: FeedComposition
     limits: RankingLimits
     bad_similarity: BadSimilaritySettings
+    source_preference: SourcePreferenceGate
 
 
 # 寄与項目名と、理由文に使う言い回し（`build_reason_summary`）。
@@ -244,6 +270,9 @@ class ScoreBreakdown:
     novelty: float
     # `source_authority` の寄与に掛けたゲート係数（`AuthorityGate`）。
     authority_gate_factor: float
+    # `source_authority` の寄与に掛けた情報源選好の係数（`SourcePreferenceGate`）。
+    # `authority_gate_factor` とは独立に掛かる（両方の係数が同時に効きうる）。
+    source_preference_factor: float
     # 重み（と authority_gate）適用後の寄与。
     interest_similarity_contribution: float
     source_authority_contribution: float
@@ -275,6 +304,7 @@ class ScoreBreakdown:
             "technical_quality": self.technical_quality,
             "novelty": self.novelty,
             "authority_gate_factor": self.authority_gate_factor,
+            "source_preference_factor": self.source_preference_factor,
             "interest_similarity_contribution": self.interest_similarity_contribution,
             "source_authority_contribution": self.source_authority_contribution,
             "source_article_match_contribution": self.source_article_match_contribution,
@@ -465,6 +495,24 @@ def compute_bad_similarity_penalty(
     return settings.max_penalty * ratio
 
 
+def compute_source_preference_factor(source_preference: float, gate: SourcePreferenceGate) -> float:
+    """情報源選好を `source_authority` の寄与に掛ける係数へ変換する（Issue #34）。
+
+    `source_preference` は `user_source_preferences.effective_weight`
+    （`interest/sources.py` の `compute_effective_weight` が返す
+    `positive - negative` の符号付きの値）。選好が無い情報源（0.0）では 1.0 を
+    返し、従来のスコアと一致する（学習前は挙動を変えない）。
+
+    係数は `1.0 + weight_scale × source_preference` を `[min_factor, max_factor]`
+    で挟んだ値。`positive_weight` は Good のたびに累積し続けるため上限が無いと
+    寄与が青天井になり、逆に Bad が続いた情報源も下限が無いと権威性の寄与が
+    ゼロまで落ちてしまう。「抑制はするが完全排除はしない」という §6.1 の既読
+    減点と同じ設計思想に揃えるため、両側で頭打ちにする。
+    """
+    raw = 1.0 + gate.weight_scale * source_preference
+    return min(max(raw, gate.min_factor), gate.max_factor)
+
+
 def _authority_gate_factor(interest_similarity: float, gate: AuthorityGate) -> float:
     """`source_authority` の寄与に掛けるゲート係数を返す。
 
@@ -496,10 +544,17 @@ def score_candidate(
     novelty = compute_novelty(candidate, profile, settings.novelty)
 
     gate_factor = _authority_gate_factor(interest_similarity, settings.authority_gate)
+    # ユーザー固有の情報源選好（Issue #34）。`gate_factor` とは独立に、同じ
+    # `source_authority` の寄与へ掛け合わせる。
+    preference_factor = compute_source_preference_factor(
+        candidate.source_preference, settings.source_preference
+    )
 
     weights = settings.weights
     interest_similarity_contribution = interest_similarity * weights.interest_similarity
-    source_authority_contribution = source_authority * weights.source_authority * gate_factor
+    source_authority_contribution = (
+        source_authority * weights.source_authority * gate_factor * preference_factor
+    )
     source_article_match_contribution = source_article_match * weights.source_article_match
     freshness_contribution = freshness * weights.freshness
     technical_quality_contribution = technical_quality * weights.technical_quality
@@ -535,6 +590,7 @@ def score_candidate(
         technical_quality=technical_quality,
         novelty=novelty,
         authority_gate_factor=gate_factor,
+        source_preference_factor=preference_factor,
         interest_similarity_contribution=interest_similarity_contribution,
         source_authority_contribution=source_authority_contribution,
         source_article_match_contribution=source_article_match_contribution,

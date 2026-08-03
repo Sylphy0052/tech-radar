@@ -222,6 +222,24 @@ class TestNeedsEmbedding:
 class TestSimilaritySearch:
     """並び順とフィルタ条件の検証。意味的なランキング品質は検証しない。"""
 
+    @pytest.fixture(autouse=True)
+    def _exact_search(self, db_session: Session) -> None:
+        """このクラスの検索を厳密（総当たり）にする。
+
+        `ix_articles_embedding_hnsw` は HNSW（近似最近傍）インデックスであり、
+        プランナがこれを選ぶと「存在するのに返らない」行が出る。特にテスト実行中は
+        ロールバックされた大量の記事行が dead tuple として HNSW のグラフに残り、
+        `hnsw.ef_search`（既定 40）の探索打ち切りまでに live 行へ到達できないこと
+        がある。実際、テーブルに live 行が 2 件しか無い状況でも 1 件しか返らない
+        ケースを観測した（プランが Seq Scan のときは厳密なため常に 2 件返る）。
+
+        どちらのプランが選ばれるかは autoanalyze の実行タイミング次第で、テストの
+        追加によって記事行が増えるだけで結果が変わってしまう。ここで検証したいのは
+        「距離順に並ぶこと」「フィルタ条件が効くこと」であって近似探索の再現率では
+        ないため、インデックススキャンを止めて厳密な結果に固定する。
+        """
+        db_session.execute(text("SET LOCAL enable_indexscan = off"))
+
     def test_orders_by_distance(self, db_session: Session, provider: FakeEmbeddingProvider):
         # Arrange — 既知の距離関係を作る。near はクエリと同一方向、
         # far は直交に近い方向を向く
