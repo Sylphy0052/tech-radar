@@ -31,6 +31,7 @@ from techradar.recommendation.ranking import (
     ScorePenalties,
     ScoreWeights,
     ScoringSettings,
+    SourcePreferenceGate,
 )
 
 # backend/src/techradar/recommendation/config.py から 3 階層上が backend/
@@ -259,6 +260,47 @@ class TopicPreferenceConfig(BaseModel):
         return self
 
 
+class SourcePreferenceConfig(BaseModel):
+    """情報源単位の選好更新と、その推薦スコアへの反映の設定（`PROJECT_SPEC.md` §7.1 手順 4）。
+
+    前半 3 項目（`recent_window` / `bad_threshold` / `decay_step`）は選好の更新側
+    （`interest/sources.py`）が使い、後半 3 項目（`weight_scale` / `min_factor` /
+    `max_factor`）は採点側（`recommendation/ranking.py` の
+    `SourcePreferenceGate`）が使う。`topic_preference` と同じ値を共有せず別
+    セクションにしているのは、同一ドメインの記事がトピックより頻繁に候補へ
+    現れるため、閾値と低下量を独立に調整できるようにするため（Issue #34）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    recent_window: int = Field(ge=MIN_RECENT_WINDOW)
+    bad_threshold: int = Field(ge=MIN_BAD_THRESHOLD)
+    decay_step: float = Field(gt=0.0)
+    weight_scale: float = Field(ge=0.0)
+    min_factor: float = Field(ge=0.0)
+    max_factor: float = Field(ge=0.0)
+
+    @model_validator(mode="after")
+    def _validate_bad_threshold_within_window(self) -> SourcePreferenceConfig:
+        if self.bad_threshold > self.recent_window:
+            message = (
+                "bad_threshold は recent_window 以下である必要があります: "
+                f"bad_threshold={self.bad_threshold}, recent_window={self.recent_window}"
+            )
+            raise ValueError(message)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_min_within_max_factor(self) -> SourcePreferenceConfig:
+        if self.min_factor > self.max_factor:
+            message = (
+                "min_factor は max_factor 以下である必要があります: "
+                f"min_factor={self.min_factor}, max_factor={self.max_factor}"
+            )
+            raise ValueError(message)
+        return self
+
+
 class BadSimilarityConfig(BaseModel):
     """Bad 記事と意味的に近い記事を抑制する設定（`PROJECT_SPEC.md` §7.2）。"""
 
@@ -348,6 +390,7 @@ class ScoringConfig(BaseModel):
     feedback_weights: FeedbackWeightsConfig
     interest_decay: InterestDecayConfig
     topic_preference: TopicPreferenceConfig
+    source_preference: SourcePreferenceConfig
     bad_similarity: BadSimilarityConfig
     clustering: ClusteringConfig
     interest_timeline: InterestTimelineConfig
@@ -417,6 +460,11 @@ class ScoringConfig(BaseModel):
             bad_similarity=BadSimilaritySettings(
                 min_similarity=self.bad_similarity.min_similarity,
                 max_penalty=self.bad_similarity.max_penalty,
+            ),
+            source_preference=SourcePreferenceGate(
+                weight_scale=self.source_preference.weight_scale,
+                min_factor=self.source_preference.min_factor,
+                max_factor=self.source_preference.max_factor,
             ),
         )
 

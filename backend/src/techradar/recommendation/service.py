@@ -23,6 +23,7 @@ from techradar.db import (
     RecommendationRun,
     SourceRegistry,
     UserArticle,
+    UserSourcePreference,
 )
 from techradar.db.enums import ArticleOrigin, FeedbackAction, RecommendationMode
 from techradar.interest.service import (
@@ -255,18 +256,34 @@ def load_candidates(
         if github_org is not None:
             names.append(github_org)
 
+    # 情報源選好（Issue #34）も候補記事数に関わらず 1 クエリで読み、N+1 を作らない
+    # （`source_registry` と同じ扱い）。行が無いドメインは選好なし（0.0）として扱う。
+    preference_by_domain: dict[str, float] = {}
+    for source_domain, effective_weight in session.execute(
+        select(UserSourcePreference.source_domain, UserSourcePreference.effective_weight).where(
+            UserSourcePreference.user_id == user_id,
+            UserSourcePreference.source_domain.in_(domains),
+        )
+    ).all():
+        preference_by_domain[source_domain] = effective_weight
+
     return tuple(
         _to_candidate_signature(
             article,
             is_read=bool(origins_by_article_id.get(article.id, set()) & READ_ORIGIN_VALUES),
             source_entity_names=tuple(entity_names_by_domain.get(article.source_domain, ())),
+            source_preference=preference_by_domain.get(article.source_domain, 0.0),
         )
         for article in articles
     )
 
 
 def _to_candidate_signature(
-    article: Article, *, is_read: bool, source_entity_names: tuple[str, ...]
+    article: Article,
+    *,
+    is_read: bool,
+    source_entity_names: tuple[str, ...],
+    source_preference: float = 0.0,
 ) -> CandidateSignature:
     """`Article` を採点用の `CandidateSignature` へ変換する。
 
@@ -288,6 +305,7 @@ def _to_candidate_signature(
         duplicate_penalty=article.duplicate_penalty,
         is_bad=False,
         is_read=is_read,
+        source_preference=source_preference,
     )
 
 
