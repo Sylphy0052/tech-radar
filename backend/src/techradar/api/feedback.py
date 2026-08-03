@@ -7,7 +7,8 @@ Good / Bad / 保存の意思表示を記録する。`article_feedback` は 1 ユ
 Issue #15（関心プロファイル更新）により、フィードバックのたびにトピック単位の
 選好（`user_topic_preferences`）を同期更新し、関心クラスタ（`user_interest_clusters`）
 の再構築ジョブを積む。クラスタ再構築自体は同期実行しない（`_enqueue_interest_cluster_rebuild`
-docstring 参照）。
+docstring 参照）。Issue #34 では同じ経路で情報源単位の選好
+（`user_source_preferences`、`PROJECT_SPEC.md` §7.1 手順 4）も同期更新する。
 """
 
 from __future__ import annotations
@@ -28,7 +29,9 @@ from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction, JobType
 from techradar.db.errors import is_unique_violation
 from techradar.db.models import Article, ArticleFeedback, UserArticle
 from techradar.interest.service import (
+    recompute_source_preferences_after_removal,
     recompute_topic_preferences_after_removal,
+    update_source_preferences,
     update_topic_preferences,
 )
 from techradar.jobs.queue import enqueue
@@ -301,6 +304,9 @@ def create_article_feedback(
     # 見る（`update_topic_preferences` の docstring 参照）ため、必ず
     # `_upsert_feedback` の後に呼ぶ。
     update_topic_preferences(session, user_id, article_id, payload.action, now)
+    # 情報源選好も同じ理由（Bad の閾値判定に今回のフィードバックを含める）で
+    # `_upsert_feedback` の後に呼ぶ（Issue #34）。
+    update_source_preferences(session, user_id, article_id, payload.action, now)
     _enqueue_interest_cluster_rebuild(session, user_id)
     session.commit()
     return feedback
@@ -341,6 +347,7 @@ def delete_article_feedback(
     session.delete(feedback)
     session.flush()
     recompute_topic_preferences_after_removal(session, user_id, article_id, now)
+    recompute_source_preferences_after_removal(session, user_id, article_id, now)
     _remove_feedback_derived_user_article(session, user_id, article_id)
     _enqueue_interest_cluster_rebuild(session, user_id)
     session.commit()

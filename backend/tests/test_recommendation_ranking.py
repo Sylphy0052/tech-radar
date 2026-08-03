@@ -25,6 +25,7 @@ from techradar.recommendation.ranking import (
     ScorePenalties,
     ScoreWeights,
     ScoringSettings,
+    SourcePreferenceGate,
     WeightedEmbedding,
     build_reason_summary,
     compute_bad_similarity_penalty,
@@ -32,6 +33,7 @@ from techradar.recommendation.ranking import (
     compute_interest_similarity,
     compute_novelty,
     compute_source_article_match,
+    compute_source_preference_factor,
     cosine_similarity,
     rank_candidates,
     score_candidate,
@@ -63,6 +65,7 @@ FEED_COMPOSITION = FeedComposition(
 )
 LIMITS = RankingLimits(max_candidates_per_run=500, default_page_size=20, max_page_size=100)
 BAD_SIMILARITY_SETTINGS = BadSimilaritySettings(min_similarity=0.7, max_penalty=0.5)
+SOURCE_PREFERENCE_GATE = SourcePreferenceGate(weight_scale=0.15, min_factor=0.5, max_factor=1.5)
 
 SETTINGS = ScoringSettings(
     weights=WEIGHTS,
@@ -75,6 +78,7 @@ SETTINGS = ScoringSettings(
     feed_composition=FEED_COMPOSITION,
     limits=LIMITS,
     bad_similarity=BAD_SIMILARITY_SETTINGS,
+    source_preference=SOURCE_PREFERENCE_GATE,
 )
 
 
@@ -104,6 +108,7 @@ def make_candidate(
     duplicate_penalty: float = 0.0,
     is_bad: bool = False,
     is_read: bool = False,
+    source_preference: float = 0.0,
 ) -> CandidateSignature:
     """テスト用の `CandidateSignature` を作る。指定しない項目は無難な既定値にする。"""
     return CandidateSignature(
@@ -121,6 +126,7 @@ def make_candidate(
         duplicate_penalty=duplicate_penalty,
         is_bad=is_bad,
         is_read=is_read,
+        source_preference=source_preference,
     )
 
 
@@ -661,6 +667,7 @@ class TestScoreCandidate:
             "technical_quality",
             "novelty",
             "authority_gate_factor",
+            "source_preference_factor",
             "interest_similarity_contribution",
             "source_authority_contribution",
             "source_article_match_contribution",
@@ -737,6 +744,23 @@ class TestAuthorityGate:
             0.8 * WEIGHTS.source_authority * AUTHORITY_GATE.min_factor
         )
 
+    def test_source_preference_does_not_change_the_authority_gate_factor(self):
+        # Arrange — 2 つの係数は独立している。情報源選好はゲート係数を動かさない
+        candidate = make_candidate(
+            embedding=(0.0, 1.0), source_authority=0.8, source_preference=2.0
+        )
+        profile = InterestProfile(
+            embeddings=make_weighted_embeddings((1.0, 0.0)),
+            known_topics=frozenset(),
+            bad_embeddings=(),
+        )
+
+        # Act
+        breakdown = score_candidate(candidate, profile, SETTINGS, NOW)
+
+        # Assert
+        assert breakdown.authority_gate_factor == pytest.approx(AUTHORITY_GATE.min_factor)
+
     def test_interpolates_linearly_between_the_minimum_and_the_gate_threshold(self):
         # Arrange — gate.min_interest_similarity（0.8）の半分の類似度（0.4）なら、
         # 係数も min_factor（0.0）と 1.0 のちょうど中間（0.5）になる
@@ -756,6 +780,115 @@ class TestAuthorityGate:
         # Assert
         assert breakdown.interest_similarity == pytest.approx(0.4, rel=1e-3)
         assert breakdown.authority_gate_factor == pytest.approx(0.5, rel=1e-3)
+
+
+class TestComputeSourcePreferenceFactor:
+    """情報源選好を `source_authority` の寄与に掛ける係数へ変換する（Issue #34）。"""
+
+    def test_returns_one_when_the_user_has_no_preference_for_the_source(self):
+        # Arrange / Act — 選好が無い（0.0）情報源は中立
+        factor = compute_source_preference_factor(0.0, SOURCE_PREFERENCE_GATE)
+        # Assert
+        assert factor == pytest.approx(1.0)
+
+    def test_raises_the_factor_for_a_positively_preferred_source(self):
+        # Arrange / Act — Good を重ねた情報源（effective_weight が正）
+        factor = compute_source_preference_factor(1.6, SOURCE_PREFERENCE_GATE)
+        # Assert — 1.0 + 0.15 × 1.6
+        assert factor == pytest.approx(1.24)
+
+    def test_lowers_the_factor_for_a_negatively_preferred_source(self):
+        # Arrange / Act — Bad が繰り返された情報源（effective_weight が負）
+        factor = compute_source_preference_factor(-2.0, SOURCE_PREFERENCE_GATE)
+        # Assert — 1.0 - 0.15 × 2.0
+        assert factor == pytest.approx(0.7)
+
+    def test_clamps_at_the_maximum_factor(self):
+        # Arrange / Act — 選好は累積し続けるため、寄与が青天井にならないよう頭打ちにする
+        factor = compute_source_preference_factor(100.0, SOURCE_PREFERENCE_GATE)
+        # Assert
+        assert factor == pytest.approx(SOURCE_PREFERENCE_GATE.max_factor)
+
+    def test_clamps_at_the_minimum_factor(self):
+        # Arrange / Act — 抑制はするが、情報源の権威性を完全にゼロにはしない
+        factor = compute_source_preference_factor(-100.0, SOURCE_PREFERENCE_GATE)
+        # Assert
+        assert factor == pytest.approx(SOURCE_PREFERENCE_GATE.min_factor)
+
+
+class TestSourcePreferenceInScore:
+    """受入基準「情報源選好が推薦スコアへ反映される」（Issue #34）。"""
+
+    def _profile(self) -> InterestProfile:
+        return InterestProfile(
+            embeddings=make_weighted_embeddings((1.0, 0.0)),
+            known_topics=frozenset(),
+            bad_embeddings=(),
+        )
+
+    def test_a_preferred_source_scores_higher_than_a_neutral_one(self):
+        # Arrange
+        preferred = make_candidate(
+            embedding=(1.0, 0.0), source_authority=0.8, source_preference=2.0
+        )
+        neutral = make_candidate(embedding=(1.0, 0.0), source_authority=0.8)
+
+        # Act
+        preferred_breakdown = score_candidate(preferred, self._profile(), SETTINGS, NOW)
+        neutral_breakdown = score_candidate(neutral, self._profile(), SETTINGS, NOW)
+
+        # Assert
+        assert preferred_breakdown.total > neutral_breakdown.total
+        assert preferred_breakdown.source_preference_factor > 1.0
+
+    def test_a_suppressed_source_scores_lower_than_a_neutral_one(self):
+        # Arrange
+        suppressed = make_candidate(
+            embedding=(1.0, 0.0), source_authority=0.8, source_preference=-2.0
+        )
+        neutral = make_candidate(embedding=(1.0, 0.0), source_authority=0.8)
+
+        # Act
+        suppressed_breakdown = score_candidate(suppressed, self._profile(), SETTINGS, NOW)
+        neutral_breakdown = score_candidate(neutral, self._profile(), SETTINGS, NOW)
+
+        # Assert
+        assert suppressed_breakdown.total < neutral_breakdown.total
+        assert suppressed_breakdown.source_preference_factor < 1.0
+
+    def test_multiplies_only_the_source_authority_contribution(self):
+        # Arrange — 係数は source_authority の寄与だけに掛かり、他項目は動かない
+        candidate = make_candidate(
+            embedding=(1.0, 0.0),
+            source_authority=0.8,
+            technical_quality=0.7,
+            source_preference=2.0,
+        )
+
+        # Act
+        breakdown = score_candidate(candidate, self._profile(), SETTINGS, NOW)
+
+        # Assert
+        assert breakdown.source_preference_factor == pytest.approx(1.3)
+        assert breakdown.source_authority_contribution == pytest.approx(
+            0.8 * WEIGHTS.source_authority * 1.3
+        )
+        assert breakdown.technical_quality_contribution == pytest.approx(
+            0.7 * WEIGHTS.technical_quality
+        )
+
+    def test_no_preference_keeps_the_score_identical_to_the_previous_behavior(self):
+        # Arrange — 退行防止: 選好が無ければ係数 1.0 で従来と同じ寄与になる
+        candidate = make_candidate(embedding=(1.0, 0.0), source_authority=0.8)
+
+        # Act
+        breakdown = score_candidate(candidate, self._profile(), SETTINGS, NOW)
+
+        # Assert
+        assert breakdown.source_preference_factor == pytest.approx(1.0)
+        assert breakdown.source_authority_contribution == pytest.approx(
+            0.8 * WEIGHTS.source_authority
+        )
 
 
 class TestRankCandidates:

@@ -25,6 +25,7 @@ from techradar.recommendation.ranking import (
     ScorePenalties,
     ScoreWeights,
     ScoringSettings,
+    SourcePreferenceGate,
 )
 
 VALID_YAML = """\
@@ -78,6 +79,13 @@ topic_preference:
   recent_window: 5
   bad_threshold: 3
   decay_step: 0.2
+source_preference:
+  recent_window: 5
+  bad_threshold: 3
+  decay_step: 1.0
+  weight_scale: 0.15
+  min_factor: 0.5
+  max_factor: 1.5
 bad_similarity:
   min_similarity: 0.7
   max_penalty: 0.5
@@ -259,6 +267,38 @@ class TestLoading:
         assert config.topic_preference.bad_threshold == 3
         assert config.topic_preference.decay_step == 0.2
 
+    def test_loads_the_bundled_source_preference(self, config: ScoringConfig):
+        # Arrange / Act / Assert — 情報源選好は専用セクションで管理する（Issue #34）
+        assert config.source_preference.recent_window == 5
+        assert config.source_preference.bad_threshold == 3
+        assert config.source_preference.decay_step == 1.0
+        assert config.source_preference.weight_scale == 0.15
+        assert config.source_preference.min_factor == 0.5
+        assert config.source_preference.max_factor == 1.5
+
+    def test_rejects_a_source_preference_min_factor_larger_than_the_max_factor(
+        self, tmp_path: Path
+    ):
+        # Arrange — 係数の下限が上限を超える設定は clamp が成立しない
+        broken = VALID_YAML.replace("min_factor: 0.5", "min_factor: 2.0")
+        path = write_config(tmp_path, broken)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="min_factor"):
+            load_scoring_config(path)
+
+    def test_rejects_a_source_preference_range_that_excludes_the_neutral_factor(
+        self, tmp_path: Path
+    ):
+        # Arrange — 範囲が 1.0 を含まないと、選好が無い情報源にも係数が掛かり
+        # 「学習前は従来と同じスコア」という前提が崩れる
+        broken = VALID_YAML.replace("min_factor: 0.5", "min_factor: 1.1")
+        path = write_config(tmp_path, broken)
+
+        # Act / Assert
+        with pytest.raises(ValueError, match=r"1\.0"):
+            load_scoring_config(path)
+
     def test_loads_the_bundled_bad_similarity(self, config: ScoringConfig):
         # Arrange / Act / Assert
         assert config.bad_similarity.min_similarity == 0.7
@@ -310,6 +350,7 @@ class TestConversionToRankingDataclasses:
         assert isinstance(settings.feed_composition, FeedComposition)
         assert isinstance(settings.limits, RankingLimits)
         assert isinstance(settings.bad_similarity, BadSimilaritySettings)
+        assert isinstance(settings.source_preference, SourcePreferenceGate)
 
     def test_preserves_values_through_the_conversion(self, config: ScoringConfig):
         # Arrange / Act
@@ -327,6 +368,9 @@ class TestConversionToRankingDataclasses:
         assert settings.limits.max_candidates_per_run == 500
         assert settings.bad_similarity.min_similarity == 0.7
         assert settings.bad_similarity.max_penalty == 0.5
+        assert settings.source_preference.weight_scale == 0.15
+        assert settings.source_preference.min_factor == 0.5
+        assert settings.source_preference.max_factor == 1.5
 
 
 class TestWeightsSumToOneAcrossConfig:
