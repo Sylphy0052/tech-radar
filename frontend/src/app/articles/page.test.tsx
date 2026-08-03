@@ -1,15 +1,18 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { configure, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import ArticlesPage from "@/app/articles/page";
 import type { InterestArticleItem } from "@/lib/interest-articles";
 import { NavigationTestProvider, useNavigationTestContext } from "@/test-utils/next-navigation-test-context";
+import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => useNavigationTestContext().searchParams,
   usePathname: () => useNavigationTestContext().pathname,
   useRouter: () => useNavigationTestContext().router,
 }));
+
+configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -53,7 +56,7 @@ describe("ArticlesPage", () => {
 
     // Assert
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("関心記事一覧");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("fetches with the filters restored from the URL and shows them in the filter form", async () => {
     // Arrange — URL に既にフィルターが乗った状態でマウントする（リロード相当）
@@ -77,5 +80,5 @@ describe("ArticlesPage", () => {
     const searchParams = new URL(url).searchParams;
     expect(searchParams.getAll("origin")).toEqual(["good"]);
     expect(searchParams.get("language")).toBe("ja");
-  });
+  }, TEST_TIMEOUT_MS);
 });

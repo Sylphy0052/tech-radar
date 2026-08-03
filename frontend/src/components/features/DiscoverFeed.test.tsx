@@ -354,7 +354,9 @@ describe("DiscoverFeed", () => {
   it("marks the Good button as pressed even when clicked in the same tick it appears (Issue #37)", async () => {
     // Arrange — 記事が DOM に出た瞬間（React の passive effect が走る前）に
     // クリックする。MutationObserver のコールバックはマイクロタスク、passive
-    // effect はマクロタスク（MessageChannel）で走るため、この順序は必ず成立する。
+    // effect はマクロタスク（MessageChannel）で走るため、この順序は必ず成立する
+    // （React のスケジューリング実装に依存する前提のため、React の major 更新時は
+    // この再現が生きているかを確認すること）。
     // 以前はこの窓でクリックすると、hook が最新の items をまだ読めず、操作が
     // 黙って捨てられていた（Issue #37）。
     const items = makeItems(1, "only");

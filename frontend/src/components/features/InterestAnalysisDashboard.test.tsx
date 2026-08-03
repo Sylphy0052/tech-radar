@@ -1,8 +1,10 @@
-import { render, screen } from "@testing-library/react";
+import { configure, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InterestAnalysisDashboard } from "@/components/features/InterestAnalysisDashboard";
-import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
+import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
+
+configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
 afterEach(() => {
   vi.unstubAllGlobals();

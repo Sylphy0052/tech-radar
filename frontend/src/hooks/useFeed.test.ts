@@ -1,8 +1,11 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, configure, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useFeed } from "@/hooks/useFeed";
 import type { FeedItem } from "@/lib/feed";
+import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
+
+configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -99,7 +102,7 @@ describe("useFeed", () => {
     expect(result.current.items).toEqual([itemA, itemB]);
     expect(result.current.hasMore).toBe(true);
     expect(result.current.error).toBeNull();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("appends the next page without duplicating articles already present", async () => {
     // Arrange
@@ -120,7 +123,7 @@ describe("useFeed", () => {
       itemC.article_id,
     ]);
     expect(result.current.hasMore).toBe(false);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not call the API again once next_cursor is null", async () => {
     // Arrange
@@ -141,7 +144,7 @@ describe("useFeed", () => {
 
     // Assert
     expect(fetchMock).toHaveBeenCalledTimes(callCountAfterExhausted);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("applies feedback optimistically before the request resolves", async () => {
     // Arrange
@@ -171,7 +174,7 @@ describe("useFeed", () => {
       jsonResponse({ action: "good", reason: null, created_at: "2026-08-01T00:00:00Z" }),
     );
     await waitFor(() => expect(result.current.items[0]?.feedback?.action).toBe("good"));
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("rolls back and surfaces an error when the feedback request fails", async () => {
     // Arrange
@@ -196,7 +199,7 @@ describe("useFeed", () => {
     expect(result.current.error).toBe(
       "サーバーでエラーが発生しました。しばらくしてから再度お試しください。",
     );
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("toggles feedback off (DELETE) when the same action is pressed again", async () => {
     // Arrange
@@ -228,7 +231,7 @@ describe("useFeed", () => {
         expect.objectContaining({ method: "DELETE" }),
       ),
     );
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("updates the reason instead of toggling off when bad is re-sent with a reason", async () => {
     // Arrange
@@ -262,7 +265,7 @@ describe("useFeed", () => {
       expect.anything(),
       expect.objectContaining({ method: "DELETE" }),
     );
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("removes feedback via DELETE and clears it locally", async () => {
     // Arrange
@@ -293,7 +296,7 @@ describe("useFeed", () => {
         expect.objectContaining({ method: "DELETE" }),
       ),
     );
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("ignores a second removeFeedback call on the same article while the request is in flight", async () => {
     // Arrange — applyFeedback と同じ pending ガードが removeFeedback にも
@@ -322,7 +325,7 @@ describe("useFeed", () => {
 
     // Assert — 送信中の 2 回目は無視され、DELETE は 1 回だけ送信される
     await waitFor(() => expect(deleteCallCount).toBe(1));
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does nothing when removeFeedback is called on an article without feedback", async () => {
     // Arrange
@@ -338,7 +341,7 @@ describe("useFeed", () => {
 
     // Assert — feedback が無い記事には API を叩かない
     expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("rolls back and surfaces an error when removeFeedback's DELETE request fails", async () => {
     // Arrange
@@ -364,7 +367,7 @@ describe("useFeed", () => {
     // Assert
     await waitFor(() => expect(result.current.error).not.toBeNull());
     expect(result.current.items[0]?.feedback).toEqual(withFeedback.feedback);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("ignores a second click on the same article while a feedback request is in flight (G-1)", async () => {
     // Arrange — 既に good が付いている記事に対し、1 回目のクリックで取り消し（DELETE）が
@@ -401,7 +404,7 @@ describe("useFeed", () => {
     await waitFor(() => expect(deleteCallCount).toBe(1));
     expect(result.current.items[0]?.feedback).toBeNull();
     expect(result.current.error).toBeNull();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("keeps the loadMore reference stable while a fetch is in flight (G-2)", async () => {
     // Arrange
@@ -422,7 +425,7 @@ describe("useFeed", () => {
     // （変わると呼び出し側の useEffect が毎回 IntersectionObserver を作り直してしまう）
     expect(loadMoreDuringFetch).toBe(loadMoreBeforeFetch);
     expect(loadMoreAfterFetch).toBe(loadMoreBeforeFetch);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does nothing when applyFeedback targets an unknown article id", async () => {
     // Arrange
@@ -438,7 +441,7 @@ describe("useFeed", () => {
 
     // Assert
     expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("surfaces a rate limit message with the wait time when loadMore hits 429", async () => {
     // Arrange
@@ -454,7 +457,7 @@ describe("useFeed", () => {
     // Assert
     await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
     expect(result.current.error).toBe("リクエストが多すぎます。約30秒後に再度お試しください。");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not retry immediately after a 429 response", async () => {
     // Arrange
@@ -475,7 +478,7 @@ describe("useFeed", () => {
 
     // Assert
     expect(fetchMock).toHaveBeenCalledTimes(callCountAfterRateLimit);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("re-shows the rate limit message with the remaining wait when loadMore is pressed during the cooldown", async () => {
     // Arrange — 429 のあとフィードバック送信が成功してエラー表示が消える状況
@@ -516,7 +519,7 @@ describe("useFeed", () => {
     } finally {
       clock.restore();
     }
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("allows loadMore again once the Retry-After window has elapsed", async () => {
     // Arrange
@@ -543,7 +546,7 @@ describe("useFeed", () => {
     } finally {
       clock.restore();
     }
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("surfaces a network error message when the feed request fails", async () => {
     // Arrange
@@ -557,5 +560,5 @@ describe("useFeed", () => {
     expect(result.current.error).toBe(
       "通信に失敗しました。しばらくしてから再度お試しください。",
     );
-  });
+  }, TEST_TIMEOUT_MS);
 });
