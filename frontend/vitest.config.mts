@@ -14,6 +14,11 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
     globals: true,
+    // 既定の 5000ms だと、テスト内の `waitFor` に 5 秒を指定した時点でテスト
+    // 全体の持ち時間と並んでしまい、待ち切る前にテスト側が先にタイムアウト
+    // する（Issue #35）。個々の待機より十分長く取り、待機が本当に失敗した
+    // ときはタイムアウトではなく assert の失敗として原因が読める形にする。
+    testTimeout: 20_000,
     coverage: {
       provider: "v8",
       reporter: ["text", "lcov"],
