@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import type { PieLabelRenderProps } from "recharts";
 
 /**
@@ -5,8 +6,8 @@ import type { PieLabelRenderProps } from "recharts";
  *
  * 実際の色値は `globals.css` の CSS カスタムプロパティ（`--chart-*`）側に持たせ、
  * ここでは recharts の `fill` / `stroke` へそのまま渡せる `var(--chart-*)` 文字列
- * だけを export する。ライト/ダークの切替は CSS の `@media (prefers-color-scheme)`
- * が担うため、コンポーネント側でモード判定のロジックを持つ必要がない。
+ * だけを export する。画面はダーク固定（Issue #38）なので、コンポーネント側に
+ * 明暗の判定ロジックを持たせず、色の変更は `globals.css` だけで完結させる。
  */
 
 /**
@@ -45,6 +46,36 @@ export const CHART_GRID = "var(--chart-grid)";
 export const CHART_AXIS = "var(--chart-axis)";
 
 /**
+ * 軸の目盛りラベル（数値・カテゴリ名）の文字色。
+ *
+ * 軸線・罫線（`CHART_AXIS`/`CHART_GRID`）は控えめな色に留める一方、実際に
+ * 読む文字はそれより高いコントラストが要るため、本文の補助文字と同じ
+ * `--ink-muted` を割り当てる（Issue #38、ダーク固定）。
+ */
+export const CHART_TICK_FILL = "var(--ink-muted)";
+
+/**
+ * recharts の Tooltip 既定スタイル（白背景+黒文字）はダーク面の上で浮いて
+ * しまうため、パネルの手前面（`--surface-raised`）+ 操作可能な境界線
+ * （`--line-strong`）+ 本文文字（`--ink`）に揃える（Issue #38）。
+ *
+ * `contentStyle` は枠全体、`labelStyle` はツールチップ先頭のカテゴリ名部分に
+ * それぞれ渡す recharts 側の分割に合わせて2つに分けている。系列ごとの値
+ * （`itemStyle`）は各系列の色（`entry.color`、`fill`/`stroke` に渡した
+ * `CHART_SERIES` 等の値）を既定で使うため、ここでは上書きしない。
+ */
+export const CHART_TOOLTIP_CONTENT_STYLE: CSSProperties = {
+  backgroundColor: "var(--surface-raised)",
+  border: "1px solid var(--line-strong)",
+  borderRadius: "var(--radius)",
+  color: "var(--ink)",
+};
+
+export const CHART_TOOLTIP_LABEL_STYLE: CSSProperties = {
+  color: "var(--ink)",
+};
+
+/**
  * recharts の初期表示アニメーション（`isAnimationActive`）を無効化する共通値。
  *
  * 理由は2つ: (1) フィルター操作の無いこの画面では、開くたびにアニメーションが
@@ -55,6 +86,14 @@ export const CHART_AXIS = "var(--chart-axis)";
  * 分けて明示する）。
  */
 export const CHART_ANIMATION_ACTIVE = false;
+
+/**
+ * 円グラフのスライス同士を区切る線。
+ *
+ * recharts の既定は白のため、ダーク面の上ではスライスの外周が光って見えてしまう。
+ * カードの地色（`--surface`）を渡して、切れ目だけが見える状態にする（Issue #38）。
+ */
+export const CHART_PIE_STROKE = "var(--surface)";
 
 /** 円グラフのスライス1件（名称・値・色）。3つの円グラフコンポーネントで共通の形。 */
 export interface ChartPieSlice {

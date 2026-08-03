@@ -56,7 +56,7 @@ export function DiscoverFeed() {
 
   return (
     <section className="flex flex-col gap-4">
-      <h2 className="text-lg font-semibold">おすすめ記事</h2>
+      <h2 className="heading text-lg">おすすめ記事</h2>
       {error !== null && <ErrorMessage message={error} />}
 
       {items.length > 0 && (
@@ -79,7 +79,7 @@ export function DiscoverFeed() {
           ままなので、レート制限などの一時的な失敗を「記事が無い」と誤って伝えて
           しまう。 */}
       {items.length === 0 && !hasMore && error === null && (
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">表示できる記事がありません。</p>
+        <p className="font-mono text-sm text-ink-subtle">表示できる記事がありません。</p>
       )}
 
       {hasMore ? (
@@ -87,18 +87,14 @@ export function DiscoverFeed() {
           {isLoadingMore ? (
             <LoadingIndicator label="さらに読み込み中..." />
           ) : (
-            <button
-              type="button"
-              onClick={loadMore}
-              className="rounded border border-zinc-300 px-4 py-2 text-sm dark:border-zinc-700"
-            >
+            <button type="button" onClick={loadMore} className="btn">
               さらに読み込む
             </button>
           )}
         </div>
       ) : (
         items.length > 0 && (
-          <p className="text-center text-sm text-zinc-500 dark:text-zinc-400">
+          <p className="text-center font-mono text-sm text-ink-subtle">
             すべての記事を読み込みました
           </p>
         )

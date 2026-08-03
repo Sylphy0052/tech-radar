@@ -69,10 +69,10 @@ export function ArticleRegistrationForm() {
   }
 
   return (
-    <section className="flex flex-col gap-3">
-      <h2 className="text-lg font-semibold">記事URLを登録</h2>
+    <section className="panel flex flex-col gap-3">
+      <h2 className="heading text-lg">記事URLを登録</h2>
       <form onSubmit={handleSubmit} className="flex flex-col gap-2">
-        <label htmlFor={inputId} className="text-sm font-medium">
+        <label htmlFor={inputId} className="mono-label">
           記事のURL
         </label>
         <input
@@ -81,13 +81,9 @@ export function ArticleRegistrationForm() {
           value={url}
           onChange={(event) => setUrl(event.target.value)}
           placeholder="https://example.com/articles/1"
-          className="rounded border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+          className="field-input"
         />
-        <button
-          type="submit"
-          disabled={isSubmitting}
-          className="self-start rounded bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-        >
+        <button type="submit" disabled={isSubmitting} className="btn btn-primary self-start">
           登録する
         </button>
       </form>
@@ -96,7 +92,7 @@ export function ArticleRegistrationForm() {
       {submitError !== null && <ErrorMessage message={submitError} />}
 
       {registration !== null && (
-        <div className="flex flex-col gap-1 rounded border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-800">
+        <div className="flex flex-col gap-1 border border-line bg-surface-raised px-3 py-2 text-sm text-ink">
           <p>登録したURL: {registration.url}</p>
           <p>状態: {getRegistrationStatusLabel(registration.status)}</p>
           {registration.status === "failed" && (

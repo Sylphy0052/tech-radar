@@ -26,10 +26,10 @@ export function InterestSuppressedTopicsList({ suppressedTopics }: InterestSuppr
         {suppressedTopics.map((item) => (
           <li
             key={item.topic}
-            className="flex flex-wrap items-center justify-between gap-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm dark:border-amber-900 dark:bg-amber-950"
+            className="flex flex-wrap items-center justify-between gap-2 border border-line bg-surface-raised px-3 py-2"
           >
-            <span>{item.topic}</span>
-            <span className="text-xs text-amber-700 dark:text-amber-300">
+            <span className="chip">{item.topic}</span>
+            <span className="mono-label text-warn">
               抑制中（抑制度 {item.negative_weight.toFixed(2)}）
             </span>
           </li>

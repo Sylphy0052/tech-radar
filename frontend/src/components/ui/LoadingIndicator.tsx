@@ -7,7 +7,7 @@ interface LoadingIndicatorProps {
  */
 export function LoadingIndicator({ label }: LoadingIndicatorProps) {
   return (
-    <p role="status" className="text-sm text-zinc-500 dark:text-zinc-400">
+    <p role="status" className="mono-label">
       {label}
     </p>
   );

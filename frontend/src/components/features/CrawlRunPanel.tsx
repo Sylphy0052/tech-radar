@@ -52,19 +52,23 @@ export function CrawlRunPanel() {
   }
 
   return (
-    <section className="flex flex-col gap-3">
-      <h2 className="text-lg font-semibold">情報源の巡回</h2>
+    <section className="panel flex flex-col gap-3">
+      <h2 className="heading text-lg">情報源の巡回</h2>
       <button
         type="button"
         onClick={handleClick}
         disabled={isButtonDisabled}
-        className="self-start rounded bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+        className="btn btn-primary self-start"
       >
         巡回を実行
       </button>
 
       {startError !== null && <ErrorMessage message={startError} />}
-      {polling.data !== null && <p>状態: {getJobStatusLabel(polling.data.status)}</p>}
+      {polling.data !== null && (
+        <p className="font-mono text-sm text-ink-muted">
+          状態: {getJobStatusLabel(polling.data.status)}
+        </p>
+      )}
       {polling.error !== null && <ErrorMessage message={getRequestErrorMessage(polling.error)} />}
     </section>
   );

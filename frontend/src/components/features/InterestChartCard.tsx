@@ -27,15 +27,13 @@ export function InterestChartCard({
   children,
 }: InterestChartCardProps) {
   return (
-    <section className="flex flex-col gap-3 rounded border border-zinc-200 p-4 dark:border-zinc-800">
+    <section className="panel flex flex-col gap-3">
       <div className="flex flex-col gap-1">
-        <h3 className="text-base font-semibold">{title}</h3>
-        {description !== undefined && (
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">{description}</p>
-        )}
+        <h3 className="heading text-base">{title}</h3>
+        {description !== undefined && <p className="text-xs text-ink-muted">{description}</p>}
       </div>
       {isEmpty ? (
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">{emptyMessage ?? DEFAULT_EMPTY_MESSAGE}</p>
+        <p className="text-sm text-ink-muted">{emptyMessage ?? DEFAULT_EMPTY_MESSAGE}</p>
       ) : (
         children
       )}
