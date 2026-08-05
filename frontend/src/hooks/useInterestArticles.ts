@@ -8,6 +8,7 @@ import {
   listInterestArticles,
 } from "@/lib/interest-articles";
 import type { ArticleFilters, InterestArticleItem } from "@/lib/interest-articles";
+import { reportUnexpectedState } from "@/lib/report-unexpected";
 import { getRequestErrorMessage } from "@/lib/request-error-message";
 
 interface UseInterestArticlesResult {
@@ -172,6 +173,11 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
 
       const index = items.findIndex((item) => item.article_id === articleId);
       if (index === -1) {
+        // 画面に出ている記事の操作なら、そのレンダーの items に必ず含まれる。
+        // ここへ来るのは一覧に無い article_id を渡されたときだけで、握り潰すと
+        // 「押しても何も起きない」に見える（Issue #45）。本番の表示は変えずに
+        // 開発時だけ痕跡を残す。
+        reportUnexpectedState(`removeArticle: 一覧に無いarticle_id: ${articleId}`);
         return;
       }
       const removedItem = items[index];

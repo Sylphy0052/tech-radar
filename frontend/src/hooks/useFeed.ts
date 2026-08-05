@@ -7,6 +7,7 @@ import { getFeed } from "@/lib/feed";
 import type { FeedItem } from "@/lib/feed";
 import { deleteFeedback, sendFeedback } from "@/lib/feedback";
 import type { ArticleFeedback, BadReason, FeedbackAction } from "@/lib/feedback";
+import { reportUnexpectedState } from "@/lib/report-unexpected";
 import { getRateLimitMessage, getRequestErrorMessage } from "@/lib/request-error-message";
 
 interface UseFeedResult {
@@ -196,6 +197,12 @@ export function useFeed(): UseFeedResult {
 
       const target = items.find((item) => item.article_id === articleId);
       if (!target) {
+        // 画面に出ている記事のクリックなら、そのレンダーの items に必ず含まれる
+        // （itemsRef 経由の遅れた読み取りは Issue #37 で撤去済み）。ここへ来るのは
+        // 一覧に無い article_id を渡されたときだけで、その場合の握り潰しは
+        // 「押しても何も起きない」に見える（Issue #45）。本番の表示は変えずに
+        // 開発時だけ痕跡を残す。
+        reportUnexpectedState(`applyFeedback: 一覧に無いarticle_id: ${articleId}`);
         return;
       }
 
@@ -246,7 +253,13 @@ export function useFeed(): UseFeedResult {
       }
 
       const target = items.find((item) => item.article_id === articleId);
-      if (!target || target.feedback === null) {
+      if (!target) {
+        // applyFeedback と同じ理由で警告する（Issue #45）。
+        reportUnexpectedState(`removeFeedback: 一覧に無いarticle_id: ${articleId}`);
+        return;
+      }
+      if (target.feedback === null) {
+        // 取り消すものが無いだけで、これは正常な呼び出し（警告しない）。
         return;
       }
       const previousFeedback = target.feedback;
