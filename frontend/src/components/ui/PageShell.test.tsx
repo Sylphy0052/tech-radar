@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { PageShell } from "@/components/ui/PageShell";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("PageShell", () => {
   it("renders the given title as the level-1 heading", () => {
@@ -14,7 +15,7 @@ describe("PageShell", () => {
 
     // Assert
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("TechRadar");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("renders the description and the children", () => {
     // Arrange / Act
@@ -27,7 +28,7 @@ describe("PageShell", () => {
     // Assert
     expect(screen.getByText("説明文")).toBeInTheDocument();
     expect(screen.getByText("本文")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("includes both the visible label and the Japanese description in the accessible name", () => {
     // Arrange / Act — 画面上は等幅の英字だけを見せつつ、日本語の説明も
@@ -48,7 +49,7 @@ describe("PageShell", () => {
       "/interests",
     );
     expect(screen.getByRole("link", { name: "FEEDフィードを見る" })).toHaveAttribute("href", "/");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("marks only the current page link with aria-current", () => {
     // Arrange / Act
@@ -66,5 +67,5 @@ describe("PageShell", () => {
     expect(screen.getByRole("link", { name: /関心分析を見る/ })).not.toHaveAttribute(
       "aria-current",
     );
-  });
+  }, TEST_TIMEOUT_MS);
 });

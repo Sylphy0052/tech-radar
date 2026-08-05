@@ -6,6 +6,7 @@ import {
   NavigationTestProvider,
   useNavigationTestContext,
 } from "@/test-utils/next-navigation-test-context";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => useNavigationTestContext().searchParams,
@@ -38,7 +39,7 @@ describe("ArticleFilterPanel", () => {
     expect(screen.getByRole("checkbox", { name: "手動登録" })).not.toBeChecked();
     expect(screen.getByLabelText("ジャンル（大分類）")).toHaveValue("ai");
     expect(screen.getByLabelText("言語")).toHaveValue("ja");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("reflects a single filter in the URL query when submitted alone", () => {
     // Arrange
@@ -57,7 +58,7 @@ describe("ArticleFilterPanel", () => {
     const query = new URLSearchParams(screen.getByTestId("location-probe").textContent ?? "");
     expect(query.get("domain")).toBe("ai");
     expect(query.getAll("origin")).toEqual([]);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("reflects combined filters in the URL query when submitted together", () => {
     // Arrange
@@ -82,7 +83,7 @@ describe("ArticleFilterPanel", () => {
     expect(query.get("source_domain")).toBe("blog.example.com");
     expect(query.get("language")).toBe("ja");
     expect(query.get("is_primary_source")).toBe("true");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("converts the date range fields to JST-day boundaries in UTC", () => {
     // Arrange
@@ -102,7 +103,7 @@ describe("ArticleFilterPanel", () => {
     const query = new URLSearchParams(screen.getByTestId("location-probe").textContent ?? "");
     expect(query.get("registered_from")).toBe("2026-07-31T15:00:00.000Z");
     expect(query.get("registered_to")).toBe("2026-08-01T14:59:59.999Z");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not crash when registered_from in the URL is not a valid date", () => {
     // Arrange & Act — 不正な日付クエリ（共有リンク/手動編集で容易に到達しうる）
@@ -110,7 +111,7 @@ describe("ArticleFilterPanel", () => {
 
     // Assert — レンダーが完了し、開始日フィールドは空欄にフォールバックする
     expect(screen.getByLabelText("登録日時（開始）")).toHaveValue("");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("clears every filter from the URL when the clear button is pressed", () => {
     // Arrange
@@ -126,5 +127,5 @@ describe("ArticleFilterPanel", () => {
 
     // Assert
     expect(screen.getByTestId("location-probe")).toHaveTextContent("");
-  });
+  }, TEST_TIMEOUT_MS);
 });

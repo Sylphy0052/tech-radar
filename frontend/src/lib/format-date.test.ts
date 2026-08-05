@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { formatDateTimeJa } from "@/lib/format-date";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("formatDateTimeJa", () => {
   it("formats an ISO date-time string in Japanese, using JST", () => {
@@ -12,5 +13,5 @@ describe("formatDateTimeJa", () => {
 
     // Assert
     expect(formatted).toBe("2026年8月1日 09:00");
-  });
+  }, TEST_TIMEOUT_MS);
 });
