@@ -16,7 +16,7 @@ describe("getApiBaseUrl", () => {
     delete process.env.NEXT_PUBLIC_API_BASE_URL;
 
     // Act / Assert
-    expect(getApiBaseUrl()).toBe("http://localhost:8000");
+    expect(getApiBaseUrl()).toBe("http://localhost:18700");
   });
 
   it("strips trailing slashes from the configured base url", () => {

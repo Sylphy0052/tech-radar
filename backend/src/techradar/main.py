@@ -93,10 +93,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # カウントがテスト間で漏れない。
     app.state.recommendation_rate_limiter = create_recommendation_rate_limiter(resolved)
 
-    # フロントエンド（Next.js dev server）からの呼び出しを許可する。
+    # フロントエンド（Next.js dev server）からの呼び出しを許可する。許可する
+    # オリジンは設定値（`Settings.cors_allow_origins`）から取る。frontend の
+    # ポートは `.env` の `FRONTEND_PORT` で変えられるため、ここを固定にすると
+    # ポートを変えた途端に preflight で弾かれる。
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000"],
+        allow_origins=resolved.cors_allow_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
