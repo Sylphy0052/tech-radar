@@ -10,6 +10,7 @@ import uuid
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, PostgresDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -143,15 +144,34 @@ class Settings(BaseSettings):
 
     @field_validator("cors_allow_origins", mode="after")
     @classmethod
-    def _reject_empty_origins(cls, value: list[str]) -> list[str]:
-        """空リストを拒否する。
+    def _validate_origins(cls, value: list[str]) -> list[str]:
+        """空リストと、オリジンとして成立しない表記を拒否する。
 
         空にすると全オリジンが拒否され、frontend から一切呼べない状態を設定ミスで
         作れてしまう。CORS を無効化したい意図と区別が付かないため、値を必須にする。
+
+        表記を検証するのは、`CORSMiddleware` が `Origin` ヘッダと許可リストを
+        文字列比較するため。スキーム欠落や末尾スラッシュがあっても起動自体は
+        成功し、ブラウザからの preflight だけが静かに落ちる。原因が追いにくい
+        ため、起動時に弾く。
         """
         if not value:
             message = "CORS_ALLOW_ORIGINS には 1 つ以上のオリジンを指定してください"
             raise ValueError(message)
+        for origin in value:
+            parsed = urlsplit(origin)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                message = (
+                    f"CORS_ALLOW_ORIGINS の値 '{origin}' は "
+                    "http(s)://<host>[:<port>] の形式で指定してください"
+                )
+                raise ValueError(message)
+            if parsed.path or parsed.query or parsed.fragment:
+                message = (
+                    f"CORS_ALLOW_ORIGINS の値 '{origin}' にパス・クエリは指定できません"
+                    "（Origin ヘッダと文字列一致しないため末尾スラッシュも不可）"
+                )
+                raise ValueError(message)
         return value
 
     @property
