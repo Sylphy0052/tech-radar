@@ -10,6 +10,7 @@ import uuid
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, PostgresDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +25,11 @@ EmbeddingDevice = Literal["auto", "cuda", "cpu"]
 # 実装を差し替えるだけで済むようにするため、値そのものは環境変数
 # `DEFAULT_USER_ID` で上書き可能にしておく。
 _DEFAULT_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+
+# frontend（Next.js dev server）の既定オリジン。`run.sh` の `FRONTEND_PORT` の
+# 既定値と一致させる。よく使われる 3000 番台は他プロセスと衝突しやすいため、
+# ephemeral port range（32768-60999）の外にある 5 桁を既定にする。
+_DEFAULT_FRONTEND_ORIGIN = "http://localhost:13700"
 
 
 class Settings(BaseSettings):
@@ -82,6 +88,11 @@ class Settings(BaseSettings):
     # MVP は認証なしの単一ユーザー（`docs/decisions.md`）。全レコードの user_id
     # にこの値を使う。`api.deps.get_current_user_id` から参照する。
     default_user_id: uuid.UUID = Field(default=_DEFAULT_USER_ID)
+    # CORS を許可するオリジン。既定は `run.sh` が起動する frontend のみ。
+    # ポートは既定値を変えられるため（`.env` の `FRONTEND_PORT`）、許可オリジンも
+    # 環境変数で追随できるようにする。`allow_credentials=True` と併用するため
+    # ワイルドカードは受け付けない（`main.create_app`）。
+    cors_allow_origins: list[str] = Field(default_factory=lambda: [_DEFAULT_FRONTEND_ORIGIN])
     log_retention_days: int = Field(default=90, gt=0)
     # `recommendation_runs` の保持期間（Issue #28）。`GET /api/feed` は呼ばれる
     # たびに run を作りうるため、`operation_logs` と同じ発想で古い run を削除する。
@@ -116,6 +127,51 @@ class Settings(BaseSettings):
         """`.env` に `KEY=` と書かれた場合は未設定として扱う。"""
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("cors_allow_origins", mode="before")
+    @classmethod
+    def _split_comma_separated_origins(cls, value: object) -> object:
+        """カンマ区切りの文字列をオリジンのリストとして解釈する。
+
+        `list[str]` の設定を pydantic-settings に素直に渡すと JSON 形式
+        （`["http://..."]`）でしか書けず、`.env` に書きづらい。区切り文字を
+        許すことで `A,B` の形式でも設定できるようにする。空要素は除去する。
+        """
+        if not isinstance(value, str):
+            return value
+        return [origin.strip() for origin in value.split(",") if origin.strip()]
+
+    @field_validator("cors_allow_origins", mode="after")
+    @classmethod
+    def _validate_origins(cls, value: list[str]) -> list[str]:
+        """空リストと、オリジンとして成立しない表記を拒否する。
+
+        空にすると全オリジンが拒否され、frontend から一切呼べない状態を設定ミスで
+        作れてしまう。CORS を無効化したい意図と区別が付かないため、値を必須にする。
+
+        表記を検証するのは、`CORSMiddleware` が `Origin` ヘッダと許可リストを
+        文字列比較するため。スキーム欠落や末尾スラッシュがあっても起動自体は
+        成功し、ブラウザからの preflight だけが静かに落ちる。原因が追いにくい
+        ため、起動時に弾く。
+        """
+        if not value:
+            message = "CORS_ALLOW_ORIGINS には 1 つ以上のオリジンを指定してください"
+            raise ValueError(message)
+        for origin in value:
+            parsed = urlsplit(origin)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                message = (
+                    f"CORS_ALLOW_ORIGINS の値 '{origin}' は "
+                    "http(s)://<host>[:<port>] の形式で指定してください"
+                )
+                raise ValueError(message)
+            if parsed.path or parsed.query or parsed.fragment:
+                message = (
+                    f"CORS_ALLOW_ORIGINS の値 '{origin}' にパス・クエリは指定できません"
+                    "（Origin ヘッダと文字列一致しないため末尾スラッシュも不可）"
+                )
+                raise ValueError(message)
         return value
 
     @property
