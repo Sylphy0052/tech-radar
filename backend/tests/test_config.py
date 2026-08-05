@@ -61,6 +61,20 @@ def test_splits_comma_separated_cors_allow_origins(configured: str, expected: li
     assert settings.cors_allow_origins == expected
 
 
+@pytest.mark.parametrize(
+    "configured",
+    [
+        "localhost:13700",  # スキームなし
+        "http://localhost:13700/",  # 末尾スラッシュ付き（Origin ヘッダと文字列一致しない）
+        "ftp://localhost:13700",  # http(s) 以外のスキーム
+    ],
+)
+def test_rejects_malformed_cors_allow_origins(configured: str):
+    # Arrange / Act / Assert — 設定ミスを preflight 失敗ではなく起動時に気付けるようにする
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cors_allow_origins=configured)
+
+
 def test_rejects_empty_cors_allow_origins():
     # Arrange / Act / Assert — 全オリジン拒否の設定を事故で作らないため
     with pytest.raises(ValueError):
