@@ -31,7 +31,9 @@ cp .env.example .env   # 必要に応じて値を編集する
 ./run.sh
 ```
 
-`run.sh` は PostgreSQL コンテナを起動し、backend（<http://localhost:8000>）と frontend（<http://localhost:3000>）を立ち上げる。Ctrl-C で backend / frontend が停止する。
+`run.sh` は PostgreSQL コンテナを起動し、backend（<http://localhost:18700>）と frontend（<http://localhost:13700>）を立ち上げる。Ctrl-C で backend / frontend が停止する。
+
+ポートは `.env` の `BACKEND_PORT` / `FRONTEND_PORT` で変更できる。変更する場合は CORS 許可オリジン（`CORS_ALLOW_ORIGINS`）と frontend の API ベース URL（`NEXT_PUBLIC_API_BASE_URL`）も揃える。
 
 常駐するのは PostgreSQL コンテナのみ。完全に停止するには次を実行する。
 
