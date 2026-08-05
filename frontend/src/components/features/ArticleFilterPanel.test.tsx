@@ -2,11 +2,11 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ArticleFilterPanel } from "@/components/features/ArticleFilterPanel";
-import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 import {
   NavigationTestProvider,
   useNavigationTestContext,
 } from "@/test-utils/next-navigation-test-context";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => useNavigationTestContext().searchParams,
