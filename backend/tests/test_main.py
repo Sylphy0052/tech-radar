@@ -54,6 +54,43 @@ def test_keeps_injected_settings_after_lifespan_startup():
     assert response.json()["brave_search_enabled"] is True
 
 
+def test_allows_cors_preflight_from_a_configured_origin():
+    # Arrange
+    app = create_app(Settings(_env_file=None, cors_allow_origins="http://localhost:19999"))
+    client = TestClient(app)
+
+    # Act
+    response = client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://localhost:19999",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    # Assert
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:19999"
+
+
+def test_rejects_cors_preflight_from_an_unconfigured_origin():
+    # Arrange
+    app = create_app(Settings(_env_file=None, cors_allow_origins="http://localhost:19999"))
+    client = TestClient(app)
+
+    # Act
+    response = client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://evil.example.com",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    # Assert — 許可していないオリジンには Allow-Origin を返さないこと
+    assert "access-control-allow-origin" not in response.headers
+
+
 def test_does_not_start_the_job_worker_when_worker_enabled_is_false():
     # Arrange — 実ワーカーが DB をポーリングし始めるとテストが不安定になるため、
     # 無効化した場合に lifespan を通してもワーカーが起動しないことを確認する。

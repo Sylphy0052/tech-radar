@@ -11,8 +11,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 COMPOSE_FILE="infra/docker-compose.yml"
-BACKEND_PORT="${BACKEND_PORT:-8000}"
-FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+# 既定ポートは 5 桁にする。よく使われる 8000 / 3000 は他プロジェクトのコンテナ等と
+# 衝突しやすい。ephemeral port range (32768-60999) の外から選び、OS が一時ポートとして
+# 割り当てて散発的に衝突することも避ける。変更する場合は CORS_ALLOW_ORIGINS と
+# NEXT_PUBLIC_API_BASE_URL (.env) も揃えること。
+BACKEND_PORT="${BACKEND_PORT:-18700}"
+FRONTEND_PORT="${FRONTEND_PORT:-13700}"
 PG_READY_TIMEOUT_SECONDS=60
 
 log() { printf '[run] %s\n' "$*" >&2; }

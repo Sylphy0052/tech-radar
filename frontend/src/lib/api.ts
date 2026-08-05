@@ -10,7 +10,9 @@
 
 import type { components } from "@/lib/api-schema";
 
-const DEFAULT_API_BASE_URL = "http://localhost:8000";
+// run.sh の BACKEND_PORT 既定値と揃える。5 桁にしているのは 8000 が他プロセスと
+// 衝突しやすいため（`.env.example` を参照）。
+const DEFAULT_API_BASE_URL = "http://localhost:18700";
 
 export function getApiBaseUrl(): string {
   const configured = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
