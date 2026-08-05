@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api";
 import { BAD_REASON_LABELS, deleteFeedback, sendFeedback } from "@/lib/feedback";
 import type { ArticleFeedback } from "@/lib/feedback";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -33,7 +34,7 @@ describe("sendFeedback", () => {
     expect(url).toContain(`/api/articles/${articleId}/feedback`);
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body as string)).toEqual({ action: "good" });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("includes the reason in the body when provided", async () => {
     // Arrange
@@ -54,7 +55,7 @@ describe("sendFeedback", () => {
     expect(result).toEqual(payload);
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(init.body as string)).toEqual({ action: "bad", reason: "too_shallow" });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("throws ApiError when the response fails", async () => {
     // Arrange
@@ -65,7 +66,7 @@ describe("sendFeedback", () => {
 
     // Act / Assert
     await expect(sendFeedback(articleId, { action: "good" })).rejects.toThrowError(ApiError);
-  });
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("deleteFeedback", () => {
@@ -82,7 +83,7 @@ describe("deleteFeedback", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toContain(`/api/articles/${articleId}/feedback`);
     expect(init.method).toBe("DELETE");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("throws ApiError when the response fails", async () => {
     // Arrange
@@ -93,7 +94,7 @@ describe("deleteFeedback", () => {
 
     // Act / Assert
     await expect(deleteFeedback(articleId)).rejects.toThrowError(ApiError);
-  });
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("BAD_REASON_LABELS", () => {
@@ -107,5 +108,5 @@ describe("BAD_REASON_LABELS", () => {
       untrusted_source: "情報源を信頼できない",
       too_repetitive: "同じ内容を見すぎた",
     });
-  });
+  }, TEST_TIMEOUT_MS);
 });

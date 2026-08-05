@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CrawlRunPanel } from "@/components/features/CrawlRunPanel";
 import { DEFAULT_MAX_CONSECUTIVE_ERRORS, DEFAULT_POLLING_INTERVAL_MS } from "@/hooks/usePolling";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 async function flush(ms = 0): Promise<void> {
   await act(async () => {
@@ -66,7 +67,7 @@ describe("CrawlRunPanel", () => {
 
     // Assert — ジョブが実行中の間は無効のまま。
     expect(button).toBeDisabled();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows the job progress while polling and re-enables the button once completed", async () => {
     // Arrange
@@ -92,7 +93,7 @@ describe("CrawlRunPanel", () => {
     // Assert
     expect(screen.getByText("状態: 巡回完了")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "巡回を実行" })).not.toBeDisabled();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not throw when the backend returns 200 for an already-running crawl", async () => {
     // Arrange — 進行中の巡回があれば 200 で既存ジョブを返す。
@@ -111,7 +112,7 @@ describe("CrawlRunPanel", () => {
 
     // Assert
     expect(screen.getByText("状態: 巡回実行中")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("recovers when the first progress request fails before the job becomes visible", async () => {
     // Arrange — 起動直後の 1 回だけ 404 が返り、その後は通常どおり進捗が返る。
@@ -137,7 +138,7 @@ describe("CrawlRunPanel", () => {
     // Assert
     expect(screen.getByText("状態: 巡回実行中")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("re-enables the button when polling the progress ultimately fails", async () => {
     // Arrange — 進捗取得が回復せず失敗し続ける。
@@ -157,7 +158,7 @@ describe("CrawlRunPanel", () => {
 
     // Assert — 進捗が追えなくなった以上、押し直せる状態へ戻す。
     expect(screen.getByRole("button", { name: "巡回を実行" })).not.toBeDisabled();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("resumes polling when the button is pressed again after the progress failed", async () => {
     // Arrange — 進捗取得が失敗し続けた後、再度押した以降は成功するようになる。
@@ -185,7 +186,7 @@ describe("CrawlRunPanel", () => {
 
     // Assert
     expect(screen.getByText("状態: 巡回実行中")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an error message when starting the crawl fails with a 5xx response", async () => {
     // Arrange
@@ -202,7 +203,7 @@ describe("CrawlRunPanel", () => {
       screen.getByText("サーバーでエラーが発生しました。しばらくしてから再度お試しください。"),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "巡回を実行" })).not.toBeDisabled();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an error message when starting the crawl fails with a network error", async () => {
     // Arrange
@@ -218,5 +219,5 @@ describe("CrawlRunPanel", () => {
     expect(
       screen.getByText("通信に失敗しました。しばらくしてから再度お試しください。"),
     ).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 });

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ArticleRegistrationForm } from "@/components/features/ArticleRegistrationForm";
 import { DEFAULT_POLLING_INTERVAL_MS } from "@/hooks/usePolling";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 async function flush(ms = 0): Promise<void> {
   await act(async () => {
@@ -47,7 +48,7 @@ describe("ArticleRegistrationForm", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "httpまたはhttpsで始まるURLのみ登録できます",
     );
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("rejects an empty url before sending the request", () => {
     // Arrange
@@ -61,7 +62,7 @@ describe("ArticleRegistrationForm", () => {
     // Assert
     expect(fetchMock).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent("URLを入力してください");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("registers a valid url and displays the returned status", async () => {
     // Arrange
@@ -87,7 +88,7 @@ describe("ArticleRegistrationForm", () => {
     expect(fetchMock).toHaveBeenCalled();
     expect(screen.getByText("登録したURL: https://example.com/a")).toBeInTheDocument();
     expect(screen.getByText("状態: 登録待ち")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not break when the backend returns 200 for an already-registered url", async () => {
     // Arrange — 同じ URL の再登録は 200 で既存登録を返す。
@@ -111,7 +112,7 @@ describe("ArticleRegistrationForm", () => {
 
     // Assert
     expect(screen.getByText("状態: 登録完了")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("updates the displayed status as polling progresses and stops once completed", async () => {
     // Arrange
@@ -152,7 +153,7 @@ describe("ArticleRegistrationForm", () => {
     // ポーリングが止まっていること（さらに時間を進めても呼び出しが増えない）。
     await flush(DEFAULT_POLLING_INTERVAL_MS * 3);
     expect(fetchMock.mock.calls.length).toBe(callCountAtCompletion);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows a Japanese error message for a known error_reason", async () => {
     // Arrange
@@ -178,7 +179,7 @@ describe("ArticleRegistrationForm", () => {
     expect(
       screen.getByText("記事の取得に失敗しました。URLを確認して再度お試しください。"),
     ).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows a generic error message for an unknown error_reason without throwing", async () => {
     // Arrange
@@ -204,7 +205,7 @@ describe("ArticleRegistrationForm", () => {
     expect(
       screen.getByText("登録処理に失敗しました。しばらくしてから再度お試しください。"),
     ).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an error message when the registration request fails with a 5xx response", async () => {
     // Arrange
@@ -221,7 +222,7 @@ describe("ArticleRegistrationForm", () => {
     expect(
       screen.getByText("サーバーでエラーが発生しました。しばらくしてから再度お試しください。"),
     ).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows an error message when the registration request fails with a network error", async () => {
     // Arrange
@@ -238,5 +239,5 @@ describe("ArticleRegistrationForm", () => {
     expect(
       screen.getByText("通信に失敗しました。しばらくしてから再度お試しください。"),
     ).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 });

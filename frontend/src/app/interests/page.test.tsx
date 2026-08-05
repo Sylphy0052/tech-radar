@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import InterestsPage from "@/app/interests/page";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -42,5 +43,5 @@ describe("InterestsPage", () => {
 
     // Assert
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("関心分析");
-  });
+  }, TEST_TIMEOUT_MS);
 });
