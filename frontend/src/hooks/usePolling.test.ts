@@ -6,6 +6,7 @@ import {
   DEFAULT_POLLING_INTERVAL_MS,
   usePolling,
 } from "@/hooks/usePolling";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 interface Item {
   status: string;
@@ -40,7 +41,7 @@ describe("usePolling", () => {
     // Assert
     expect(fetchFn).not.toHaveBeenCalled();
     expect(result.current).toEqual({ data: null, error: null, isLoading: false });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("fetches immediately once an id is provided", async () => {
     // Arrange
@@ -54,7 +55,7 @@ describe("usePolling", () => {
     expect(fetchFn).toHaveBeenCalledExactlyOnceWith("abc");
     expect(result.current.data).toEqual({ status: "pending" });
     expect(result.current.error).toBeNull();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("polls again at the configured interval while non-terminal", async () => {
     // Arrange
@@ -70,7 +71,7 @@ describe("usePolling", () => {
 
     // Assert
     expect(fetchFn).toHaveBeenCalledTimes(2);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("stops polling once a terminal status is reached", async () => {
     // Arrange
@@ -88,7 +89,7 @@ describe("usePolling", () => {
     // Assert
     expect(fetchFn).toHaveBeenCalledTimes(2);
     expect(result.current.data).toEqual({ status: "done" });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("stops polling on unmount so no further requests leak", async () => {
     // Arrange
@@ -102,7 +103,7 @@ describe("usePolling", () => {
 
     // Assert
     expect(fetchFn).toHaveBeenCalledTimes(1);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("keeps polling after a transient failure instead of giving up", async () => {
     // Arrange — 起動直後の 404 のように、しばらくすると解消する失敗を1回だけ返す
@@ -121,7 +122,7 @@ describe("usePolling", () => {
     expect(afterFirstFailure.error).toBeNull();
     expect(result.current.data).toEqual({ status: "pending" });
     expect(result.current.error).toBeNull();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("surfaces a fetch error once the failures no longer look transient", async () => {
     // Arrange
@@ -137,7 +138,7 @@ describe("usePolling", () => {
     expect(result.current.error).toBeInstanceOf(Error);
     expect(result.current.data).toBeNull();
     expect(result.current.isLoading).toBe(false);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("stops retrying once the failure is surfaced", async () => {
     // Arrange
@@ -150,7 +151,7 @@ describe("usePolling", () => {
 
     // Assert
     expect(fetchFn).toHaveBeenCalledTimes(DEFAULT_MAX_CONSECUTIVE_ERRORS);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("forgets earlier failures once a fetch succeeds", async () => {
     // Arrange — 失敗を挟みながらも成功が入るうちはエラーを確定させない
@@ -171,7 +172,7 @@ describe("usePolling", () => {
     // Assert
     expect(result.current.data).toEqual({ status: "done" });
     expect(result.current.error).toBeNull();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("restarts polling from scratch when the id changes", async () => {
     // Arrange
@@ -188,5 +189,5 @@ describe("usePolling", () => {
     // Assert
     expect(fetchFn).toHaveBeenNthCalledWith(1, "abc");
     expect(fetchFn).toHaveBeenNthCalledWith(2, "def");
-  });
+  }, TEST_TIMEOUT_MS);
 });

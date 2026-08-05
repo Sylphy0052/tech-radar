@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import Home from "@/app/page";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -25,7 +26,7 @@ describe("Home", () => {
 
     // Assert
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("TechRadar");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("renders a link to the interest article list page", () => {
     // Arrange
@@ -42,7 +43,7 @@ describe("Home", () => {
       "href",
       "/articles",
     );
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("renders a link to the interest analysis page", () => {
     // Arrange
@@ -59,5 +60,5 @@ describe("Home", () => {
       "href",
       "/interests",
     );
-  });
+  }, TEST_TIMEOUT_MS);
 });
