@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startCrawlRun } from "@/lib/crawl";
 import type { CrawlRun } from "@/lib/crawl";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -28,7 +29,7 @@ describe("startCrawlRun", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toContain("/api/crawl/runs");
     expect(init.method).toBe("POST");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not throw when a crawl run is already in progress (200 response)", async () => {
     // Arrange — 進行中の巡回があれば 200 で既存ジョブを返す。
@@ -42,5 +43,5 @@ describe("startCrawlRun", () => {
 
     // Assert
     expect(result).toEqual(samplePayload);
-  });
+  }, TEST_TIMEOUT_MS);
 });

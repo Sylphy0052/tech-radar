@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api";
 import { getFeed } from "@/lib/feed";
 import type { FeedResponse } from "@/lib/feed";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -50,7 +51,7 @@ describe("getFeed", () => {
     expect(url).toContain("/api/feed");
     expect(url).not.toContain("cursor=");
     expect(url).not.toContain("limit=");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("includes the cursor in the query string when provided", async () => {
     // Arrange
@@ -65,7 +66,7 @@ describe("getFeed", () => {
     // Assert
     const [url] = fetchMock.mock.calls[0] as [string];
     expect(url).toContain("/api/feed?cursor=abc-cursor");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("includes the limit in the query string when provided", async () => {
     // Arrange
@@ -80,7 +81,7 @@ describe("getFeed", () => {
     // Assert
     const [url] = fetchMock.mock.calls[0] as [string];
     expect(url).toContain("limit=20");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("includes both cursor and limit when both are provided", async () => {
     // Arrange
@@ -96,7 +97,7 @@ describe("getFeed", () => {
     const [url] = fetchMock.mock.calls[0] as [string];
     expect(url).toContain("cursor=abc-cursor");
     expect(url).toContain("limit=20");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("throws ApiError when the response fails", async () => {
     // Arrange
@@ -107,5 +108,5 @@ describe("getFeed", () => {
 
     // Act / Assert
     await expect(getFeed()).rejects.toThrowError(ApiError);
-  });
+  }, TEST_TIMEOUT_MS);
 });

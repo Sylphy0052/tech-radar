@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { ScoreBreakdown } from "@/components/features/ScoreBreakdown";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 const reasons = {
   interest_similarity: 0.8,
@@ -19,7 +20,7 @@ describe("ScoreBreakdown", () => {
     expect(
       screen.getByText("関心との一致度が高いため、上位に表示しています。"),
     ).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("keeps the numeric breakdown collapsed by default", () => {
     // Arrange / Act
@@ -31,7 +32,7 @@ describe("ScoreBreakdown", () => {
       "aria-expanded",
       "false",
     );
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("reveals the numeric breakdown with Japanese labels when expanded", () => {
     // Arrange
@@ -44,7 +45,7 @@ describe("ScoreBreakdown", () => {
     expect(screen.getByText("関心一致度")).toBeInTheDocument();
     expect(screen.getByText("0.800")).toBeInTheDocument();
     expect(screen.getByText("情報源の権威性")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("falls back to the raw key for an unknown reason field", () => {
     // Arrange
@@ -55,5 +56,5 @@ describe("ScoreBreakdown", () => {
 
     // Assert
     expect(screen.getByText("some_future_field")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 });
