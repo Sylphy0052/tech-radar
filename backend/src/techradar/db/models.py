@@ -1,4 +1,6 @@
-"""DB モデル定義（`PROJECT_SPEC.md` §19 に対応）。
+"""DB モデル定義。現行のスキーマはこのファイルと `backend/migrations/` が持つ。
+
+`PROJECT_SPEC.md` §19 は初期設計時の案で、テーブルも列もここまで追随していない。
 
 ユーザー固有のデータを持つテーブル（`user_articles` / `article_feedback` /
 `recommendation_runs` / `user_interest_clusters` / `user_topic_preferences` /
