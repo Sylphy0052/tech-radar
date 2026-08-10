@@ -46,16 +46,25 @@ ruleTester.run("require-test-timeout", requireTestTimeout, {
       code: "it.each`a`(\"handles $a\", ({ a }) => {}, TEST_TIMEOUT_MS);",
     },
     {
-      // `it.for` は `(name, fn, timeout)` を取らず、オプション形式だけを取る。
-      name: "it.each / it.for はオプション形式でも渡せる",
-      code: `
-        it.for([1, 2])("handles %s", { timeout: TEST_TIMEOUT_MS }, (n) => {});
-        it.each([1, 2])("handles %s", { timeout: TEST_TIMEOUT_MS }, (n) => {});
-      `,
+      // `it.for` は位置引数の形を取らないため、オプション形式だけが正しい。
+      name: "it.for はオプション形式で渡している",
+      code: `it.for([1, 2])("handles %s", { timeout: TEST_TIMEOUT_MS }, (n) => {});`,
+    },
+    {
+      name: "it.each もオプション形式で渡せる",
+      code: `it.each([1, 2])("handles %s", { timeout: TEST_TIMEOUT_MS }, (n) => {});`,
     },
     {
       name: "it 本体もオプション形式で渡せる",
       code: `it("does something", { timeout: TEST_TIMEOUT_MS, retry: 2 }, () => {});`,
+    },
+    {
+      name: "オプションにスプレッドが混ざっていても timeout が明示されていればよい",
+      code: `it("does something", { ...baseOptions, timeout: TEST_TIMEOUT_MS }, () => {});`,
+    },
+    {
+      name: "静的に解決できるキーで書いたオプションも読む",
+      code: `it("does something", { ["timeout"]: TEST_TIMEOUT_MS }, () => {});`,
     },
     {
       name: "it.todo は持ち時間を取らない",
@@ -74,8 +83,15 @@ ruleTester.run("require-test-timeout", requireTestTimeout, {
       code: `it(...args);`,
     },
     {
-      name: "オプションにスプレッドが混ざる場合も対象外",
+      name: "timeout が無いオプションにスプレッドが混ざる場合は判定できないため対象外",
       code: `it("does something", { ...baseOptions }, () => {});`,
+    },
+    {
+      name: "テスト本体が関数リテラルでない場合は位置を決められないため対象外",
+      code: `
+        it("does something", sharedBody, TEST_TIMEOUT_MS);
+        it("does something else", condition ? optionsA : optionsB, () => {});
+      `,
     },
   ],
   invalid: [
@@ -92,11 +108,6 @@ ruleTester.run("require-test-timeout", requireTestTimeout, {
     {
       name: "it.each の持ち時間が省略されている",
       code: `it.each([1, 2])("handles %s", (n) => {});`,
-      errors: [{ messageId: "missingTimeout" }],
-    },
-    {
-      name: "it.for の持ち時間が省略されている",
-      code: `it.for([1, 2])("handles %s", (n) => {});`,
       errors: [{ messageId: "missingTimeout" }],
     },
     {
@@ -125,6 +136,11 @@ ruleTester.run("require-test-timeout", requireTestTimeout, {
       errors: [{ messageId: "useSharedTimeout" }],
     },
     {
+      name: "スプレッドに紛れていても明示された timeout は検査する",
+      code: `it("does something", { timeout: 5000, ...baseOptions }, () => {});`,
+      errors: [{ messageId: "useSharedTimeout" }],
+    },
+    {
       name: "持ち時間に別の識別子を渡している",
       code: `it("does something", () => {}, SOME_OTHER_TIMEOUT);`,
       errors: [{ messageId: "useSharedTimeout" }],
@@ -133,6 +149,17 @@ ruleTester.run("require-test-timeout", requireTestTimeout, {
       name: "第3引数へオブジェクトを渡している",
       code: `it("does something", () => {}, { timeout: 5000 });`,
       errors: [{ messageId: "useSharedTimeout" }],
+    },
+    {
+      name: "it.for の持ち時間が省略されている",
+      code: `it.for([1, 2])("handles %s", (n) => {});`,
+      errors: [{ messageId: "useOptionsFormat" }],
+    },
+    {
+      // 渡しても vitest に無視され、既定の5000msへ静かに戻る。
+      name: "it.for へ持ち時間を位置引数で渡している",
+      code: `it.for([1, 2])("handles %s", (n) => {}, TEST_TIMEOUT_MS);`,
+      errors: [{ messageId: "useOptionsFormat" }],
     },
   ],
 });
