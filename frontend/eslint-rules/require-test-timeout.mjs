@@ -20,15 +20,21 @@
  * `it.for` は位置引数の形を型として持たない。渡しても実行時に無視され、既定の5秒へ
  * 静かに戻る（このルールが防ごうとしている状態そのもの）ため、違反として報告する。
  *
+ * どの呼び出しが実際のテスト定義かは「第1引数がテスト名か」で見分ける。`it.each(...)`
+ * `it.for(...)` `it.skipIf(...)` `test.extend(...)` のように、いったん呼んでから
+ * その戻り値を呼ぶ形が vitest には複数あり、修飾子の名前を並べた許可リストで
+ * 見分けようとすると、API が増えるたびに誤検出する。テスト名を第1引数に取るのは
+ * 最後の呼び出しだけなので、そこを手がかりにすれば形が増えても壊れない。
+ *
  * 既知の限界（いずれも意図して検査対象から外している）:
  *
  * - 持ち時間が `TEST_TIMEOUT_MS` という名前かどうかしか見ない。同名のローカル変数を
  *   宣言して渡せば通るし、逆に `{ timeout }` のショートハンドは名前が違うため弾く。
  *   束縛まで辿るとルールが重くなるうえ、そこまでして規約を迂回する書き方は lint では
  *   なくレビューで気づくべきものと判断した
- * - `it` を別名で import した場合（`import { it as vIt }`）、計算プロパティ経由の
- *   呼び出し（`it["skip"](...)`）、`it.each([...])` の戻り値を変数へ入れてから呼ぶ形は
- *   検出しない
+ * - テスト名を変数で渡す呼び出し（`it(caseName, fn)`）は、テスト定義だと見分けられない
+ * - `it` を別名で import した場合（`import { it as vIt }`）や、計算プロパティ経由の
+ *   呼び出し（`it["skip"](...)`）は検出しない
  * - 引数にスプレッドが混ざる呼び出しや、テスト本体が関数リテラルでない呼び出しは、
  *   どれが持ち時間の位置なのかを静的に決められないため対象外
  */
@@ -38,58 +44,61 @@ const TIMEOUT_OPTION_KEY = "timeout";
 const TEST_FUNCTIONS = new Set(["it", "test"]);
 // 本体を取らないため持ち時間の概念がない修飾子。
 const BODYLESS_MODIFIER = "todo";
-// `it.each(...)` / `it.for(...)` は「テストを作る呼び出し」で、実際のテストは
-// その戻り値の呼び出しのほう。
-const TABLE_MODIFIERS = new Set(["each", "for"]);
-// このうち `for` はオプション形式しか取らない。
+// `it.for` はオプション形式しか取らない（`it.each` と違い位置引数の型を持たない）。
 const OPTIONS_ONLY_MODIFIER = "for";
 const FUNCTION_LITERALS = new Set(["FunctionExpression", "ArrowFunctionExpression"]);
 
 /**
- * 呼び出し対象の式を分解し、根になる識別子・経由した修飾子・呼び出し済みかを返す。
+ * 呼び出し対象の式を分解し、根になる識別子と経由した修飾子を返す。
  *
  * `it.skip.each([...])(...)` のような連なりも、`it` まで遡って一様に扱えるようにする。
  * 解釈できない形（計算プロパティなど）は null を返し、対象外として扱う。
  */
 function analyzeCallee(node) {
   if (node.type === "Identifier") {
-    return { root: node.name, modifiers: [], applied: false };
+    return { root: node.name, modifiers: [] };
   }
   if (node.type === "MemberExpression" && !node.computed && node.property.type === "Identifier") {
     const inner = analyzeCallee(node.object);
     return inner === null
       ? null
-      : { ...inner, modifiers: [...inner.modifiers, node.property.name] };
+      : { root: inner.root, modifiers: [...inner.modifiers, node.property.name] };
   }
+  // `it.each([...])(...)` や `` it.each`table`(...) `` のように、呼び出しの戻り値を
+  // さらに呼ぶ形。修飾子だけ引き継ぐ。
   if (node.type === "CallExpression") {
-    const inner = analyzeCallee(node.callee);
-    return inner === null ? null : { ...inner, applied: true };
+    return analyzeCallee(node.callee);
   }
-  // `` it.each`table` `` のタグ付きテンプレート記法。現状のコードでは使っていないが、
-  // 検査を素通りさせないため呼び出し済みとして扱う。
   if (node.type === "TaggedTemplateExpression") {
-    const inner = analyzeCallee(node.tag);
-    return inner === null ? null : { ...inner, applied: true };
+    return analyzeCallee(node.tag);
   }
   return null;
+}
+
+/** 第1引数がテスト名（文字列）かを判定する。 */
+function isTestName(node) {
+  return (
+    (node.type === "Literal" && typeof node.value === "string") || node.type === "TemplateLiteral"
+  );
 }
 
 /**
  * 持ち時間を渡すべきテスト定義の呼び出しなら、その形の情報を返す。
  * 対象外なら null を返す。
  */
-function analyzeTestCall(callee) {
-  const info = analyzeCallee(callee);
+function analyzeTestCall(node) {
+  const info = analyzeCallee(node.callee);
   if (info === null || !TEST_FUNCTIONS.has(info.root)) {
     return null;
   }
   if (info.modifiers.includes(BODYLESS_MODIFIER)) {
     return null;
   }
-  const tableModifier = info.modifiers.find((modifier) => TABLE_MODIFIERS.has(modifier));
-  // 表形式では外側の呼び出しだけが、そうでなければ `it(...)` 自体が実テスト。
-  const isTest = tableModifier === undefined ? !info.applied : info.applied;
-  return isTest ? { optionsOnly: tableModifier === OPTIONS_ONLY_MODIFIER } : null;
+  const name = node.arguments[0];
+  if (name === undefined || !isTestName(name)) {
+    return null;
+  }
+  return { optionsOnly: info.modifiers.includes(OPTIONS_ONLY_MODIFIER) };
 }
 
 function isSharedTimeout(node) {
@@ -157,7 +166,7 @@ const requireTestTimeout = {
   create(context) {
     return {
       CallExpression(node) {
-        const testCall = analyzeTestCall(node.callee);
+        const testCall = analyzeTestCall(node);
         if (testCall === null) {
           return;
         }
