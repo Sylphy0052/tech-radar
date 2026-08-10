@@ -15,17 +15,21 @@
 
 これに次を重ねる。
 
-1. `--bare` で hooks / plugin / CLAUDE.md 自動探索を止める。
-   hooks はツール許可とは別経路で任意コマンドを実行しうるため、
+1. `--setting-sources ""` で設定ファイル（user / project / local）を読み込ませない。
+   hooks はここに定義され、ツール許可とは別経路で任意コマンドを実行しうるため、
    ツール無効化だけでは塞げない
-2. `--setting-sources ""` で設定ファイルを読み込ませない
-3. `--settings` の `permissions.deny` と `--disallowedTools` にツール名を列挙（保険）
-4. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない
-5. 環境変数を許可リストで絞り、DB 接続文字列などを子プロセスへ渡さない
-6. 一時ディレクトリを cwd にし、実行場所由来の設定を拾わせない
+2. `--settings` の `permissions.deny` と `--disallowedTools` にツール名を列挙（保険）
+3. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない
+4. 環境変数を許可リストで絞り、DB 接続文字列などを子プロセスへ渡さない
+5. 一時ディレクトリを cwd にし、実行場所由来の設定を拾わせない
+6. `stdin` を閉じ、子プロセスが対話入力を待って止まる経路を断つ
 
-3 は列挙式で漏れうる。そのため実行後に `num_turns` と `permission_denials` を
+2 は列挙式で漏れうる。そのため実行後に `num_turns` と `permission_denials` を
 検査し、ツール使用の兆候があれば結果を採用せず失敗させる。
+
+`--bare` でも hooks / plugin / CLAUDE.md 自動探索を止められるが採らない。OAuth を
+読まなくなり `ANTHROPIC_API_KEY` が必須になるため、サブスク枠で動かすという
+ADR 0001 の決定と両立しない（`docs/adr/0002-llm-tool-isolation.md` で却下済み）。
 """
 
 from __future__ import annotations
