@@ -10,6 +10,8 @@ configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // console.warn の spy（未知の article_id を渡したときの警告の検証で使う）を戻す。
+  vi.restoreAllMocks();
 });
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -300,6 +302,7 @@ describe("useInterestArticles", () => {
   it("does nothing when removeArticle targets an unknown article id", async () => {
     // Arrange
     const fetchMock = stubListPages();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const callCountBefore = fetchMock.mock.calls.length;
@@ -311,5 +314,55 @@ describe("useInterestArticles", () => {
 
     // Assert
     expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
+    // 黙って戻らず、開発時には原因を追える痕跡が残る（Issue #45）。
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain("unknown-id");
+  }, TEST_TIMEOUT_MS);
+
+  it("hands out a removal callback that sees the items already rendered (G-3)", async () => {
+    // Arrange — 一覧が出た直後の除外操作を取りこぼさないことを固定する
+    // （`useFeed` の同名テストと同じ狙い。Issue #45）。
+    stubListPages();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const removeArticleWhileEmpty = result.current.removeArticle;
+    expect(result.current.items).toEqual([]);
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    const removeArticleAfterLoad = result.current.removeArticle;
+
+    // Assert — items が入れ替わったらハンドラも作り直される
+    expect(removeArticleAfterLoad).not.toBe(removeArticleWhileEmpty);
+
+    // Act — ロード後のハンドラは対象を見つけて即座に一覧から外す
+    act(() => {
+      removeArticleAfterLoad(itemA.article_id);
+    });
+
+    // Assert
+    expect(result.current.items.map((item) => item.article_id)).not.toContain(itemA.article_id);
+    expect(warn).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT_MS);
+
+  it("warns instead of silently dropping the removal when a stale callback is used (G-3)", async () => {
+    // Arrange — items が空だった頃のハンドラを、ロード後に呼ぶ。
+    // 以前 `useInterestArticles` が踏んでいた窓（DOM には記事が出ているのに
+    // ハンドラ側の items がまだ空）の再現であり、握り潰さずに痕跡が残ることを
+    // 固定する（`useFeed` の同名テストと対になる。Issue #45）。
+    stubListPages();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const removeArticleWhileEmpty = result.current.removeArticle;
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act
+    act(() => {
+      removeArticleWhileEmpty(itemA.article_id);
+    });
+
+    // Assert — 一覧からは外れず、代わりに警告が出る
+    expect(result.current.items.map((item) => item.article_id)).toContain(itemA.article_id);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain(itemA.article_id);
   }, TEST_TIMEOUT_MS);
 });
