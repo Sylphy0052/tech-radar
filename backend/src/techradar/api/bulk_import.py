@@ -30,11 +30,22 @@ ALLOWED_BULK_IMPORT_EXTENSIONS = (".md", ".txt")
 # 先頭は英字に限られる。
 _SCHEME_CHARS = frozenset(string.ascii_letters + string.digits + "+.-")
 
-# URL 本文を打ち切る記号。空白・引用符・山括弧・閉じ大括弧/中括弧が現れたら
-# 即座に URL の終端とみなす（Markdown リンク `[title](url)` の前後の装飾文字を
-# URL に巻き込まないため）。丸括弧 `(` `)` は対応を数えて別扱いする
-# （`_find_url_end` を参照）。
-_URL_STOP_CHARS = frozenset("\"'<>]}")
+# URL 本文を打ち切る記号。空白・引用符・山括弧が現れたら即座に URL の終端と
+# みなす。括弧は対応を数えて別扱いする（`_BRACKET_PAIRS` と `_find_url_end`）。
+_URL_STOP_CHARS = frozenset("\"'<>")
+
+# URL 本文に現れる括弧。対応が取れている分は URL の一部として残し、対応の無い
+# 閉じ括弧が来たらそこを終端とする。Markdown リンク `[title](url)` を閉じる
+# 括弧を巻き込まない一方で、URL 自身が含む括弧は保つ。
+#
+# 丸括弧: `https://en.wikipedia.org/wiki/Foo_(disambiguation)`
+# 角括弧: IPv6 リテラル `http://[::1]:8080/`、クエリの配列記法 `?ids[]=1`
+#
+# 対応を数えずに閉じ括弧を一律の終端にすると、これらが途中で切れる。切れた
+# URL もスキーム検証と長さ検証は通ってしまうため、エラー行として報告されない
+# まま登録され、取得ジョブだけが失敗する（利用者からは成功に見える）。
+_BRACKET_PAIRS = {"(": ")", "[": "]", "{": "}"}
+_CLOSING_TO_OPENING_BRACKET = {closing: opening for opening, closing in _BRACKET_PAIRS.items()}
 
 # URL 末尾に巻き込まれがちな文末の句読点。`_strip_trailing_punctuation` で
 # 取り除く対象。丸括弧の対応が取れた末尾の `)`（例: Wikipedia の
@@ -69,26 +80,27 @@ def _find_scheme_start(line: str, scheme_end: int) -> int | None:
 
 
 def _find_url_end(line: str, body_start: int) -> int:
-    """URL 本文の終端位置を、丸括弧の対応を数えながら前向きに走査して決める。
+    """URL 本文の終端位置を、括弧の対応を数えながら前向きに走査して決める。
 
-    `_URL_STOP_CHARS` に含まれる文字・空白が現れたら即座に終端とする。丸括弧は
-    深さを数え、対応の取れていない `)` が現れた時点で終端とする（Markdown の
-    `[title](url)` を閉じる括弧を URL に巻き込まないため）。対応の取れた `)`
-    （例: `Foo_(disambiguation)`）はそのまま URL 本文に含める。
+    `_URL_STOP_CHARS` に含まれる文字・空白が現れたら即座に終端とする。括弧は
+    種類ごとに深さを数え、対応の取れていない閉じ括弧が現れた時点で終端とする
+    （Markdown の `[title](url)` を閉じる括弧を URL に巻き込まないため）。
+    対応の取れた括弧（例: `Foo_(disambiguation)`、`http://[::1]:8080/`）は
+    そのまま URL 本文に含める。
     """
-    depth = 0
+    depths = dict.fromkeys(_BRACKET_PAIRS, 0)
     index = body_start
     length = len(line)
     while index < length:
         char = line[index]
         if char.isspace() or char in _URL_STOP_CHARS:
             break
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            if depth == 0:
+        if char in _BRACKET_PAIRS:
+            depths[char] += 1
+        elif (opening := _CLOSING_TO_OPENING_BRACKET.get(char)) is not None:
+            if depths[opening] == 0:
                 break
-            depth -= 1
+            depths[opening] -= 1
         index += 1
     return index
 

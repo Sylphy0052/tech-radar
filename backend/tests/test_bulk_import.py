@@ -82,6 +82,50 @@ class TestExtractFirstUrl:
         # Assert
         assert url == "https://example.com/a"
 
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("http://[::1]:8080/health", "http://[::1]:8080/health"),
+            (
+                "https://example.com/api?ids[]=1&ids[]=2",
+                "https://example.com/api?ids[]=1&ids[]=2",
+            ),
+            ("- [記事](https://example.com/api?ids[]=1)", "https://example.com/api?ids[]=1"),
+            ("https://example.com/a]", "https://example.com/a"),
+        ],
+    )
+    def test_keeps_balanced_square_brackets_in_the_url(self, line: str, expected: str) -> None:
+        """角括弧も丸括弧と同じく対応を数える。
+
+        IPv6 リテラルのホストやクエリの配列記法は角括弧を含む。対応を数えずに
+        最初の `]` で打ち切ると URL が途中で切れるが、切れた URL もスキーム検証と
+        長さ検証は通ってしまうため、エラー行にならないまま登録される。対応の
+        取れていない `]` （Markdown の参照リンクなど）はこれまでどおり終端。
+        """
+        # Act
+        url = extract_first_url(line)
+
+        # Assert
+        assert url == expected
+
+    def test_returns_none_in_linear_time_for_a_long_line_of_invalid_separators(self) -> None:
+        """受入基準（ReDoS回帰）: URL にならない "://" が大量に並ぶ行でも線形で終わる。
+
+        「候補が URL にならなければ次の "://" から探し直す」ループが、候補ごとに
+        行全体を舐め直す形になっていないことを固定する。
+        """
+        # Arrange
+        line = ("1" * 20 + "://") * 50_000
+
+        # Act
+        started_at = time.perf_counter()
+        url = extract_first_url(line)
+        elapsed_seconds = time.perf_counter() - started_at
+
+        # Assert
+        assert url is None
+        assert elapsed_seconds < 1.0
+
     @pytest.mark.parametrize("line", ["http://", "http://....", "https://。"])
     def test_returns_none_when_the_scheme_has_no_host(self, line: str) -> None:
         """ホストの無い裸のスキームはURLとして扱わない。
