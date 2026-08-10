@@ -163,15 +163,21 @@ def _pid_is_alive(pid: int) -> bool:
     """指定 PID のプロセスが生存しているかを判定する。
 
     シグナル番号 0 はプロセスを実際には終了させず、存在確認だけを行う
-    （`kill(2)` の慣用的な使い方）。権限不足で確認できない場合（別ユーザーの
-    プロセス等）やその他の予期しない `OSError` は、孤児 DB の誤削除を避けるため
-    「生存している」側に倒す（安全側に倒す）。
+    （`kill(2)` の慣用的な使い方）。`ProcessLookupError`（プロセスが存在しない）
+    以外は、原因を問わずすべて「生存している」側に倒す（安全側に倒す）。
+
+    権限不足で確認できない場合（別ユーザーのプロセス等）の `PermissionError` は
+    `OSError` のサブクラスだが、`os.kill()` には巨大な PID（`sys.maxsize` 超）を
+    渡すと `OverflowError` が飛ぶことがあり、これは `OSError` のサブクラスでは
+    ない（Issue #33 self review）。DB 名の PID 部分の桁数には上限を設けている
+    （`db_process_isolation.PID_DIGITS_MAX`）ため通常はここまで巨大な値は来ない
+    はずだが、想定外の呼び出し経路に備えて `Exception` 全体を捕捉する。
     """
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except OSError:
+    except Exception:
         return True
     return True
 

@@ -85,9 +85,15 @@ override はマージ主体と承認要件のみ。以下は**引き続き強制
 
 ## 注意点 (Gotcha)
 
-### pytest のテスト用DBはworktreeごとに分離済み (Issue #23)
+### テストの同時実行は worktree 単位・プロセス単位に分離済み (Issue #23, #33)
 
-backend の pytest はセッション開始時にテスト用DBを DROP/CREATE する ([backend/tests/conftest.py](backend/tests/conftest.py))。DB名は作業ディレクトリ（worktree）のパスから決まるハッシュ接尾辞付き (`techradar_test_<8桁hash>`) のため、worktree を分ければ別セッションが同時に pytest を回しても互いのDBを破壊し合わない（同じ worktree では毎回同じ名前になるため DB が無尽蔵に増えることもない）。
+backend の pytest はセッション開始時にテスト用DBを DROP/CREATE する ([backend/tests/conftest.py](backend/tests/conftest.py))。DB名は `techradar_test_<8桁hash>_<pid>` で、ハッシュ部分が作業ディレクトリ（worktree）、PID 部分がプロセスを表す。worktree を分けても分けなくても、別セッションが同時に pytest を回して互いのDBを破壊し合うことはない。
+
+DBが増え続けないよう、セッション終了時に自分のDBを DROP し、異常終了で残った孤児DB（生存していない PID のもの）は次回のセッション開始時に掃除する。掃除は消さない側へ倒してあり、PID が生存している・PIDとして解釈できない・接続が残っている・自分自身、のいずれかに当たるDBには手を触れない。判定ロジックは [backend/tests/db_process_isolation.py](backend/tests/db_process_isolation.py) にある。
+
+frontend の vitest も同じ理由で `coverage.reportsDirectory` を `coverage/<pid>` に分けてある ([frontend/vitest.config.mts](frontend/vitest.config.mts))。共有していた頃は同時実行すると片方が `Something removed the coverage directory` で落ちた。孤児ディレクトリの掃除は [frontend/vitest.global-setup.ts](frontend/vitest.global-setup.ts) が行う。
+
+worktree を削除すると、そのハッシュを持つテスト用DBはどのworktreeからも掃除されなくなる（他worktreeのDBには触らない設計のため）。気になる場合は `psql` から手動で消す。
 
 ### frontend の Next.js は訓練データと異なる
 

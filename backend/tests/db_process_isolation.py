@@ -39,18 +39,29 @@ WORKTREE_HASH_LENGTH = 8
 # 切り詰められる。切り詰めによる別名同士の衝突を避けるため、組み立て時点で検出する。
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
-# `techradar_test_<hash8>_<pid>` 形式。pid 部分は数字のみを許可し、
-# それ以外（空・非数字を含む等）は「このリポジトリが生成した名前ではない」
-# として扱う（後続の孤児判定で安全側＝消さない側に倒すため）。
+# DB 名の PID 部分に許容する最大桁数。Linux の `pid_max` の既定値は 4194304
+# （7 桁）だが、将来 `pid_max` が拡張される余地を見て 10 桁まで許容する。
+# 桁数の上限を設けない場合、`techradar_test_<hash8>_999999999999999999999999`
+# のような名前が「このリポジトリが生成した名前」として通過してしまい、
+# `os.kill()` へ渡した際に `OverflowError` を誘発しうる（Issue #33 self review）。
+PID_DIGITS_MAX = 10
+
+# `techradar_test_<hash8>_<pid>` 形式。pid 部分は 1〜`PID_DIGITS_MAX` 桁の数字のみを
+# 許可し、それ以外（空・非数字を含む・桁数超過等）は「このリポジトリが生成した
+# 名前ではない」として扱う（後続の孤児判定で安全側＝消さない側に倒すため）。
+# 終端は `$` ではなく `\Z` を使う。`re` の `$` は文字列末尾の直前の改行にも
+# マッチするため、末尾に改行を含む名前を誤って通過させうる（Issue #33 self review）。
 _DATABASE_NAME_PATTERN = re.compile(
-    rf"^{re.escape(DATABASE_NAME_PREFIX)}(?P<hash>[0-9a-f]{{{WORKTREE_HASH_LENGTH}}})_(?P<pid>[0-9]+)$"
+    rf"^{re.escape(DATABASE_NAME_PREFIX)}"
+    rf"(?P<hash>[0-9a-f]{{{WORKTREE_HASH_LENGTH}}})_(?P<pid>[0-9]{{1,{PID_DIGITS_MAX}}})\Z"
 )
 
 # `techradar_test_<hash8>` 形式（PID 接尾辞なし、Issue #23 時代の旧形式）。
 # ハッシュ部分の長さ・文字種が厳密に一致しない名前は対象外とする
 # （切り詰められた名前や無関係な DB を誤って旧形式扱いしないため）。
+# 終端を `\Z` にする理由は `_DATABASE_NAME_PATTERN` と同じ。
 _LEGACY_DATABASE_NAME_PATTERN = re.compile(
-    rf"^{re.escape(DATABASE_NAME_PREFIX)}(?P<hash>[0-9a-f]{{{WORKTREE_HASH_LENGTH}}})$"
+    rf"^{re.escape(DATABASE_NAME_PREFIX)}(?P<hash>[0-9a-f]{{{WORKTREE_HASH_LENGTH}}})\Z"
 )
 
 
