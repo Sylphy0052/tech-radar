@@ -13,11 +13,13 @@ from pathlib import Path
 import pytest
 
 from tests.db_process_isolation import (
+    PID_DIGITS_MAX,
     POSTGRES_IDENTIFIER_MAX_BYTES,
     build_database_name,
     find_orphaned_database_names,
     find_own_worktree_legacy_database_names,
     parse_database_name,
+    parse_legacy_database_name,
     worktree_hash,
 )
 
@@ -74,11 +76,39 @@ class TestParseDatabaseName:
             "techradar_test_deadbeef",  # PID 部分が無い（Issue #23 時点の旧形式）
             "some_other_database",  # 無関係な DB 名
             "postgres",  # 管理用 DB
+            "techradar_test_deadbeef_" + "9" * (PID_DIGITS_MAX + 1),  # PID 桁数が上限超過
+            "techradar_test_deadbeef_123\n",  # 末尾に改行（`$`ではなく`\Z`終端であることの確認）
         ],
     )
     def test_returns_none_for_unrecognized_formats(self, database_name: str):
         # Act / Assert
         assert parse_database_name(database_name) is None
+
+    def test_returns_none_for_pid_exceeding_digit_limit_even_when_byte_length_fits(self):
+        """`build_database_name` はバイト長（63バイト上限）しか検証しないため、
+        PID の桁数が `PID_DIGITS_MAX` を超えていても組み立て自体は成功しうる
+        （例: 11桁の PID でも `techradar_test_<hash8>_<pid>` は63バイトに収まる）。
+        そのような名前を `parse_database_name` が解釈できないこと（＝孤児掃除の
+        対象から外れ、消さない側に倒れること）を確認する（Issue #33 self review）。
+        """
+        # Arrange — 桁数上限（10桁）を1桁超える PID
+        oversized_pid = 10**PID_DIGITS_MAX  # 11桁
+        name = build_database_name(_BACKEND_ROOT, oversized_pid)
+
+        # Act / Assert
+        assert parse_database_name(name) is None
+
+    def test_accepts_pid_at_the_digit_limit_boundary(self):
+        """桁数上限ちょうど（`PID_DIGITS_MAX`桁）の PID は正しく解釈できる境界値確認。"""
+        # Arrange
+        boundary_pid = (10**PID_DIGITS_MAX) - 1  # 10桁のうち最大値
+        name = build_database_name(_BACKEND_ROOT, boundary_pid)
+
+        # Act
+        parsed = parse_database_name(name)
+
+        # Assert
+        assert parsed == (worktree_hash(_BACKEND_ROOT), boundary_pid)
 
 
 class TestFindOrphanedDatabaseNames:
@@ -224,6 +254,25 @@ class TestFindOwnWorktreeLegacyDatabaseNames:
 
         # Assert
         assert candidates == []
+
+    def test_excludes_name_with_trailing_newline(self):
+        """終端を`$`ではなく`\\Z`にしたことの確認（Issue #33 self review）。
+
+        `re`の`$`は文字列末尾の直前の改行にもマッチするため、末尾に改行を1つ
+        含む名前を誤って旧形式として通過させうる。`\\Z`ではマッチしない。
+        """
+        # Arrange — 自分の worktree ハッシュ + 末尾改行
+        name_with_trailing_newline = f"techradar_test_{worktree_hash(_BACKEND_ROOT)}\n"
+
+        # Act / Assert
+        assert parse_legacy_database_name(name_with_trailing_newline) is None
+        assert (
+            find_own_worktree_legacy_database_names(
+                [name_with_trailing_newline],
+                backend_root=_BACKEND_ROOT,
+            )
+            == []
+        )
 
     def test_excludes_pid_based_new_format_names(self):
         """PID 付きの新形式は旧形式の候補側には現れない（二重計上しない）。"""

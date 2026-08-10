@@ -11,6 +11,11 @@
  * 実行前に一度だけ呼ばれる（vitest v4、`TestProject#_initializeGlobalSetup`）。
  * `vitest.config.mts` の `process.pid` と同じプロセスで動くため、自分のPIDに
  * 対応する `coverage/<pid>` ディレクトリを孤児判定から確実に除外できる。
+ *
+ * `cleanupOrphanedCoverageDirectories` は掃除対象のルートを引数で差し替えられる
+ * ようexportしている（`vitest.global-setup.test.ts` が実ファイルシステム上の
+ * 一時ディレクトリに対して統合テストするため）。引数を省略した既定の挙動
+ * （`coverage/` を見る）は変えていない。
  */
 import { existsSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
@@ -29,7 +34,7 @@ const COVERAGE_ROOT = join(import.meta.dirname, "coverage");
  * 確認できない `EPERM`）は、孤児ディレクトリの誤削除を避けるため
  * 「生存している」側に倒す。
  */
-function isPidAlive(pid: number): boolean {
+export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -40,19 +45,37 @@ function isPidAlive(pid: number): boolean {
 }
 
 /**
- * `coverage/` 配下の孤児ディレクトリを掃除する。
+ * `coverageRoot` 配下の孤児ディレクトリを掃除する。
  *
- * `coverage/` ディレクトリがまだ存在しない（初回実行）場合は何もしない。
+ * `coverageRoot` を省略すると既定の `coverage/` を対象にする（本番の挙動）。
+ * テストからは実ファイルシステム上の一時ディレクトリを明示的に渡せる。
+ *
+ * `coverageRoot` がまだ存在しない（初回実行）場合は何もしない。
  * 個々のディレクトリ削除に失敗しても（他プロセスが使用中等）、テスト実行
  * 自体は止めずに警告だけ出す。掃除はベストエフォートであり、次回以降の
  * セッションでも再試行されるため。
  */
-async function cleanupOrphanedCoverageDirectories(): Promise<void> {
-  if (!existsSync(COVERAGE_ROOT)) {
+export async function cleanupOrphanedCoverageDirectories(
+  coverageRoot: string = COVERAGE_ROOT,
+): Promise<void> {
+  if (!existsSync(coverageRoot)) {
     return;
   }
 
-  const entries = await readdir(COVERAGE_ROOT);
+  let entries: string[];
+  try {
+    entries = await readdir(coverageRoot);
+  } catch (error) {
+    // `existsSync` の確認後にディレクトリが消える・権限が変わる等の競合が
+    // 起こりうる。docstring の「掃除はベストエフォート、テスト実行は止めない」
+    // という意図どおり、ここも警告に留めてスキップする（Issue #33 self review）。
+    console.warn(
+      "[vitest.global-setup] 孤児カバレッジディレクトリ一覧の取得に失敗しました",
+      error,
+    );
+    return;
+  }
+
   const orphanNames = findOrphanedCoverageDirectoryNames(entries, {
     ownPid: process.pid,
     isPidAlive,
@@ -61,7 +84,7 @@ async function cleanupOrphanedCoverageDirectories(): Promise<void> {
   await Promise.all(
     orphanNames.map(async (name) => {
       try {
-        await rm(join(COVERAGE_ROOT, name), { recursive: true, force: true });
+        await rm(join(coverageRoot, name), { recursive: true, force: true });
       } catch (error) {
         console.warn(`[vitest.global-setup] 孤児カバレッジディレクトリの削除に失敗しました: ${name}`, error);
       }
