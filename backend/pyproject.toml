@@ -24,6 +24,7 @@ dependencies = [
     "py3langid>=0.3",
     "pyyaml>=6.0",
     "feedparser>=6.0.14",
+    "python-multipart>=0.0.20",
 ]
 
 [project.optional-dependencies]

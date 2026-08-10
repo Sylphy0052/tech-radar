@@ -370,11 +370,28 @@ def _unwrap_basemodel_types(annotation: Any) -> set[type[BaseModel]]:
     return result
 
 
+def _is_framework_synthesized_body_model(schema: type[BaseModel]) -> bool:
+    """FastAPI が multipart/form-data のボディ用に動的生成する wrapper モデルかを判定する。
+
+    `UploadFile` / `File(...)` を引数に取るエンドポイント（`POST /api/articles/bulk`
+    等）では、FastAPI が `fastapi._compat` 配下に
+    `Body_<関数名>_<パス>_<メソッド>` という名前のクラスを実行時に生成し、
+    `route.body_field.field_info.annotation` へ差し込む（実機で確認済み）。
+    これはアプリ側が定義した実在のスキーマではなく、フィールドの実体も
+    `UploadFile` であり DB モデルの列に対応しようがないため、
+    `TARGET_SCHEMAS` / `EXCLUDED_API_SCHEMAS` のどちらにも宣言させず、
+    モジュール名（`fastapi.` 配下）で機械的に除外する。
+    """
+    return schema.__module__.startswith("fastapi.")
+
+
 def schemas_reachable_from_app(app: FastAPI) -> set[type[BaseModel]]:
     """`app` の全ルートから実際に参照されている BaseModel を集める。
 
     対象は `response_model`、リクエストボディの型、`responses=` に指定された
-    追加スキーマ（429 応答の `RateLimitedResponse` 等）。
+    追加スキーマ（429 応答の `RateLimitedResponse` 等）。FastAPI が multipart
+    ボディ用に動的生成する wrapper モデルは対象外にする
+    （`_is_framework_synthesized_body_model` 参照）。
 
     **ネストしたモデルは辿らない**（例: `RecommendationItem.feedback` が持つ
     `ArticleFeedbackResponse`）。ネスト先のフィールドはそのスキーマ自身が
@@ -392,4 +409,4 @@ def schemas_reachable_from_app(app: FastAPI) -> set[type[BaseModel]]:
             model = response_spec.get("model")
             if model is not None:
                 schemas |= _unwrap_basemodel_types(model)
-    return schemas
+    return {schema for schema in schemas if not _is_framework_synthesized_body_model(schema)}

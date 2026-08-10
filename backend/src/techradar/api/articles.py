@@ -15,12 +15,21 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import Select, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from techradar.api.bulk_import import (
+    MAX_BULK_IMPORT_FILE_BYTES,
+    MAX_BULK_IMPORT_URL_COUNT,
+    ParsedUrlLine,
+    has_allowed_bulk_import_extension,
+    parse_url_lines,
+    truncate_line_preview,
+    validate_bulk_import_url,
+)
 from techradar.api.deps import get_current_user_id, get_session
 from techradar.db.enums import ArticleOrigin, JobStatus, JobType
 from techradar.db.errors import is_unique_violation
@@ -221,6 +230,176 @@ def get_article_registration(
     if registration is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="登録が見つかりません")
     return registration
+
+
+# 一括登録アップロードの読み込みに使うチャンクサイズ。`MAX_BULK_IMPORT_FILE_BYTES`
+# より十分小さくし、上限超過を早期に検出できるようにする。
+_BULK_IMPORT_READ_CHUNK_BYTES = 65536
+
+
+class BulkImportErrorItem(BaseModel):
+    """一括登録でエラーとして扱った行の情報。"""
+
+    line_number: int
+    line: str
+    reason: str
+
+
+class BulkArticleImportResponse(BaseModel):
+    """URL リストファイルの一括登録結果（`POST /api/articles/bulk`）。"""
+
+    created: list[ArticleRegistrationResponse]
+    created_count: int
+    duplicate_count: int
+    error_count: int
+    errors: list[BulkImportErrorItem]
+
+
+def _read_upload_within_limit(upload: UploadFile) -> bytes:
+    """アップロードされたファイルを、上限（`MAX_BULK_IMPORT_FILE_BYTES`）を
+    超えたら打ち切りながら読む。
+
+    全内容を読み切ってからサイズを判定すると、上限を大きく超えるファイルでも
+    一時的に全体をメモリへ載せてしまう。読みながら判定することでそれを避ける。
+    """
+    chunks: list[bytes] = []
+    total_size = 0
+    while True:
+        chunk = upload.file.read(_BULK_IMPORT_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > MAX_BULK_IMPORT_FILE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=f"アップロードファイルが上限（{MAX_BULK_IMPORT_FILE_BYTES}バイト）を超えています",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _decode_bulk_import_text(content: bytes) -> str:
+    """アップロード内容を UTF-8 としてデコードする。デコードできなければ 422。"""
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ファイルをUTF-8として読み取れませんでした",
+        ) from exc
+
+
+def _register_bulk_import_line(
+    session: Session, user_id: uuid.UUID, url: str, normalized_url: str
+) -> ArticleRegistration | None:
+    """一括登録の1行ぶんの登録を試みる。既存があれば None を返し重複として扱う。
+
+    既存チェックと挿入の間で同時挿入が起きた場合（TOCTOU）は一意制約違反になるが、
+    `_create_registration` の単純な `session.rollback()` を一括処理でそのまま使うと、
+    そこまでに flush 済みの他の行の登録ごと巻き戻ってしまう。ここでは
+    `session.begin_nested()`（SAVEPOINT）で当該行だけを隔離し、`with` ブロックの
+    外側で例外を捕まえることで、SAVEPOINT へのロールバックだけが起きた状態で
+    ハンドリングする。
+    """
+    existing = _find_existing_registration(session, user_id, normalized_url)
+    if existing is not None:
+        return None
+
+    registration = ArticleRegistration(
+        user_id=user_id, url=url, normalized_url=normalized_url, status=JobStatus.PENDING.value
+    )
+    try:
+        with session.begin_nested():
+            session.add(registration)
+            session.flush()
+    except IntegrityError as exc:
+        if not is_unique_violation(exc):
+            raise
+        return None
+
+    job = enqueue(
+        session, JobType.FETCH_ARTICLE, {"registration_id": str(registration.id), "url": url}
+    )
+    registration.job_id = job.id
+    return registration
+
+
+def _process_bulk_import_lines(
+    session: Session, user_id: uuid.UUID, parsed_lines: Sequence[ParsedUrlLine]
+) -> BulkArticleImportResponse:
+    """抽出済みの行を出現順に処理し、登録・重複・エラーへ振り分ける。"""
+    created: list[ArticleRegistration] = []
+    errors: list[BulkImportErrorItem] = []
+    duplicate_count = 0
+    seen_normalized_urls: set[str] = set()
+
+    for parsed_line in parsed_lines:
+        invalid_reason = validate_bulk_import_url(
+            parsed_line.url, allowed_schemes=_ALLOWED_URL_SCHEMES, max_length=MAX_URL_LENGTH
+        )
+        if invalid_reason is not None:
+            errors.append(
+                BulkImportErrorItem(
+                    line_number=parsed_line.line_number,
+                    line=truncate_line_preview(parsed_line.original_line),
+                    reason=invalid_reason,
+                )
+            )
+            continue
+
+        normalized_url = normalize_url(parsed_line.url)
+        if normalized_url in seen_normalized_urls:
+            duplicate_count += 1
+            continue
+        seen_normalized_urls.add(normalized_url)
+
+        registration = _register_bulk_import_line(session, user_id, parsed_line.url, normalized_url)
+        if registration is None:
+            duplicate_count += 1
+            continue
+        created.append(registration)
+
+    return BulkArticleImportResponse(
+        created=[ArticleRegistrationResponse.model_validate(r) for r in created],
+        created_count=len(created),
+        duplicate_count=duplicate_count,
+        error_count=len(errors),
+        errors=errors,
+    )
+
+
+@router.post("/bulk", response_model=BulkArticleImportResponse)
+def bulk_import_article_registrations(
+    session: SessionDep,
+    user_id: UserIdDep,
+    file: Annotated[UploadFile, File(description="URLリストファイル（.md / .txt、UTF-8）")],
+) -> BulkArticleImportResponse:
+    """URL リストファイルをアップロードし、行ごとに URL を抽出して一括登録する（Issue #39）。
+
+    1件でも不正な行があっても全体を拒否せず、抽出できた URL をファイル内の出現順に
+    処理する。ファイルサイズ・抽出後の URL 件数が上限を超える場合は DB を一切
+    変更せず 413 を返す（`_read_upload_within_limit` / 抽出後件数チェックのどちらも、
+    行ごとの DB 処理を始める前に完了させることで担保する）。
+    """
+    if not has_allowed_bulk_import_extension(file.filename):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="対応していないファイル形式です（.md / .txt のみ受け付けます）",
+        )
+
+    content = _read_upload_within_limit(file)
+    text = _decode_bulk_import_text(content)
+    parsed_lines = parse_url_lines(text)
+    if len(parsed_lines) > MAX_BULK_IMPORT_URL_COUNT:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"URLの件数が上限（{MAX_BULK_IMPORT_URL_COUNT}件）を超えています",
+        )
+
+    result = _process_bulk_import_lines(session, user_id, parsed_lines)
+    # 応答を返す前にコミットする（`create_article_registration` と同じ理由）。
+    session.commit()
+    return result
 
 
 class InterestArticleItem(BaseModel):

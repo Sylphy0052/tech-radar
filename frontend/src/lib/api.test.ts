@@ -155,6 +155,62 @@ describe("apiFetch", () => {
     // Assert
     expect(result).toBeUndefined();
   }, TEST_TIMEOUT_MS);
+
+  it("omits the default Content-Type header when the body is FormData", async () => {
+    // Arrange — FormData を渡す一括インポートでは、ブラウザに boundary 付きの
+    // Content-Type を自動設定させる必要があるため、既定の application/json を付けない。
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const formData = new FormData();
+    formData.append("file", new File(["a"], "urls.txt", { type: "text/plain" }));
+
+    // Act
+    await apiFetch("/api/articles/bulk", { method: "POST", body: formData });
+
+    // Assert
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBeInstanceOf(FormData);
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
+  }, TEST_TIMEOUT_MS);
+
+  it("keeps an explicitly provided Content-Type header even when the body is FormData", async () => {
+    // Arrange — 既存の「明示的な headers を優先する」方針は FormData でも変わらない。
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const formData = new FormData();
+
+    // Act
+    await apiFetch("/api/articles/bulk", {
+      method: "POST",
+      body: formData,
+      headers: { "Content-Type": "multipart/form-data; boundary=custom" },
+    });
+
+    // Assert
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe(
+      "multipart/form-data; boundary=custom",
+    );
+  }, TEST_TIMEOUT_MS);
+
+  it("still sends the default Content-Type header for a non-FormData body", async () => {
+    // Arrange — 既存の JSON 送信（registerArticle 等）の挙動を壊していないことの確認。
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Act
+    await apiFetch("/api/health", { method: "GET" });
+
+    // Assert
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("isRateLimitError", () => {

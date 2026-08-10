@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getArticleRegistration, registerArticle } from "@/lib/articles";
-import type { ArticleRegistration } from "@/lib/articles";
+import { bulkImportArticles, getArticleRegistration, registerArticle } from "@/lib/articles";
+import type { ArticleRegistration, BulkArticleImportResult } from "@/lib/articles";
 import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 afterEach(() => {
@@ -68,5 +68,36 @@ describe("getArticleRegistration", () => {
     expect(fetchMock.mock.calls[0][0]).toContain(
       `/api/articles/registrations/${samplePayload.id}`,
     );
+  }, TEST_TIMEOUT_MS);
+});
+
+describe("bulkImportArticles", () => {
+  const sampleResult: BulkArticleImportResult = {
+    created: [samplePayload],
+    created_count: 1,
+    duplicate_count: 0,
+    error_count: 0,
+    errors: [],
+  };
+
+  it("posts the file to /api/articles/bulk as multipart form data", async () => {
+    // Arrange
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(sampleResult), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const file = new File(["https://example.com/a"], "urls.txt", { type: "text/plain" });
+
+    // Act
+    const result = await bulkImportArticles(file);
+
+    // Assert
+    expect(result).toEqual(sampleResult);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/api/articles/bulk");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeInstanceOf(FormData);
+    const formData = init.body as FormData;
+    expect(formData.get("file")).toBe(file);
   }, TEST_TIMEOUT_MS);
 });

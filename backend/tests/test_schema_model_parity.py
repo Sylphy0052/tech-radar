@@ -28,6 +28,8 @@ from techradar import main as main_module
 from techradar.api.articles import (
     ArticleRegistrationCreate,
     ArticleRegistrationResponse,
+    BulkArticleImportResponse,
+    BulkImportErrorItem,
     InterestArticleItem,
     InterestArticleListResponse,
 )
@@ -631,6 +633,51 @@ DERIVED_FIELDS: tuple[DerivedField, ...] = (
         "suppressed_topics",
         "SuppressedTopicItemのリスト。単一のモデル列由来ではない構造フィールド",
     ),
+    # POST /api/articles/bulk（Issue #39）。件数・エラー一覧はファイル解析結果の
+    # 集計であり、単一モデル列の直接公開ではない。createdはArticleRegistrationの
+    # リストだが、1対1の単純な列公開ではなく複数行の処理結果をまとめた構造
+    # フィールドのためDerivedField扱いとする（ArticleRegistrationResponse自体は
+    # 既存のexposed宣言でカバー済み）。
+    DerivedField(
+        BulkArticleImportResponse,
+        "created",
+        "ArticleRegistrationResponseのリスト。一括登録処理の結果をまとめた構造フィールド",
+    ),
+    DerivedField(
+        BulkArticleImportResponse,
+        "created_count",
+        "createdの件数集計。ファイル解析処理の結果でありモデル列の直接公開ではない",
+    ),
+    DerivedField(
+        BulkArticleImportResponse,
+        "duplicate_count",
+        "重複と判定した行数の集計。モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        BulkArticleImportResponse,
+        "error_count",
+        "エラーと判定した行数の集計。モデル列の直接公開ではない",
+    ),
+    DerivedField(
+        BulkArticleImportResponse,
+        "errors",
+        "BulkImportErrorItemのリスト。ファイル解析結果をまとめた構造フィールド",
+    ),
+    DerivedField(
+        BulkImportErrorItem,
+        "line_number",
+        "アップロードファイル中の行番号（1始まり）。DB由来ではなくファイル解析結果",
+    ),
+    DerivedField(
+        BulkImportErrorItem,
+        "line",
+        "アップロードファイルの元の行（切り詰め済み）。DB由来ではなくファイル解析結果",
+    ),
+    DerivedField(
+        BulkImportErrorItem,
+        "reason",
+        "行を登録できなかった理由の説明文。DB由来ではなくファイル解析結果",
+    ),
 )
 
 # 対象 API スキーマ。個別の parity 宣言（exposed/derived）で網羅する。
@@ -667,6 +714,8 @@ TARGET_SCHEMAS: tuple[type[BaseModel], ...] = (
     InterestDifficultyItem,
     SuppressedTopicItem,
     InterestSummaryResponse,
+    BulkArticleImportResponse,
+    BulkImportErrorItem,
 )
 
 # API 入出力スキーマではないため TARGET_SCHEMAS の対象外とするクラス（現状は無し）。
