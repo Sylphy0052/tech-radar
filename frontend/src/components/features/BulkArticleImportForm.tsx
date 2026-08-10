@@ -61,10 +61,10 @@ export function BulkArticleImportForm() {
   }
 
   return (
-    <section className="flex flex-col gap-3">
-      <h2 className="text-lg font-semibold">URLリストを一括登録</h2>
+    <section className="panel flex flex-col gap-3">
+      <h2 className="heading text-lg">URLリストを一括登録</h2>
       <form onSubmit={handleSubmit} className="flex flex-col gap-2">
-        <label htmlFor={inputId} className="text-sm font-medium">
+        <label htmlFor={inputId} className="mono-label">
           URLリストファイル（.md / .txt）
         </label>
         <input
@@ -72,13 +72,9 @@ export function BulkArticleImportForm() {
           ref={inputRef}
           type="file"
           accept=".md,.txt"
-          className="text-sm text-zinc-700 dark:text-zinc-300"
+          className="field-input text-ink-muted"
         />
-        <button
-          type="submit"
-          disabled={isSubmitting}
-          className="self-start rounded bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-        >
+        <button type="submit" disabled={isSubmitting} className="btn btn-primary self-start">
           アップロードする
         </button>
       </form>
@@ -88,7 +84,7 @@ export function BulkArticleImportForm() {
       {isSubmitting && <LoadingIndicator label="アップロード中です..." />}
 
       {result !== null && (
-        <div className="flex flex-col gap-2 rounded border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-800">
+        <div className="flex flex-col gap-2 border border-line bg-surface-raised px-3 py-2 text-sm text-ink">
           <p>
             登録 {result.created_count}件 / 重複 {result.duplicate_count}件 / エラー{" "}
             {result.error_count}件
@@ -96,10 +92,7 @@ export function BulkArticleImportForm() {
           {result.errors.length > 0 && (
             <ul className="flex flex-col gap-1">
               {result.errors.map((errorItem) => (
-                <li
-                  key={`${errorItem.line_number}-${errorItem.line}`}
-                  className="text-red-700 dark:text-red-300"
-                >
+                <li key={`${errorItem.line_number}-${errorItem.line}`} className="text-danger">
                   {errorItem.line_number}行目: {errorItem.reason}（{errorItem.line}）
                 </li>
               ))}
