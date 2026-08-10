@@ -144,9 +144,9 @@ source_authority_contribution =
 
 MVP では認証を設けない（単一ユーザー）。ただしユーザー固有のデータを持つテーブルには `user_id` を持たせ、将来のマルチユーザー化を妨げない。
 
-`user_id` を持つのは `user_articles` / `article_feedback` / `recommendation_runs` / `user_interest_clusters` / `user_topic_preferences` / `user_source_preferences` / `article_registrations` の 7 つ。
+記事本体・公式ソースレジストリのようにユーザー横断で共有するものと、ジョブキュー・構造化ログのように特定の利用者に属さないものは対象外。所有者が別テーブル経由で辿れるものも列を重ねない。
 
-`articles` / `source_registry` / `jobs` / `operation_logs` は持たない。記事本体と公式ソースレジストリはユーザー横断で共有し、ジョブキューと構造化ログは特定の利用者に属さないため。`recommendations` も持たないが、これは `run_id` 経由で `recommendation_runs.user_id` へ辿れるため列を重ねていないだけで、所有者は定まる。
+どのテーブルが持ち、どれが持たないかの内訳は [backend/src/techradar/db/models.py](../backend/src/techradar/db/models.py) のモジュール docstring を一次情報とする。テーブルを追加するときに必ず触る場所へ内訳を置き、ここへ写しを持たない（同じ内訳を2箇所で持った結果、片方だけ古くなったのが Issue #43）。
 
 ## リポジトリ運用
 
