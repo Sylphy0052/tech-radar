@@ -2,11 +2,16 @@
 
 ユーザー固有のデータを持つテーブル（`user_articles` / `article_feedback` /
 `recommendation_runs` / `user_interest_clusters` / `user_topic_preferences` /
-`article_registrations`）はすべて `user_id` を持つ。MVP は単一ユーザーだが、
-将来のマルチユーザー化を妨げないため（`PROJECT_SPEC.md` §4）。
+`user_source_preferences` / `article_registrations`）はすべて `user_id` を持つ。
+MVP は単一ユーザーだが、将来のマルチユーザー化を妨げないため（`PROJECT_SPEC.md` §4）。
 
-`articles` / `source_registry` / `jobs` / `operation_logs` はユーザー横断で共有する
-データのため `user_id` を持たない。
+`articles` / `source_registry` は記事本体と公式ソースレジストリをユーザー横断で
+共有するため、`jobs` / `operation_logs` は特定の利用者に属さないため `user_id` を
+持たない。`recommendations` も持たないが、こちらは `run_id` 経由で
+`recommendation_runs.user_id` へ辿れるため列を重ねていないだけで、所有者は定まる。
+
+この内訳は `docs/decisions.md` の認証節から一次情報として参照される。テーブルを
+追加・削除するときはここを更新すること。
 
 列挙値は text 列として保持する。値の追加でマイグレーションが必要にならないようにするため、
 検証は `techradar.db.enums` を使ってアプリ側で行う。
