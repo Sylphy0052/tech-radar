@@ -14,7 +14,7 @@
 
 構成: `backend/` (Python + uv)、`frontend/` (Next.js)、`infra/` (docker-compose)、`scripts/ai-harness/`。
 
-判断の根拠を探すとき: 要件は [PROJECT_SPEC.md](PROJECT_SPEC.md)、確定事項は [docs/decisions.md](docs/decisions.md)、技術選定の根拠は [docs/adr/](docs/adr/)。
+判断の根拠を探すとき: 要件は [PROJECT_SPEC.md](PROJECT_SPEC.md)、確定事項は [docs/decisions.md](docs/decisions.md)、技術選定の根拠は [docs/adr/](docs/adr/)。ただしPROJECT_SPEC.mdのデータモデル案 (§19) とAPI案 (§20) は初期設計時の記録で実装へ追随させていない。現行のスキーマは [backend/src/techradar/db/models.py](backend/src/techradar/db/models.py)、現行のAPIは [backend/openapi.json](backend/openapi.json) を見る。
 
 ## 開発コマンド
 
