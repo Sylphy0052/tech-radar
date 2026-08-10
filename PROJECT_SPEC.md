@@ -633,7 +633,7 @@ Supabase Auth
 
 > 初期設計時の案であり、実装へ追随させていない。現行のスキーマは [backend/src/techradar/db/models.py](backend/src/techradar/db/models.py) と [backend/migrations/](backend/migrations/) を参照する。
 >
-> 下の DDL は 8 テーブルだが、実装は 12 テーブルある。`user_source_preferences`（Issue #34）・`article_registrations`（Issue #39）・`jobs`（Issue #8）・`operation_logs`（Issue #8 / #19）が後から加わった。どのテーブルが `user_id` を持つかは `models.py` のモジュール docstring にある。
+> 差はテーブル数と列の両方にある。下のDDLは8テーブルだが実装は12テーブルで、`jobs`と`operation_logs`はスキーマ実装時（Issue #2）に案へ足す形で加わり、`article_registrations`はURL登録画面（Issue #12）、`user_source_preferences`は情報源の選好学習（Issue #34）で加わった。列も揃っておらず、たとえば`articles`は下のDDLが23列に対して実装は33列ある（`body` / `is_dead` / `analysis_status` / `duplicate_of_article_id` など、本文の保持と解析・重複判定のために増えた分がDDLに無い）。どのテーブルが`user_id`を持つかは`models.py`のモジュールdocstringにある。
 
 ```sql
 create table articles (
@@ -736,9 +736,9 @@ Embeddingの次元は採用モデルに合わせて決定する。
 
 ## 20. API案
 
-> 初期設計時の案であり、実装へ追随させていない。現行の API は [backend/openapi.json](backend/openapi.json) と [backend/src/techradar/api/](backend/src/techradar/api/) を参照する。
+> 初期設計時の案であり、実装へ追随させていない。現行のAPIは [backend/openapi.json](backend/openapi.json) と [backend/src/techradar/api/](backend/src/techradar/api/) を参照する。リクエストとレスポンスの形も下の一覧では分からない。
 >
-> 下の一覧に無いものとして `POST /api/articles/bulk` と `GET /api/articles/registrations/{registration_id}`（Issue #39）・`POST /api/crawl/runs`（Issue #8）・`DELETE /api/articles/{article_id}/interest`・`GET /api/interests/summary`・`GET /api/health` が実装されている。逆に `GET /api/articles/{article_id}` は実装していない。
+> 下の一覧に無いものとして`GET /api/articles/registrations/{registration_id}`（Issue #12）・`POST /api/crawl/runs`（Issue #8）・`POST /api/articles/bulk`（Issue #39）が実装されている。`DELETE /api/articles/{article_id}/interest`・`GET /api/interests/summary`・`GET /api/health`も実装済みだが、こちらは既存機能に付随して入ったものでIssueとの対応が1対1にならないため番号を付けていない。逆に`GET /api/articles/{article_id}`は実装していない。
 
 ```text
 POST   /api/articles
