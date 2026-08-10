@@ -631,6 +631,10 @@ Supabase Auth
 
 ## 19. データモデル案
 
+> 初期設計時の案であり、実装へ追随させていない。現行のスキーマは [backend/src/techradar/db/models.py](backend/src/techradar/db/models.py) と [backend/migrations/](backend/migrations/) を参照する。
+>
+> 下の DDL は 8 テーブルだが、実装は 12 テーブルある。`user_source_preferences`（Issue #34）・`article_registrations`（Issue #39）・`jobs`（Issue #8）・`operation_logs`（Issue #8 / #19）が後から加わった。どのテーブルが `user_id` を持つかは `models.py` のモジュール docstring にある。
+
 ```sql
 create table articles (
     id uuid primary key,
@@ -731,6 +735,10 @@ Embeddingの次元は採用モデルに合わせて決定する。
 ---
 
 ## 20. API案
+
+> 初期設計時の案であり、実装へ追随させていない。現行の API は [backend/openapi.json](backend/openapi.json) と [backend/src/techradar/api/](backend/src/techradar/api/) を参照する。
+>
+> 下の一覧に無いものとして `POST /api/articles/bulk` と `GET /api/articles/registrations/{registration_id}`（Issue #39）・`POST /api/crawl/runs`（Issue #8）・`DELETE /api/articles/{article_id}/interest`・`GET /api/interests/summary`・`GET /api/health` が実装されている。逆に `GET /api/articles/{article_id}` は実装していない。
 
 ```text
 POST   /api/articles
