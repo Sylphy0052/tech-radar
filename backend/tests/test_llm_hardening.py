@@ -98,6 +98,19 @@ class TestProcessIsolation:
         command = captured["command"]
         assert command[command.index("--setting-sources") + 1] == ""
 
+    def test_disables_skills(self, settings: Settings, monkeypatch):
+        # Arrange — Skills（`/skill-name`）はツール無効化の管轄外にあり、
+        # プロンプト構造だけに頼らず CLI 側でも塞ぐ
+        captured = stub_run(monkeypatch, stdout=envelope())
+
+        # Act
+        ClaudeCliProvider(settings).complete_json(
+            instruction="要約", untrusted_content="本文", schema=ArticleSummary
+        )
+
+        # Assert
+        assert "--disable-slash-commands" in captured["command"]
+
     def test_runs_in_an_isolated_working_directory(self, settings: Settings, monkeypatch):
         # Arrange — 実行場所由来の設定を拾わせない
         captured = stub_run(monkeypatch, stdout=envelope())
