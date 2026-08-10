@@ -12,6 +12,9 @@
 # - `COMPOSE_FILE` — docker compose の定義ファイルへのパス
 # - `ENTRYPOINT_SCRIPT` — 呼び出し元スクリプト自身のパス。docker へ到達できない
 #   ときの案内文へ埋め込み、そのまま実行できる形で示すために使う
+# - `ENTRYPOINT_ARGS` — 呼び出し元が受け取った引数（任意）。案内文へ一緒に埋め込む。
+#   `./run.sh --stop` のように引数で挙動が変わる場合、これが無いと案内どおり実行した
+#   ときに別の動作をしてしまう
 
 # 呼び出し元が別の値を決めているならそれを尊重する。
 : "${PG_READY_TIMEOUT_SECONDS:=60}"
@@ -34,8 +37,7 @@ ensure_postgres() {
   fi
 
   # ここから先は起動が必要で、docker が要る。
-  command -v docker >/dev/null 2>&1 || fail "docker未インストール — PostgreSQLの起動に必要です"
-  assert_docker_reachable
+  assert_docker_usable "PostgreSQLの起動"
 
   log "PostgreSQL を起動します"
   docker compose -f "$COMPOSE_FILE" up -d postgres >/dev/null 2>&1 \
@@ -68,18 +70,29 @@ docker_is_reachable() {
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
 }
 
+# docker が無いと先へ進めない場面で、未インストールと到達不可をまとめて判定する。
+# `purpose` には「何のために docker が要るのか」を渡す（例: PostgreSQLの起動）。
+assert_docker_usable() {
+  local purpose="$1"
+  command -v docker >/dev/null 2>&1 || fail "docker未インストール — ${purpose}に必要です"
+  assert_docker_reachable
+}
+
 # docker デーモンへ到達できないまま先へ進めない場面で落とす。
 # 権限で弾かれるのは docker group が現在のシェルへ反映されていないときが多く、
 # 素の失敗メッセージからは切り分けられないため、対処まで示す。
 assert_docker_reachable() {
-  local error script
+  local error command_hint
   error="$(docker info 2>&1 >/dev/null)" && return 0
-  # 案内をそのまま実行できるよう、呼び出し元スクリプトのパスを使う。ここで
-  # `${BASH_SOURCE[0]}` を見るとこのライブラリ自身のパスになってしまう。
-  script="${ENTRYPOINT_SCRIPT:-$0}"
+  # 案内をそのまま実行できるよう、呼び出し元スクリプトのパスと引数を使う。ここで
+  # `${BASH_SOURCE[0]}` を見るとこのライブラリ自身のパスになってしまう。引数を
+  # 落とすと `./run.sh --stop` の案内が `./run.sh` になり、そのまま実行すると
+  # 停止のつもりで起動してしまう。
+  command_hint="${ENTRYPOINT_SCRIPT:-$0}"
+  [[ -n "${ENTRYPOINT_ARGS:-}" ]] && command_hint="${command_hint} ${ENTRYPOINT_ARGS}"
 
   if [[ "$error" == *"permission denied"* ]]; then
-    fail "dockerへ接続できません — docker groupが現在のシェルに反映されていない可能性があります。newgrp dockerで入り直すか、sg docker -c \"${script}\" のように実行してください（docker groupはroot相当の権限を持ちます）。dockerの出力: ${error}"
+    fail "dockerへ接続できません — docker groupが現在のシェルに反映されていない可能性があります。newgrp dockerで入り直すか、sg docker -c \"${command_hint}\" のように実行してください（docker groupはroot相当の権限を持ちます）。dockerの出力: ${error}"
   fi
   fail "dockerへ接続できません — dockerの出力: ${error}"
 }

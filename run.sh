@@ -22,8 +22,11 @@ log() { printf '[run] %s\n' "$*" >&2; }
 fail() { printf '[run][FAIL] %s\n' "$*" >&2; exit 1; }
 
 # docker へ到達できないときの案内へ埋め込む。check.sh と共有するライブラリ側からは
-# 呼び出し元のパスが分からないため、ここで渡す。
+# 呼び出し元のパスも引数も分からないため、ここで渡す。引数まで渡すのは、`--stop` の
+# 案内が `./run.sh` になってしまうと、そのまま実行したときに停止ではなく起動して
+# しまうため。
 ENTRYPOINT_SCRIPT="${BASH_SOURCE[0]}"
+ENTRYPOINT_ARGS="$*"
 
 # PostgreSQL の起動確認は check.sh と共有する（Issue #55）。
 # shellcheck source=scripts/ai-harness/lib/postgres.sh
@@ -31,8 +34,7 @@ source "$REPO_ROOT/scripts/ai-harness/lib/postgres.sh"
 
 if [[ "${1:-}" == "--stop" ]]; then
   log "PostgreSQL を停止します"
-  command -v docker >/dev/null 2>&1 || fail "docker未インストール — PostgreSQLの停止に必要です"
-  assert_docker_reachable
+  assert_docker_usable "PostgreSQLの停止"
   docker compose -f "$COMPOSE_FILE" down
   exit 0
 fi
