@@ -106,9 +106,18 @@ def settings() -> Settings:
 
 @pytest.fixture
 def client(db_session: Session, settings: Settings) -> Iterator[TestClient]:
-    """テスト用 DB セッションを使う API クライアント。"""
+    """テスト用 DB セッションを使う API クライアント。
+
+    現在時刻も `NOW` へ固定する。このファイルの記事は `make_article` が
+    `published_at`/`fetched_at` を `NOW` で作るため、実時刻のまま動かすと
+    `NOW` から `freshness.max_age_days`（config/scoring.yaml）を過ぎた日に
+    候補が全て絞り込みから外れ、テストが日付の経過だけで落ちる（Issue #48）。
+    個別に時刻を動かしたいテストは、従来どおり `dependency_overrides` を
+    上書きすればよい。
+    """
     app = create_app(settings)
     app.dependency_overrides[get_session] = lambda: db_session
+    app.dependency_overrides[get_now] = lambda: NOW
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
