@@ -20,17 +20,21 @@
    ツール無効化だけでは塞げない
 2. `--settings` の `permissions.deny` と `--disallowedTools` にツール名を列挙（保険）
 3. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない
-4. 環境変数を許可リストで絞り、DB 接続文字列などを子プロセスへ渡さない
-5. 一時ディレクトリを cwd にし、実行場所由来の設定を拾わせない
-6. `stdin` を閉じ、記事本文を扱うプロセスへ余計な入力経路を残さない
+4. `--disable-slash-commands` で Skills（`/skill-name`）を無効化する。Skills は
+   ツール無効化の管轄外にある独立した実行経路のため、`--tools ""` では塞げない
+5. 環境変数を許可リストで絞り、DB 接続文字列などを子プロセスへ渡さない
+6. 一時ディレクトリを cwd にし、実行場所由来の設定を拾わせない
+7. `stdin` を閉じ、記事本文を扱うプロセスへ余計な入力経路を残さない
 
 plugin は `--plugin-dir` / `--plugin-url` を渡していないため読み込まれない。
 
-Skills（`/skill-name`）は上のツール無効化の管轄外にある（`--disable-slash-commands`
-は渡していない）。プロンプトは常に開発者側の指示で始まり、記事本文は
-`build_user_prompt` が `<untrusted_content>` タグに包んで末尾へ置くため、本文が
-スラッシュコマンドとして解釈される経路は今のところ無い。本文を先頭付近へ動かす
-ようなプロンプト構造の変更を入れるときは、この前提が崩れる。
+Skills を塞ぐのはプロンプト構造に頼らないためである。プロンプトは常に開発者側の
+指示で始まり、記事本文は `build_user_prompt` が `<untrusted_content>` タグに包んで
+末尾へ置くため、本文がスラッシュコマンドとして解釈される経路はもともと無い。ただし
+それはプロンプトの組み立て方に依存した防御で、本文を先頭付近へ動かすような変更を
+入れれば崩れる。CLI 側で無効化しておけば、その変更を入れても経路は閉じたままになる
+（Issue #49。フラグの有無で終了コード・警告・応答・トークン消費のいずれも変わらない
+ことを実測で確認した）。
 
 2 は列挙式で漏れうる。そのため実行後に `num_turns` と `permission_denials` を
 検査し、ツール使用の兆候があれば結果を採用せず失敗させる。応答からこれらの
@@ -155,6 +159,9 @@ def _build_command(settings: Settings, prompt: str) -> list[str]:
         "--strict-mcp-config",
         "--mcp-config",
         EMPTY_MCP_CONFIG,
+        # Skills（`/skill-name`）はツール無効化の管轄外にある独立した実行経路で、
+        # `--tools ""` でも `--bare` でも残る。ここで明示的に落とす。
+        "--disable-slash-commands",
         "--disallowedTools",
         *DENIED_TOOLS,
     ]
