@@ -9,6 +9,8 @@ configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // console.warn の spy（未知の article_id を渡したときの警告の検証で使う）を戻す。
+  vi.restoreAllMocks();
 });
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -330,6 +332,7 @@ describe("useFeed", () => {
   it("does nothing when removeFeedback is called on an article without feedback", async () => {
     // Arrange
     const fetchMock = stubFeedPages();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { result } = renderHook(() => useFeed());
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const callCountBefore = fetchMock.mock.calls.length;
@@ -341,6 +344,28 @@ describe("useFeed", () => {
 
     // Assert — feedback が無い記事には API を叩かない
     expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
+    // 取り消すものが無いだけの正常な呼び出しなので、警告は出さない（Issue #45）。
+    expect(warn).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT_MS);
+
+  it("does nothing when removeFeedback targets an unknown article id", async () => {
+    // Arrange — applyFeedback 版と対になる。一覧に無い article_id を渡された場合は
+    // 黙って戻らず痕跡を残す（Issue #45）。
+    const fetchMock = stubFeedPages();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = renderHook(() => useFeed());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    const callCountBefore = fetchMock.mock.calls.length;
+
+    // Act
+    act(() => {
+      result.current.removeFeedback("unknown-id");
+    });
+
+    // Assert
+    expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain("unknown-id");
   }, TEST_TIMEOUT_MS);
 
   it("rolls back and surfaces an error when removeFeedback's DELETE request fails", async () => {
@@ -430,6 +455,7 @@ describe("useFeed", () => {
   it("does nothing when applyFeedback targets an unknown article id", async () => {
     // Arrange
     const fetchMock = stubFeedPages();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { result } = renderHook(() => useFeed());
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const callCountBefore = fetchMock.mock.calls.length;
@@ -441,6 +467,61 @@ describe("useFeed", () => {
 
     // Assert
     expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
+    // 黙って戻らず、開発時には原因を追える痕跡が残る（Issue #45）。
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain("unknown-id");
+  }, TEST_TIMEOUT_MS);
+
+  it("hands out a feedback callback that sees the items already rendered (G-3)", async () => {
+    // Arrange — 一覧が出た直後のクリックを取りこぼさないことを固定する。
+    // Issue #45 の失敗は、ハンドラが `useEffect` 経由のミラー（itemsRef）から
+    // items を読んでいたために「DOM には記事が出ているがミラーはまだ空」という
+    // 窓を踏み、楽観的更新も API 送信もせずに戻っていた形だった。
+    // ハンドラが最新の items を見ることを直接固定しておけば、依存配列を
+    // 空へ戻す（＝古いクロージャを掴む）退行をここで検出できる。
+    stubFeedPages();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = renderHook(() => useFeed());
+    const applyFeedbackWhileEmpty = result.current.applyFeedback;
+    expect(result.current.items).toEqual([]);
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    const applyFeedbackAfterLoad = result.current.applyFeedback;
+
+    // Assert — items が入れ替わったらハンドラも作り直される
+    expect(applyFeedbackAfterLoad).not.toBe(applyFeedbackWhileEmpty);
+
+    // Act — ロード後のハンドラは対象を見つけて楽観的更新する
+    act(() => {
+      applyFeedbackAfterLoad(itemA.article_id, "good");
+    });
+
+    // Assert
+    await waitFor(() =>
+      expect(result.current.items[0]?.feedback?.action).toBe("good"),
+    );
+    expect(warn).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT_MS);
+
+  it("warns instead of silently dropping the click when a stale callback is used (G-3)", async () => {
+    // Arrange — items が空だった頃のハンドラを、ロード後に呼ぶ。
+    // これは itemsRef 方式が踏んでいた窓そのものの再現であり、握り潰さずに
+    // 痕跡が残ることを固定する。
+    stubFeedPages();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = renderHook(() => useFeed());
+    const applyFeedbackWhileEmpty = result.current.applyFeedback;
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act
+    act(() => {
+      applyFeedbackWhileEmpty(itemA.article_id, "good");
+    });
+
+    // Assert
+    expect(result.current.items[0]?.feedback).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain(itemA.article_id);
   }, TEST_TIMEOUT_MS);
 
   it("surfaces a rate limit message with the wait time when loadMore hits 429", async () => {
