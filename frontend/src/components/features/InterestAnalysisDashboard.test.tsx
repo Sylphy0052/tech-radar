@@ -15,6 +15,11 @@ import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
  * 個別のテスト（`InterestGenreChart.test.tsx` など 7 ファイル）が担保している。
  * グラフを包むカード（見出しと空表示の判定）は実装のまま動くため、素通しの
  * `div` へ差し替えてもこのファイルの検証内容は変わらない。
+ *
+ * `vitest.setup.ts` は recharts の `ResponsiveContainer` だけを差し替えて残りは
+ * 実物を使う共通の `vi.mock` を置いている。ここでの `vi.mock` はそれをこの
+ * ファイル内でだけ上書きする（同じモジュールに対するファイル内の指定が優先
+ * される）。他のテストファイルには影響しない。
  */
 vi.mock("recharts", async () => {
   const { createElement } = await import("react");
