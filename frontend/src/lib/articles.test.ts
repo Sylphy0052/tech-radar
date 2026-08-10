@@ -99,5 +99,5 @@ describe("bulkImportArticles", () => {
     expect(init.body).toBeInstanceOf(FormData);
     const formData = init.body as FormData;
     expect(formData.get("file")).toBe(file);
-  });
+  }, TEST_TIMEOUT_MS);
 });

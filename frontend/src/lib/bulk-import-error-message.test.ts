@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { ApiError } from "@/lib/api";
 import { getBulkImportErrorMessage } from "@/lib/bulk-import-error-message";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 describe("getBulkImportErrorMessage", () => {
   it("returns the size/count limit message for a 413 ApiError", () => {
@@ -15,7 +16,7 @@ describe("getBulkImportErrorMessage", () => {
     expect(message).toBe(
       "ファイルが大きすぎるか、URLの件数が多すぎます（1MB以内、500件以内にしてください）",
     );
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("returns the unsupported format message for a 422 ApiError", () => {
     // Arrange
@@ -28,7 +29,7 @@ describe("getBulkImportErrorMessage", () => {
     expect(message).toBe(
       "対応していないファイル形式です（.md / .txt のUTF-8テキストのみ対応しています）",
     );
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("delegates to getRequestErrorMessage for a 5xx ApiError", () => {
     // Arrange
@@ -39,7 +40,7 @@ describe("getBulkImportErrorMessage", () => {
 
     // Assert
     expect(message).toBe("サーバーでエラーが発生しました。しばらくしてから再度お試しください。");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("delegates to getRequestErrorMessage for a 429 ApiError carrying Retry-After", () => {
     // Arrange
@@ -50,7 +51,7 @@ describe("getBulkImportErrorMessage", () => {
 
     // Assert
     expect(message).toBe("リクエストが多すぎます。約30秒後に再度お試しください。");
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("delegates to getRequestErrorMessage for a non-ApiError (e.g. network failure)", () => {
     // Arrange
@@ -61,5 +62,5 @@ describe("getBulkImportErrorMessage", () => {
 
     // Assert
     expect(message).toBe("通信に失敗しました。しばらくしてから再度お試しください。");
-  });
+  }, TEST_TIMEOUT_MS);
 });
