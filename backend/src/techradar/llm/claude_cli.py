@@ -17,7 +17,9 @@
 
 1. `--setting-sources ""` で設定ファイル（user / project / local）を読み込ませない。
    hooks はここに定義され、ツール許可とは別経路で任意コマンドを実行しうるため、
-   ツール無効化だけでは塞げない
+   ツール無効化だけでは塞げない。ただし管理者ポリシー（admin-managed policy）は
+   この3つに含まれず、コマンドライン引数より優先されるため塞げない
+   （`docs/adr/0002-llm-tool-isolation.md` の残存リスクを参照）
 2. `--settings` の `permissions.deny` と `--disallowedTools` にツール名を列挙（保険）
 3. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない
 4. `--disable-slash-commands` で Skills（`/skill-name`）を無効化する。Skills は
