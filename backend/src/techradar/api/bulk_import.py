@@ -120,21 +120,39 @@ def extract_first_url(line: str) -> str | None:
     O(n) で完了する。「正規表現の方が短い」という理由で正規表現に戻さないこと
     （Issue #39 self review で検出・修正）。
     """
-    scheme_end = line.find("://")
-    if scheme_end == -1:
-        return None
+    search_from = 0
+    while True:
+        scheme_end = line.find("://", search_from)
+        if scheme_end == -1:
+            return None
+        url = _extract_url_at(line, scheme_end)
+        if url is not None:
+            return url
+        # この "://" は URL の一部ではなかった（スキームが無い、本文が無い等）。
+        # 同じ行の後ろに本物の URL があり得るため、次の "://" から探し直す。
+        search_from = scheme_end + 3
 
+
+def _extract_url_at(line: str, scheme_end: int) -> str | None:
+    """`line` の `scheme_end` にある "://" を起点に URL を切り出す。
+
+    その位置が URL を成していなければ None を返す（呼び出し側が次の "://" を
+    探し直す）。
+    """
     start = _find_scheme_start(line, scheme_end)
     if start is None:
         return None
 
     body_start = scheme_end + 3
     end = _find_url_end(line, body_start)
-    if end == body_start:
-        # スキームの直後に本文が無い（例: "http://" だけの行）。
+    url = _strip_trailing_punctuation(line[start:end])
+    if len(url) <= body_start - start:
+        # スキームの直後に本文が残らない（"http://" だけの行、あるいは
+        # "http://...." のように本文が句読点だけで消えた行）。ホストの無い
+        # 裸のスキームはスキーム検証も長さ検証も通ってしまうため、ここで
+        # URL として扱わない。
         return None
-
-    return _strip_trailing_punctuation(line[start:end])
+    return url
 
 
 def parse_url_lines(text: str) -> list[ParsedUrlLine]:
