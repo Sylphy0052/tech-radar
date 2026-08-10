@@ -7,7 +7,7 @@ DB セッションやジョブキューを扱う処理は `techradar.api.article
 
 from __future__ import annotations
 
-import re
+import string
 from dataclasses import dataclass
 
 # アップロードファイルのサイズ上限（バイト）。全内容をメモリに載せる前に判定するため、
@@ -25,17 +25,22 @@ MAX_ERROR_LINE_PREVIEW_LENGTH = 200
 # 受け付けるファイル拡張子（小文字判定）。
 ALLOWED_BULK_IMPORT_EXTENSIONS = (".md", ".txt")
 
-# 行内から最初に現れる URL（`scheme://...` 形式）を取り出す正規表現。
-# 空白・引用符・山括弧・閉じ括弧で URL を打ち切ることで、Markdown リンク
-# `[title](url)` の閉じ括弧や前後の装飾文字を URL に巻き込まないようにする。
-#
-# 抽出対象は http(s) に限定しない。想定される入力の大半は http(s) の URL だが、
-# ここで ftp: 等の他スキームも "URL を含まない行" として無視してしまうと、
-# `validate_bulk_import_url` によるスキーム検証（不正スキームを行番号・理由付きの
-# エラー行として応答へ含める）に到達できず、実質的に握り潰されてしまう。
-# 「URL を含まない行は無視する」対象は、そもそも scheme://... の形をしていない
-# 行（見出し・空行・本文など）に限定する。
-_URL_PATTERN = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s)\]}\"'<>]+")
+# URL のスキーム部分（`scheme://` の `scheme`）に使える文字。RFC 3986 では
+# スキームは ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) と定義されており、
+# 先頭は英字に限られる。
+_SCHEME_CHARS = frozenset(string.ascii_letters + string.digits + "+.-")
+
+# URL 本文を打ち切る記号。空白・引用符・山括弧・閉じ大括弧/中括弧が現れたら
+# 即座に URL の終端とみなす（Markdown リンク `[title](url)` の前後の装飾文字を
+# URL に巻き込まないため）。丸括弧 `(` `)` は対応を数えて別扱いする
+# （`_find_url_end` を参照）。
+_URL_STOP_CHARS = frozenset("\"'<>]}")
+
+# URL 末尾に巻き込まれがちな文末の句読点。`_strip_trailing_punctuation` で
+# 取り除く対象。丸括弧の対応が取れた末尾の `)`（例: Wikipedia の
+# `Foo_(disambiguation)`）はここには含めない。対応の取れた `)` は
+# `_find_url_end` の時点で URL 本文に残すべきものとして処理済みのため。
+_TRAILING_PUNCTUATION_CHARS = frozenset(".,;:!?。、！？；：")
 
 
 @dataclass(frozen=True)
@@ -47,15 +52,89 @@ class ParsedUrlLine:
     url: str
 
 
+def _find_scheme_start(line: str, scheme_end: int) -> int | None:
+    """ "://" の直前の位置（`scheme_end`）から後方へスキーム文字を辿り、
+    URL の開始位置を探す。
+
+    スキームの先頭は英字でなければならないため、後方に連続するスキーム文字の
+    範囲のうち最も左（最も早く現れる）英字の位置を返す。見つからなければ None。
+    """
+    low = scheme_end
+    while low > 0 and line[low - 1] in _SCHEME_CHARS:
+        low -= 1
+    for index in range(low, scheme_end):
+        if line[index] in string.ascii_letters:
+            return index
+    return None
+
+
+def _find_url_end(line: str, body_start: int) -> int:
+    """URL 本文の終端位置を、丸括弧の対応を数えながら前向きに走査して決める。
+
+    `_URL_STOP_CHARS` に含まれる文字・空白が現れたら即座に終端とする。丸括弧は
+    深さを数え、対応の取れていない `)` が現れた時点で終端とする（Markdown の
+    `[title](url)` を閉じる括弧を URL に巻き込まないため）。対応の取れた `)`
+    （例: `Foo_(disambiguation)`）はそのまま URL 本文に含める。
+    """
+    depth = 0
+    index = body_start
+    length = len(line)
+    while index < length:
+        char = line[index]
+        if char.isspace() or char in _URL_STOP_CHARS:
+            break
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        index += 1
+    return index
+
+
+def _strip_trailing_punctuation(url: str) -> str:
+    """URL 末尾に巻き込まれた文末の句読点を取り除く。"""
+    end = len(url)
+    while end > 0 and url[end - 1] in _TRAILING_PUNCTUATION_CHARS:
+        end -= 1
+    return url[:end]
+
+
 def extract_first_url(line: str) -> str | None:
     """行から最初に現れる URL（`scheme://...`）を取り出す。見つからなければ None。
 
     スキームが http/https かどうかはここでは判定しない（`validate_bulk_import_url`
     の責務）。ここで http/https 以外を弾いてしまうと、不正スキームの行を
     「URL を含まない行」として無視してしまい、エラー行として報告できなくなる。
+
+    正規表現ではなく手書きの線形走査で実装している理由: ReDoS。かつての実装
+    `[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s)\\]}\"'<>]+` は "://" を含まない長い行に
+    対してバックトラッキングが二次関数的に増大し、実測で行長 4万文字で約1.4秒
+    かかった（10000: 0.1秒、20000: 0.35秒、40000: 1.43秒という増え方から、
+    100万文字では外挿で約16分ハングする）。改行を含まない1行はファイルサイズ
+    上限（`MAX_BULK_IMPORT_FILE_BYTES`）でしか弾かれないため、拡張子・サイズ・
+    UTF-8 検証をすべて通過してこの関数に到達し得る。バックエンドはジョブ
+    ワーカーと同一プロセスに同居する構成のため、ここが詰まると巡回処理まで
+    止まる。本実装はバックトラッキングを行わず、各文字を定数回走査するだけの
+    O(n) で完了する。「正規表現の方が短い」という理由で正規表現に戻さないこと
+    （Issue #39 self review で検出・修正）。
     """
-    match = _URL_PATTERN.search(line)
-    return match.group(0) if match else None
+    scheme_end = line.find("://")
+    if scheme_end == -1:
+        return None
+
+    start = _find_scheme_start(line, scheme_end)
+    if start is None:
+        return None
+
+    body_start = scheme_end + 3
+    end = _find_url_end(line, body_start)
+    if end == body_start:
+        # スキームの直後に本文が無い（例: "http://" だけの行）。
+        return None
+
+    return _strip_trailing_punctuation(line[start:end])
 
 
 def parse_url_lines(text: str) -> list[ParsedUrlLine]:

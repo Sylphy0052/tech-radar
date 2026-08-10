@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from techradar.api.bulk_import import (
@@ -73,6 +75,69 @@ class TestExtractFirstUrl:
         # Assert
         assert url == "ftp://example.com/a"
 
+    def test_keeps_the_balanced_closing_paren_inside_a_wikipedia_style_url(self) -> None:
+        """受入基準: 括弧を含むURL単体（Wikipedia風）は、対応の取れた閉じ括弧を
+        巻き込んだまま抽出される。
+        """
+        # Act
+        url = extract_first_url("https://en.wikipedia.org/wiki/Foo_(disambiguation)")
+
+        # Assert
+        assert url == "https://en.wikipedia.org/wiki/Foo_(disambiguation)"
+
+    def test_keeps_the_balanced_paren_but_drops_the_markdown_link_closing_paren(self) -> None:
+        """受入基準: Markdownリンクの中に括弧入りURLがあっても、URL側の対応が
+        取れた閉じ括弧は残しつつ、リンクを閉じる括弧は巻き込まない。
+        """
+        # Act
+        url = extract_first_url("- [記事](https://en.wikipedia.org/wiki/Foo_(disambiguation))")
+
+        # Assert
+        assert url == "https://en.wikipedia.org/wiki/Foo_(disambiguation)"
+
+    def test_trims_a_trailing_full_width_period_after_a_bare_url_in_a_sentence(self) -> None:
+        """受入基準: 文中の素URLの直後にある半角ピリオドは巻き込まない。"""
+        # Act
+        url = extract_first_url("See https://example.com/a.")
+
+        # Assert
+        assert url == "https://example.com/a"
+
+    def test_trims_a_trailing_full_width_punctuation_after_a_bare_url_in_japanese_text(
+        self,
+    ) -> None:
+        """受入基準: 日本語文中の素URLの直後にある全角句点は巻き込まない。"""
+        # Act
+        url = extract_first_url("詳しくは https://example.com/a を参照。")
+
+        # Assert
+        assert url == "https://example.com/a"
+
+    def test_trims_a_trailing_comma_inside_parentheses(self) -> None:
+        """受入基準: 括弧内でURLの後にカンマが続く場合、カンマは巻き込まない。"""
+        # Act
+        url = extract_first_url("(https://example.com/a, ok)")
+
+        # Assert
+        assert url == "https://example.com/a"
+
+    def test_returns_none_in_linear_time_for_a_long_line_without_a_scheme(self) -> None:
+        """受入基準（ReDoS回帰）: "://" を含まない長い行は、バックトラッキング
+        のある正規表現なら二次関数的に劣化する入力だが、線形走査であれば
+        一瞬で None を返す。
+        """
+        # Arrange
+        long_line_without_scheme = "a" * 100_000
+
+        # Act
+        started_at = time.perf_counter()
+        url = extract_first_url(long_line_without_scheme)
+        elapsed_seconds = time.perf_counter() - started_at
+
+        # Assert
+        assert url is None
+        assert elapsed_seconds < 1.0
+
 
 class TestParseUrlLines:
     def test_extracts_urls_in_order_and_skips_non_url_lines(self) -> None:
@@ -132,6 +197,40 @@ class TestValidateBulkImportUrl:
         )
 
         # Assert
+        assert reason is not None
+
+    def test_returns_none_for_a_url_exactly_at_the_max_length(self) -> None:
+        """境界値: max_length ちょうどの長さのURLは許可される。"""
+        # Arrange
+        prefix = "https://example.com/"
+        exactly_max_length_url = prefix + "a" * (_MAX_URL_LENGTH - len(prefix))
+
+        # Act
+        reason = validate_bulk_import_url(
+            exactly_max_length_url,
+            allowed_schemes=_ALLOWED_SCHEMES,
+            max_length=_MAX_URL_LENGTH,
+        )
+
+        # Assert
+        assert len(exactly_max_length_url) == _MAX_URL_LENGTH
+        assert reason is None
+
+    def test_returns_a_reason_for_a_url_one_char_over_the_max_length(self) -> None:
+        """境界値: max_length + 1文字のURLはエラーになる。"""
+        # Arrange
+        prefix = "https://example.com/"
+        one_over_max_length_url = prefix + "a" * (_MAX_URL_LENGTH - len(prefix) + 1)
+
+        # Act
+        reason = validate_bulk_import_url(
+            one_over_max_length_url,
+            allowed_schemes=_ALLOWED_SCHEMES,
+            max_length=_MAX_URL_LENGTH,
+        )
+
+        # Assert
+        assert len(one_over_max_length_url) == _MAX_URL_LENGTH + 1
         assert reason is not None
 
 
