@@ -67,8 +67,26 @@ ruleTester.run("require-test-timeout", requireTestTimeout, {
       code: `it("does something", { ["timeout"]: TEST_TIMEOUT_MS }, () => {});`,
     },
     {
+      name: "条件付きチェーンにも渡せる",
+      code: `
+        it.skipIf(isSlowMachine)("does something", () => {}, TEST_TIMEOUT_MS);
+        it.runIf(hasGpu)("does something else", () => {}, TEST_TIMEOUT_MS);
+      `,
+    },
+    {
+      name: "テストを作る側の呼び出しは対象外",
+      code: `
+        const cases = it.each([1, 2]);
+        const myTest = test.extend({ fixture: async (context, use) => use(1) });
+      `,
+    },
+    {
       name: "it.todo は持ち時間を取らない",
       code: `it.todo("will be written later");`,
+    },
+    {
+      name: "テスト名を変数で渡す呼び出しは見分けられないため対象外",
+      code: `it(caseName, () => {});`,
     },
     {
       name: "describe は対象外",
@@ -149,6 +167,11 @@ ruleTester.run("require-test-timeout", requireTestTimeout, {
       name: "第3引数へオブジェクトを渡している",
       code: `it("does something", () => {}, { timeout: 5000 });`,
       errors: [{ messageId: "useSharedTimeout" }],
+    },
+    {
+      name: "条件付きチェーンで持ち時間が省略されている",
+      code: `it.skipIf(isSlowMachine)("does something", () => {});`,
+      errors: [{ messageId: "missingTimeout" }],
     },
     {
       name: "it.for の持ち時間が省略されている",
