@@ -64,6 +64,15 @@ hooks は設定ファイル（user / project / local）に定義され、**ツ�
 
 実測で `input_tokens` が **4076 → 175** に落ちることから、設定と `CLAUDE.md` が読み込まれていないことを確認した。副次的に、呼び出しあたりのトークンとコストが大幅に下がる。
 
+この指定が及ぶ範囲は user / project / local の3つに限られる。ヘルプの定義がそのまま読み込み元の全体である。
+
+```text
+--setting-sources <sources>  Comma-separated list of setting sources
+                             to load (user, project, local).
+```
+
+**管理者ポリシー（admin-managed policy）に定義された設定はこの3つに含まれず、`--setting-sources ""` の対象外になる**（Issue #50）。そのためポリシー側に hooks が定義されていれば、ツール無効化とは別経路で実行されうる状態が残る。残存リスクとしての扱いは後述する。
+
 `--bare` でも hooks を止められるが、**OAuth を読まなくなり `ANTHROPIC_API_KEY` が必須になる**（ヘルプに "Anthropic auth is strictly ANTHROPIC_API_KEY ... (OAuth and keychain are never read)"）。サブスク枠で動かすという ADR 0001 の決定と両立しないため使わない。
 
 ### 2. `permissions.deny` と `--disallowedTools`（保険）
@@ -158,3 +167,16 @@ duration  : 2212 ms
 - 万一ツールが動いてしまった場合、応答は捨てるが、CLI プロセスが実際にファイルを読んだ事実は取り消せない
 - **CLI サブプロセスのネットワーク到達性は、アプリ側の SSRF 対策（`techradar.fetcher`）の管轄外**。`WebFetch` 等が動いてしまえばクラウドメタデータ等へ到達しうる。`--tools ""` で塞いでいるが、恒久対策はコンテナ化と egress 制限
 - CLI プロセスをコンテナや専用ユーザーで隔離するのは今後の課題
+- **管理者ポリシー由来の hooks は塞げない**。上記 1. のとおり `--setting-sources ""` の対象は user / project / local で、管理者ポリシーは含まれない。CLI 側にこれを無効化する手段は用意されていない。`--bare` よりさらに広範に無効化する `--safe-mode` でも適用され続けると明記されている
+
+  ```text
+  --safe-mode  Start with all customizations (CLAUDE.md, skills, plugins, hooks,
+               MCP servers, custom commands and agents, output styles, workflows,
+               custom themes, keybindings, and more) disabled — useful for
+               troubleshooting a broken configuration. Admin-managed (policy)
+               settings still apply. ...
+  ```
+
+  実害が低いと判断しているのは、このプロジェクトが**単一ユーザー・ローカル実行**を前提としており、管理者ポリシーが存在する時点でホストに別の管理主体が居ることになるためである。その状況では CLI の隔離以前に前提が崩れている。
+
+  **この前提が変わるとき**——管理端末や CI ホスト、共有マシンなど、自分以外がポリシーを配布しうる環境へ持ち出すとき——は、この点を防御の穴として再検討する。具体的には、実行ホストにポリシーが配布されていないことを確認するか、CLI プロセス自体をコンテナや専用ユーザーで隔離する（上の「今後の課題」と同じ対策になる）
