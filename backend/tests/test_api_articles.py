@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from typing import Any
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, delete, func, select
+from sqlalchemy import Engine, delete, event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -309,6 +311,33 @@ def _upload_bulk_file(
     return client.post("/api/articles/bulk", files={"file": (filename, raw, "text/markdown")})
 
 
+@contextmanager
+def _recorded_sql(session: Session) -> Iterator[list[str]]:
+    """セッションが使う接続で実行された SQL 文を記録する。
+
+    「何回 DB へ往復したか」を数えるため、ORM の発行結果ではなく実際に
+    カーソルへ渡された文を見る。
+    """
+    statements: list[str] = []
+
+    def _record(
+        connection: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    connection = session.connection()
+    event.listen(connection, "before_cursor_execute", _record)
+    try:
+        yield statements
+    finally:
+        event.remove(connection, "before_cursor_execute", _record)
+
+
 class TestBulkImportArticleRegistrations:
     """`POST /api/articles/bulk`（Issue #39）。"""
 
@@ -478,8 +507,8 @@ class TestBulkImportArticleRegistrations:
         """受入基準: ある行で一意制約違反が起きても、他の行の登録が巻き戻らない
         （SAVEPOINTの担保）。
 
-        既存登録を作った上で、既存チェック（`_find_existing_registration`）を
-        常に None を返すよう差し替えることで、事前チェックと挿入の間に同時挿入が
+        既存登録を作った上で、既存チェック（`_find_existing_normalized_urls`）が
+        常に空集合を返すよう差し替えることで、事前チェックと挿入の間に同時挿入が
         起きた場合（TOCTOU）と同じ状況を再現する。1行目は正常に登録された後、
         2行目で実際のDB一意制約違反が起きるが、SAVEPOINTで隔離されていれば
         1行目の登録は巻き戻らない。
@@ -488,8 +517,8 @@ class TestBulkImportArticleRegistrations:
         setup_response = client.post("/api/articles", json={"url": "https://example.com/existing"})
         assert setup_response.status_code == 201
         monkeypatch.setattr(
-            "techradar.api.articles._find_existing_registration",
-            lambda *args, **kwargs: None,
+            "techradar.api.articles._find_existing_normalized_urls",
+            lambda *args, **kwargs: set(),
         )
         content = "https://example.com/success\nhttps://example.com/existing\n"
 
@@ -534,3 +563,38 @@ class TestBulkImportArticleRegistrations:
 
         # Assert
         assert response.status_code == 422
+
+    def test_does_not_touch_the_registrations_table_per_row_at_the_url_count_limit(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: 上限の500件を一括登録しても、既存登録の突き合わせは1クエリで済む。
+
+        行ごとに既存チェックの SELECT を出す実装では、ここが件数ぶんの往復になる。
+        併せて、登録行への UPDATE が行ごとに走らないことも確かめる。UPDATE は
+        `updated_at` をサーバー側で書き直すため、応答を組み立てる際に行ごとの
+        再読込 SELECT を誘発する。
+        """
+        # Arrange
+        content = "\n".join(f"https://example.com/{i}" for i in range(500)) + "\n"
+
+        # Act
+        with _recorded_sql(db_session) as statements:
+            response = _upload_bulk_file(client, content)
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json()["created_count"] == 500
+        lookups = [
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith("SELECT")
+            and "article_registrations" in statement
+        ]
+        assert len(lookups) == 1
+        updates = [
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith("UPDATE")
+            and "article_registrations" in statement
+        ]
+        assert updates == []

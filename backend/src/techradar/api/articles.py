@@ -12,6 +12,7 @@ import binascii
 import math
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
 
@@ -123,6 +124,33 @@ def _find_existing_registration(
         ArticleRegistration.normalized_url == normalized_url,
     )
     return session.scalar(statement)
+
+
+def _find_existing_normalized_urls(
+    session: Session, user_id: uuid.UUID, normalized_urls: Sequence[str]
+) -> set[str]:
+    """同一ユーザーで既に登録済みの正規化 URL を1クエリでまとめて引く。
+
+    一括登録は最大 `MAX_BULK_IMPORT_URL_COUNT` 行を扱うため、行ごとに
+    `_find_existing_registration` を呼ぶと件数ぶんの DB 往復がリクエスト中に
+    直列で走る。重複判定に必要なのは正規化 URL の集合だけなので、行そのものは
+    取得しない。
+
+    IN 句の要素数は呼び出し側が抑える責務を持つ。一括登録は
+    `MAX_BULK_IMPORT_URL_COUNT` を超えるファイルを DB へ触れる前に 413 で
+    弾いているため、ここへ渡る件数はその上限以下になる。上限を大きく緩める
+    場合は分割して引くことを検討する。重複した URL が混ざっていても安全な
+    よう集合へ落としてから渡す。
+    """
+    if not normalized_urls:
+        # 空の IN 句を組み立てて無駄な往復を作らない。
+        return set()
+
+    statement = select(ArticleRegistration.normalized_url).where(
+        ArticleRegistration.user_id == user_id,
+        ArticleRegistration.normalized_url.in_(set(normalized_urls)),
+    )
+    return set(session.scalars(statement))
 
 
 def _create_registration(
@@ -292,24 +320,37 @@ def _decode_bulk_import_text(content: bytes) -> str:
 def _register_bulk_import_line(
     session: Session, user_id: uuid.UUID, url: str, normalized_url: str
 ) -> ArticleRegistration | None:
-    """一括登録の1行ぶんの登録を試みる。既存があれば None を返し重複として扱う。
+    """一括登録の1行ぶんを挿入する。同時挿入と競合したら None を返し重複として扱う。
 
-    既存チェックと挿入の間で同時挿入が起きた場合（TOCTOU）は一意制約違反になるが、
-    `_create_registration` の単純な `session.rollback()` を一括処理でそのまま使うと、
-    そこまでに flush 済みの他の行の登録ごと巻き戻ってしまう。ここでは
-    `session.begin_nested()`（SAVEPOINT）で当該行だけを隔離し、`with` ブロックの
-    外側で例外を捕まえることで、SAVEPOINT へのロールバックだけが起きた状態で
-    ハンドリングする。
+    重複していないことは呼び出し側が `_find_existing_normalized_urls` の結果で
+    判定済みだが、その突き合わせと挿入の間に別リクエストが同じ URL を挿入する
+    可能性（TOCTOU）は残る。このとき `_create_registration` の単純な
+    `session.rollback()` を一括処理でそのまま使うと、そこまでに flush 済みの
+    他の行の登録ごと巻き戻ってしまう。ここでは `session.begin_nested()`
+    （SAVEPOINT）で当該行だけを隔離し、`with` ブロックの外側で例外を捕まえる
+    ことで、SAVEPOINT へのロールバックだけが起きた状態でハンドリングする。
     """
-    existing = _find_existing_registration(session, user_id, normalized_url)
-    if existing is not None:
-        return None
-
+    # ジョブの payload に載せるため、flush を待たずに ID を決めておく。
+    registration_id = uuid.uuid4()
     registration = ArticleRegistration(
-        user_id=user_id, url=url, normalized_url=normalized_url, status=JobStatus.PENDING.value
+        id=registration_id,
+        user_id=user_id,
+        url=url,
+        normalized_url=normalized_url,
+        status=JobStatus.PENDING.value,
     )
     try:
         with session.begin_nested():
+            # ジョブを先に積み、`job_id` を埋めた状態で登録行を挿入する。登録行を
+            # 挿入してから `job_id` を代入すると、行ごとに UPDATE が走るうえ
+            # `updated_at` がサーバー側で再計算されて期限切れになり、応答を組み立てる
+            # ときに行ごとの再読込まで発生する。
+            job = enqueue(
+                session,
+                JobType.FETCH_ARTICLE,
+                {"registration_id": str(registration_id), "url": url},
+            )
+            registration.job_id = job.id
             session.add(registration)
             session.flush()
     except IntegrityError as exc:
@@ -317,18 +358,33 @@ def _register_bulk_import_line(
             raise
         return None
 
-    job = enqueue(
-        session, JobType.FETCH_ARTICLE, {"registration_id": str(registration.id), "url": url}
-    )
-    registration.job_id = job.id
     return registration
 
 
-def _process_bulk_import_lines(
-    session: Session, user_id: uuid.UUID, parsed_lines: Sequence[ParsedUrlLine]
-) -> BulkArticleImportResponse:
-    """抽出済みの行を出現順に処理し、登録・重複・エラーへ振り分ける。"""
-    created: list[ArticleRegistration] = []
+@dataclass(frozen=True)
+class _ValidatedBulkImportLine:
+    """検証と正規化を通り、DB との突き合わせを待っている1行。"""
+
+    parsed_line: ParsedUrlLine
+    normalized_url: str
+
+
+@dataclass
+class _BulkImportScreening:
+    """DB へ触れる前に確定できる振り分けの結果。"""
+
+    lines: list[_ValidatedBulkImportLine]
+    errors: list[BulkImportErrorItem]
+    duplicate_count: int
+
+
+def _screen_bulk_import_lines(parsed_lines: Sequence[ParsedUrlLine]) -> _BulkImportScreening:
+    """抽出済みの行を検証・正規化し、ファイル内で重複する行を落とす。
+
+    DB を引かずに確定できる振り分け（不正な行・ファイル内の重複）をここで
+    済ませることで、残った行の既存登録を1クエリでまとめて突き合わせられる。
+    """
+    lines: list[_ValidatedBulkImportLine] = []
     errors: list[BulkImportErrorItem] = []
     duplicate_count = 0
     seen_normalized_urls: set[str] = set()
@@ -352,8 +408,33 @@ def _process_bulk_import_lines(
             duplicate_count += 1
             continue
         seen_normalized_urls.add(normalized_url)
+        lines.append(
+            _ValidatedBulkImportLine(parsed_line=parsed_line, normalized_url=normalized_url)
+        )
 
-        registration = _register_bulk_import_line(session, user_id, parsed_line.url, normalized_url)
+    return _BulkImportScreening(lines=lines, errors=errors, duplicate_count=duplicate_count)
+
+
+def _process_bulk_import_lines(
+    session: Session, user_id: uuid.UUID, parsed_lines: Sequence[ParsedUrlLine]
+) -> BulkArticleImportResponse:
+    """抽出済みの行を出現順に処理し、登録・重複・エラーへ振り分ける。"""
+    screening = _screen_bulk_import_lines(parsed_lines)
+    existing_normalized_urls = _find_existing_normalized_urls(
+        session, user_id, [line.normalized_url for line in screening.lines]
+    )
+
+    created: list[ArticleRegistration] = []
+    duplicate_count = screening.duplicate_count
+
+    for line in screening.lines:
+        if line.normalized_url in existing_normalized_urls:
+            duplicate_count += 1
+            continue
+
+        registration = _register_bulk_import_line(
+            session, user_id, line.parsed_line.url, line.normalized_url
+        )
         if registration is None:
             duplicate_count += 1
             continue
@@ -363,8 +444,8 @@ def _process_bulk_import_lines(
         created=[ArticleRegistrationResponse.model_validate(r) for r in created],
         created_count=len(created),
         duplicate_count=duplicate_count,
-        error_count=len(errors),
-        errors=errors,
+        error_count=len(screening.errors),
+        errors=screening.errors,
     )
 
 
