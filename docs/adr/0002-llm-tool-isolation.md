@@ -64,7 +64,21 @@ hooks は設定ファイル（user / project / local）に定義され、**ツ�
 
 実測で `input_tokens` が **4076 → 175** に落ちることから、設定と `CLAUDE.md` が読み込まれていないことを確認した。副次的に、呼び出しあたりのトークンとコストが大幅に下がる。
 
-`--bare` でも hooks を止められるが、**OAuth を読まなくなり `ANTHROPIC_API_KEY` が必須になる**（ヘルプに "Anthropic auth is strictly ANTHROPIC_API_KEY ... (OAuth and keychain are never read)"）。サブスク枠で動かすという ADR 0001 の決定と両立しないため使わない。
+ただし、この指定が及ぶのは user / project / local の3つだけである。ヘルプが列挙するのはこの3つで、**管理者ポリシー（admin-managed policy）はそもそも読み込み元として選べない**。
+
+```text
+--setting-sources <sources>  Comma-separated list of setting sources
+                             to load (user, project, local).
+```
+
+公式ドキュメントは設定の優先順位を次のとおり定めており、管理者ポリシーはコマンドライン引数より上位で「他のどのスコープからも上書きできない」とされる。
+
+> 1. **Managed** (highest): can't be overridden by any other scope, apart from the exceptions under Settings precedence
+> 2. **Command line arguments**: temporary session overrides
+
+つまりポリシー側に hooks が定義されていれば、`--setting-sources ""` では止められない（Issue #50）。残存リスクとしての扱いは後述する。
+
+`--bare` でも hooks を止められるが、**OAuth を読まなくなり `ANTHROPIC_API_KEY` が必須になる**（ヘルプに "Anthropic auth is strictly ANTHROPIC_API_KEY ... (OAuth and keychain are never read)"）。サブスク枠で動かすという ADR 0001 の決定と両立しないため使わない。なお `--bare` が止められるのも上と同じ3つのスコープ由来の hooks であり、管理者ポリシー由来のものは残る。
 
 ### 2. `permissions.deny` と `--disallowedTools`（保険）
 
@@ -158,3 +172,11 @@ duration  : 2212 ms
 - 万一ツールが動いてしまった場合、応答は捨てるが、CLI プロセスが実際にファイルを読んだ事実は取り消せない
 - **CLI サブプロセスのネットワーク到達性は、アプリ側の SSRF 対策（`techradar.fetcher`）の管轄外**。`WebFetch` 等が動いてしまえばクラウドメタデータ等へ到達しうる。`--tools ""` で塞いでいるが、恒久対策はコンテナ化と egress 制限
 - CLI プロセスをコンテナや専用ユーザーで隔離するのは今後の課題
+- **管理者ポリシーが配布されたホストでは、この ADR の防御が前提から崩れる**。上記 1. のとおり管理者ポリシーはコマンドライン引数より優先され、CLI 側にこれを無効化する手段は無い。`--bare` よりさらに広範に無効化する `--safe-mode` でも "Admin-managed (policy) settings still apply." と明記されている。影響は hooks に留まらない可能性がある。ポリシー側の設定が主防御の `--tools ""` を上書きしうるかは**未検証**で、Issue #56 で扱う
+
+  実害が低いと判断しているのは、このプロジェクトが**単一ユーザー・ローカル実行**を前提としており、管理者ポリシーが存在する時点でホストに別の管理主体が居ることになるためである。その状況では CLI の隔離以前に前提が崩れている。開発機には 2026-08-11 時点でポリシーが配布されていないことを確認した（`/etc/claude-code/` が存在しない）
+
+  **この前提が変わるとき**——管理端末や CI ホスト、共有マシンなど、自分以外がポリシーを配布しうる環境へ持ち出すとき——は、この点を防御の穴として扱う。取りうる対策は次の2つで、有効性が異なる
+
+  - **実行ホストにポリシーが配布されていないことを確認する** — 配置先は macOS `/Library/Application Support/ClaudeCode/`、Linux / WSL `/etc/claude-code/`、Windows `C:\Program Files\ClaudeCode\`。確認は容易だが、配布された時点で気づける仕組みは今のところ無い
+  - **CLI プロセスをコンテナで隔離する** — 上記パスをマウントしない構成にすればポリシーを読ませずに済む。**同一ホスト上で実行ユーザーを分けるだけでは足りない**。配置先はホスト共通のシステムディレクトリで、ユーザーごとではないため
