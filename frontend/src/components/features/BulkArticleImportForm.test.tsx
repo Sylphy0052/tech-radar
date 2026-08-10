@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { BulkArticleImportForm } from "@/components/features/BulkArticleImportForm";
 import type { BulkArticleImportResult } from "@/lib/articles";
+import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -51,7 +52,7 @@ describe("BulkArticleImportForm", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toContain("/api/articles/bulk");
     expect(init.body).toBeInstanceOf(FormData);
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("displays the created/duplicate/error counts after a successful upload", async () => {
     // Arrange
@@ -67,7 +68,7 @@ describe("BulkArticleImportForm", () => {
 
     // Assert
     expect(screen.getByText("登録 3件 / 重複 1件 / エラー 0件")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("lists the line number, reason, and original line for each error row", async () => {
     // Arrange
@@ -90,7 +91,7 @@ describe("BulkArticleImportForm", () => {
 
     // Assert
     expect(screen.getByText("4行目: URLの形式が不正です（not-a-url）")).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows the payload-too-large message for a 413 response", async () => {
     // Arrange
@@ -110,7 +111,7 @@ describe("BulkArticleImportForm", () => {
         "ファイルが大きすぎるか、URLの件数が多すぎます（1MB以内、500件以内にしてください）",
       ),
     ).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("shows the unsupported-format message for a 422 response", async () => {
     // Arrange
@@ -130,7 +131,7 @@ describe("BulkArticleImportForm", () => {
         "対応していないファイル形式です（.md / .txt のUTF-8テキストのみ対応しています）",
       ),
     ).toBeInTheDocument();
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not send a second request when the button is clicked again before the first resolves", async () => {
     // Arrange
@@ -156,7 +157,7 @@ describe("BulkArticleImportForm", () => {
     await act(async () => {
       resolveFetch(jsonResponse(sampleResult));
     });
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("does not call fetch and shows a validation message when no file is selected", () => {
     // Arrange
@@ -170,5 +171,5 @@ describe("BulkArticleImportForm", () => {
     // Assert
     expect(fetchMock).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent("ファイルを選択してください");
-  });
+  }, TEST_TIMEOUT_MS);
 });
