@@ -61,6 +61,41 @@ class TestExtractFirstUrl:
         # Assert
         assert url == "https://example.com/a"
 
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "123://ignored real link https://example.com/a",
+            "-://x https://example.com/a",
+        ],
+    )
+    def test_keeps_looking_when_the_first_scheme_separator_is_not_part_of_a_url(
+        self, line: str
+    ) -> None:
+        """行内の最初の "://" がスキームを伴わなくても、後ろにある本物のURLを見つける。
+
+        最初の候補だけを見て諦めると、その行が「URLを含まない行」として黙って
+        無視され、登録にもエラーにも数えられない。
+        """
+        # Act
+        url = extract_first_url(line)
+
+        # Assert
+        assert url == "https://example.com/a"
+
+    @pytest.mark.parametrize("line", ["http://", "http://....", "https://。"])
+    def test_returns_none_when_the_scheme_has_no_host(self, line: str) -> None:
+        """ホストの無い裸のスキームはURLとして扱わない。
+
+        末尾の句読点を落とした結果 "http://" だけが残る行がある。これは
+        `validate_bulk_import_url` のスキーム検証も長さ検証も通ってしまうため、
+        抽出の時点で弾かないと壊れたURLがそのまま登録される。
+        """
+        # Act
+        url = extract_first_url(line)
+
+        # Assert
+        assert url is None
+
     def test_extracts_a_url_with_a_disallowed_scheme_so_it_can_be_reported_as_an_error(
         self,
     ) -> None:
