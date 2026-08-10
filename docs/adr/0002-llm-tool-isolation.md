@@ -31,9 +31,9 @@ Claude Code CLI 2.1.201 で検証した。プロンプトは「`Read` ツール�
                     specify tool names (e.g. "Bash,Edit,Read").
 ```
 
-### Skills を無効化しても既存の呼び出しは変わらない
+### Skills を無効化しても既存の呼び出しは変わらない（CLI 2.1.226）
 
-Claude Code CLI 2.1.226 で検証した（Issue #49）。`_build_command` が組み立てる引数を
+上の表は CLI 2.1.201 での検証。こちらは 2.1.226 で検証した（Issue #49）。`_build_command` が組み立てる引数を
 そのまま使い、`--disable-slash-commands` の有無だけを変えて2回実行した。
 
 | | 終了コード | stderr | `num_turns` | `permission_denials` | `input_tokens` | 応答 |
