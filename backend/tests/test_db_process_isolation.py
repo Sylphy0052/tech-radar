@@ -16,6 +16,7 @@ from tests.db_process_isolation import (
     PID_DIGITS_MAX,
     POSTGRES_IDENTIFIER_MAX_BYTES,
     build_database_name,
+    find_database_names_without_live_worktree,
     find_orphaned_database_names,
     find_own_worktree_legacy_database_names,
     parse_database_name,
@@ -25,6 +26,7 @@ from tests.db_process_isolation import (
 
 _BACKEND_ROOT = Path("/home/example/workspace/techradar")
 _OTHER_BACKEND_ROOT = Path("/home/example/workspace/techradar-other-worktree")
+_REMOVED_BACKEND_ROOT = Path("/home/example/workspace/techradar-removed-worktree")
 
 
 class TestBuildDatabaseName:
@@ -287,3 +289,119 @@ class TestFindOwnWorktreeLegacyDatabaseNames:
 
         # Assert
         assert candidates == []
+
+
+class TestFindDatabaseNamesWithoutLiveWorktree:
+    """削除済み worktree の残骸 DB を検出するロジック（Issue #51）。
+
+    `find_orphaned_database_names` / `find_own_worktree_legacy_database_names` は
+    「worktree は存在し続ける」前提で PID やハッシュを見るが、worktree 自体が
+    削除されるとそのハッシュを持つ DB はどちらの経路にも掛からず残り続ける。
+    ここでは「生存 worktree の一覧」だけを根拠に、新旧どちらの形式も対象にする。
+    """
+
+    def test_excludes_new_format_database_of_live_worktree(self):
+        # Arrange
+        live_name = build_database_name(_BACKEND_ROOT, 111)
+
+        # Act
+        orphaned = find_database_names_without_live_worktree(
+            [live_name],
+            live_backend_roots=[_BACKEND_ROOT, _OTHER_BACKEND_ROOT],
+        )
+
+        # Assert
+        assert orphaned == []
+
+    def test_excludes_legacy_format_database_of_live_worktree(self):
+        # Arrange
+        live_legacy_name = f"techradar_test_{worktree_hash(_BACKEND_ROOT)}"
+
+        # Act
+        orphaned = find_database_names_without_live_worktree(
+            [live_legacy_name],
+            live_backend_roots=[_BACKEND_ROOT],
+        )
+
+        # Assert
+        assert orphaned == []
+
+    def test_includes_new_format_database_without_live_worktree(self):
+        # Arrange — worktree 削除済みのハッシュを持つ新形式 DB
+        removed_name = build_database_name(_REMOVED_BACKEND_ROOT, 222)
+
+        # Act
+        orphaned = find_database_names_without_live_worktree(
+            [removed_name],
+            live_backend_roots=[_BACKEND_ROOT, _OTHER_BACKEND_ROOT],
+        )
+
+        # Assert
+        assert orphaned == [removed_name]
+
+    def test_includes_legacy_format_database_without_live_worktree(self):
+        # Arrange — worktree 削除済みのハッシュを持つ旧形式 DB
+        removed_legacy_name = f"techradar_test_{worktree_hash(_REMOVED_BACKEND_ROOT)}"
+
+        # Act
+        orphaned = find_database_names_without_live_worktree(
+            [removed_legacy_name],
+            live_backend_roots=[_BACKEND_ROOT],
+        )
+
+        # Assert
+        assert orphaned == [removed_legacy_name]
+
+    @pytest.mark.parametrize(
+        "database_name",
+        [
+            "techradar_test_deadbee",  # ハッシュ部分が1文字短い
+            "techradar_test_deadbeefx",  # ハッシュ部分が1文字長い
+            "techradar_test_DEADBEEF",  # 16進として不正（大文字）
+            "some_other_database",  # 無関係な DB 名
+        ],
+    )
+    def test_excludes_names_with_unparsable_hash_part(self, database_name: str):
+        # Act
+        orphaned = find_database_names_without_live_worktree(
+            [database_name],
+            live_backend_roots=[_BACKEND_ROOT],
+        )
+
+        # Assert — 解釈できない名前は消さない側に倒す
+        assert orphaned == []
+
+    def test_returns_all_valid_format_names_when_no_live_worktrees(self):
+        """生存 worktree が1件も無い（＝一覧取得は成功したが空）場合、
+        新旧どちらの形式の DB もすべて候補として返る。
+        """
+        # Arrange
+        new_format_name = build_database_name(_BACKEND_ROOT, 333)
+        legacy_format_name = f"techradar_test_{worktree_hash(_OTHER_BACKEND_ROOT)}"
+
+        # Act
+        orphaned = find_database_names_without_live_worktree(
+            [new_format_name, legacy_format_name],
+            live_backend_roots=[],
+        )
+
+        # Assert
+        assert orphaned == [new_format_name, legacy_format_name]
+
+    def test_mixed_live_and_removed_worktrees(self):
+        """生存 worktree の DB と削除済み worktree の DB が混在していても
+        削除済み worktree 分だけを候補にする。
+        """
+        # Arrange
+        live_name = build_database_name(_BACKEND_ROOT, 1)
+        removed_name = build_database_name(_REMOVED_BACKEND_ROOT, 2)
+        live_legacy_name = f"techradar_test_{worktree_hash(_OTHER_BACKEND_ROOT)}"
+
+        # Act
+        orphaned = find_database_names_without_live_worktree(
+            [live_name, removed_name, live_legacy_name],
+            live_backend_roots=[_BACKEND_ROOT, _OTHER_BACKEND_ROOT],
+        )
+
+        # Assert
+        assert orphaned == [removed_name]
