@@ -332,6 +332,7 @@ describe("useFeed", () => {
   it("does nothing when removeFeedback is called on an article without feedback", async () => {
     // Arrange
     const fetchMock = stubFeedPages();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { result } = renderHook(() => useFeed());
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const callCountBefore = fetchMock.mock.calls.length;
@@ -343,6 +344,28 @@ describe("useFeed", () => {
 
     // Assert — feedback が無い記事には API を叩かない
     expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
+    // 取り消すものが無いだけの正常な呼び出しなので、警告は出さない（Issue #45）。
+    expect(warn).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT_MS);
+
+  it("does nothing when removeFeedback targets an unknown article id", async () => {
+    // Arrange — applyFeedback 版と対になる。一覧に無い article_id を渡された場合は
+    // 黙って戻らず痕跡を残す（Issue #45）。
+    const fetchMock = stubFeedPages();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = renderHook(() => useFeed());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    const callCountBefore = fetchMock.mock.calls.length;
+
+    // Act
+    act(() => {
+      result.current.removeFeedback("unknown-id");
+    });
+
+    // Assert
+    expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain("unknown-id");
   }, TEST_TIMEOUT_MS);
 
   it("rolls back and surfaces an error when removeFeedback's DELETE request fails", async () => {
