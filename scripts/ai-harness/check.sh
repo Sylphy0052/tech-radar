@@ -9,6 +9,8 @@ fail() { printf '[check][FAIL] %s\n' "$*" >&2; exit 1; }
 
 COMPOSE_FILE="infra/docker-compose.yml"
 PG_READY_TIMEOUT_SECONDS=60
+# 1 回の TCP 疎通確認に許す秒数。ローカルの localhost 相手なら一瞬で終わる。
+PG_PORT_PROBE_TIMEOUT_SECONDS=3
 
 # DB を使う結合テストのため PostgreSQL を起動する。
 # 既に起動していれば何もしない。CI では services で提供されるため skip する。
@@ -16,11 +18,12 @@ ensure_postgres() {
   [[ "${CI:-}" == "true" ]] && { log "CI環境のためPostgreSQL起動をskip"; return 0; }
   [[ -f "$COMPOSE_FILE" ]] || return 0
 
+  # ここで見るホストとポートは、テストが `DATABASE_URL` で接続する先と同じである前提。
+  # 既定値どうしなら一致する。片方だけ環境変数で差し替えると、起動確認と実際の接続先が
+  # 食い違い、確認は通るのにテストが接続エラーで落ちる。
   local host="${POSTGRES_HOST:-localhost}" port="${POSTGRES_PORT:-5432}"
 
-  # 起動確認は docker を経由せず TCP で行う。テストが実際に使う経路そのものであり、
-  # docker へ触れないシェル (docker group が未反映など) でも判定できる。
-  if postgres_port_is_open "$host" "$port"; then
+  if postgres_looks_available "$host" "$port"; then
     return 0
   fi
 
@@ -43,24 +46,45 @@ ensure_postgres() {
   log "PostgreSQL 起動完了"
 }
 
-# docker デーモンへ到達できるかを確認する。
-# 権限で弾かれるのは docker group が現在のシェルへ反映されていないときが多く、
-# 素の失敗メッセージからは切り分けられないため、対処まで示して落とす。
-assert_docker_reachable() {
-  local error
-  error="$(docker info 2>&1 >/dev/null)" && return 0
-
-  if [[ "$error" == *"permission denied"* ]]; then
-    fail "dockerへ接続できません — docker group が現在のシェルに反映されていない可能性があります。
-      newgrp docker で入り直すか、sg docker -c \"$0\" のように実行してください。
-      docker の出力: ${error}"
-  fi
-  fail "dockerへ接続できません — docker の出力: ${error}"
+# 起動済みかどうかを判定する。
+# docker が使えるならコンテナ内の pg_isready まで見る。5432 は取り合いになりやすいポートで、
+# 別プロセスが掴んでいても TCP は通ってしまうため、確かめられるなら確かめる。
+# docker へ触れないシェル (docker group が未反映など) では TCP の結果だけで判断する。
+# ここで諦めても、接続先が実は PostgreSQL でなければ後続の pytest が接続エラーで落ちる。
+postgres_looks_available() {
+  local host="$1" port="$2"
+  postgres_port_is_open "$host" "$port" || return 1
+  docker_is_reachable || return 0
+  postgres_is_ready "$host" "$port"
 }
 
+docker_is_reachable() {
+  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
+
+# docker デーモンへ到達できないまま先へ進めない場面で落とす。
+# 権限で弾かれるのは docker group が現在のシェルへ反映されていないときが多く、
+# 素の失敗メッセージからは切り分けられないため、対処まで示す。
+assert_docker_reachable() {
+  local error script
+  error="$(docker info 2>&1 >/dev/null)" && return 0
+  # `$0` は source された場合に呼び出し元のシェル名になる。案内をそのまま実行できるよう
+  # スクリプト自身のパスを使う。
+  script="${BASH_SOURCE[0]}"
+
+  if [[ "$error" == *"permission denied"* ]]; then
+    fail "dockerへ接続できません — docker groupが現在のシェルに反映されていない可能性があります。newgrp dockerで入り直すか、sg docker -c \"${script}\" のように実行してください（docker groupはroot相当の権限を持ちます）。dockerの出力: ${error}"
+  fi
+  fail "dockerへ接続できません — dockerの出力: ${error}"
+}
+
+# 到達不能なホストを指していると OS 既定のタイムアウトまで待たされるため上限を切る。
+# host / port は `bash -c` の中へ埋め込まず引数で渡す。埋め込むと `POSTGRES_HOST` の
+# 中身がそのままコマンドとして解釈されうるため。
 postgres_port_is_open() {
   local host="$1" port="$2"
-  (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null
+  timeout "$PG_PORT_PROBE_TIMEOUT_SECONDS" \
+    bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$host" "$port" 2>/dev/null
 }
 
 postgres_is_ready() {
