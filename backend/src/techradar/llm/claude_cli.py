@@ -15,17 +15,30 @@
 
 これに次を重ねる。
 
-1. `--bare` で hooks / plugin / CLAUDE.md 自動探索を止める。
-   hooks はツール許可とは別経路で任意コマンドを実行しうるため、
+1. `--setting-sources ""` で設定ファイル（user / project / local）を読み込ませない。
+   hooks はここに定義され、ツール許可とは別経路で任意コマンドを実行しうるため、
    ツール無効化だけでは塞げない
-2. `--setting-sources ""` で設定ファイルを読み込ませない
-3. `--settings` の `permissions.deny` と `--disallowedTools` にツール名を列挙（保険）
-4. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない
-5. 環境変数を許可リストで絞り、DB 接続文字列などを子プロセスへ渡さない
-6. 一時ディレクトリを cwd にし、実行場所由来の設定を拾わせない
+2. `--settings` の `permissions.deny` と `--disallowedTools` にツール名を列挙（保険）
+3. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない
+4. 環境変数を許可リストで絞り、DB 接続文字列などを子プロセスへ渡さない
+5. 一時ディレクトリを cwd にし、実行場所由来の設定を拾わせない
+6. `stdin` を閉じ、記事本文を扱うプロセスへ余計な入力経路を残さない
 
-3 は列挙式で漏れうる。そのため実行後に `num_turns` と `permission_denials` を
-検査し、ツール使用の兆候があれば結果を採用せず失敗させる。
+plugin は `--plugin-dir` / `--plugin-url` を渡していないため読み込まれない。
+
+Skills（`/skill-name`）は上のツール無効化の管轄外にある（`--disable-slash-commands`
+は渡していない）。プロンプトは常に開発者側の指示で始まり、記事本文は
+`build_user_prompt` が `<untrusted_content>` タグに包んで末尾へ置くため、本文が
+スラッシュコマンドとして解釈される経路は今のところ無い。本文を先頭付近へ動かす
+ようなプロンプト構造の変更を入れるときは、この前提が崩れる。
+
+2 は列挙式で漏れうる。そのため実行後に `num_turns` と `permission_denials` を
+検査し、ツール使用の兆候があれば結果を採用せず失敗させる。応答からこれらの
+フィールドが消えたり型が変わったりした場合も、検査できないまま通さず失敗させる。
+
+`--bare` でも hooks / plugin / CLAUDE.md 自動探索を止められるが採らない。OAuth を
+読まなくなり `ANTHROPIC_API_KEY` が必須になるため、サブスク枠で動かすという
+ADR 0001 の決定と両立しない（`docs/adr/0002-llm-tool-isolation.md` で却下済み）。
 """
 
 from __future__ import annotations
