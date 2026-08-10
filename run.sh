@@ -17,13 +17,22 @@ COMPOSE_FILE="infra/docker-compose.yml"
 # NEXT_PUBLIC_API_BASE_URL (.env) も揃えること。
 BACKEND_PORT="${BACKEND_PORT:-18700}"
 FRONTEND_PORT="${FRONTEND_PORT:-13700}"
-PG_READY_TIMEOUT_SECONDS=60
 
 log() { printf '[run] %s\n' "$*" >&2; }
 fail() { printf '[run][FAIL] %s\n' "$*" >&2; exit 1; }
 
+# docker へ到達できないときの案内へ埋め込む。check.sh と共有するライブラリ側からは
+# 呼び出し元のパスが分からないため、ここで渡す。
+ENTRYPOINT_SCRIPT="${BASH_SOURCE[0]}"
+
+# PostgreSQL の起動確認は check.sh と共有する（Issue #55）。
+# shellcheck source=scripts/ai-harness/lib/postgres.sh
+source "$REPO_ROOT/scripts/ai-harness/lib/postgres.sh"
+
 if [[ "${1:-}" == "--stop" ]]; then
   log "PostgreSQL を停止します"
+  command -v docker >/dev/null 2>&1 || fail "docker未インストール — PostgreSQLの停止に必要です"
+  assert_docker_reachable
   docker compose -f "$COMPOSE_FILE" down
   exit 0
 fi
@@ -36,29 +45,11 @@ set -a
 source .env
 set +a
 
-command -v docker >/dev/null 2>&1 || fail "docker未インストール"
+# docker は PostgreSQL を実際に起動するときだけ要る。既に動いていれば触らない。
 command -v uv >/dev/null 2>&1 || fail "uv未インストール — https://astral.sh/uv"
 command -v npm >/dev/null 2>&1 || fail "npm未インストール"
 
-log "PostgreSQL (pgvector) を起動します"
-docker compose -f "$COMPOSE_FILE" up -d postgres
-
-log "PostgreSQL の起動を待機します"
-# コンテナ内の pg_isready はホスト側 TCP の受付可否までは保証しないため、
-# アプリと同じ経路 (localhost:5432) で接続できるまで待つ。
-postgres_accepts_connections() {
-  docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready \
-    -U "${POSTGRES_USER:-techradar}" -d "${POSTGRES_DB:-techradar}" >/dev/null 2>&1 \
-    && (exec 3<>"/dev/tcp/${POSTGRES_HOST:-localhost}/${POSTGRES_PORT:-5432}") 2>/dev/null
-}
-
-deadline=$((SECONDS + PG_READY_TIMEOUT_SECONDS))
-until postgres_accepts_connections; do
-  ((SECONDS < deadline)) \
-    || fail "PostgreSQL が ${PG_READY_TIMEOUT_SECONDS} 秒以内に接続を受け付けませんでした"
-  sleep 1
-done
-log "PostgreSQL 起動完了"
+ensure_postgres
 
 log "backend の依存関係を同期します"
 (cd backend && uv sync --extra dev >/dev/null) || fail "backend: uv sync失敗"
