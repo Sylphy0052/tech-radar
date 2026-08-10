@@ -343,4 +343,26 @@ describe("useInterestArticles", () => {
     expect(result.current.items.map((item) => item.article_id)).not.toContain(itemA.article_id);
     expect(warn).not.toHaveBeenCalled();
   }, TEST_TIMEOUT_MS);
+
+  it("warns instead of silently dropping the removal when a stale callback is used (G-3)", async () => {
+    // Arrange — items が空だった頃のハンドラを、ロード後に呼ぶ。
+    // 以前 `useInterestArticles` が踏んでいた窓（DOM には記事が出ているのに
+    // ハンドラ側の items がまだ空）の再現であり、握り潰さずに痕跡が残ることを
+    // 固定する（`useFeed` の同名テストと対になる。Issue #45）。
+    stubListPages();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const removeArticleWhileEmpty = result.current.removeArticle;
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act
+    act(() => {
+      removeArticleWhileEmpty(itemA.article_id);
+    });
+
+    // Assert — 一覧からは外れず、代わりに警告が出る
+    expect(result.current.items.map((item) => item.article_id)).toContain(itemA.article_id);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain(itemA.article_id);
+  }, TEST_TIMEOUT_MS);
 });
