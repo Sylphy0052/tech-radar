@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from techradar.api.deps import get_session
+from techradar.api.deps import get_now, get_session
 from techradar.config import Settings
 from techradar.db.models import (
     Article,
@@ -33,8 +33,15 @@ def settings() -> Settings:
 
 @pytest.fixture
 def client(db_session: Session, settings: Settings) -> Iterator[TestClient]:
+    """現在時刻も `NOW` へ固定する（Issue #48）。
+
+    関心タイムライン API は `since = now - timedelta(weeks=weeks)` で遡る期間を
+    決めるため、実時刻のまま動かすと固定日付で作ったフィードバックが
+    やがて対象期間から外れ、テストが日付の経過だけで落ちる。
+    """
     app = create_app(settings)
     app.dependency_overrides[get_session] = lambda: db_session
+    app.dependency_overrides[get_now] = lambda: NOW
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
