@@ -85,6 +85,13 @@ ruleTester.run("require-test-timeout", requireTestTimeout, {
       code: `it.todo("will be written later");`,
     },
     {
+      name: "テスト本体を渡さない呼び出しも持ち時間を取らない",
+      code: `
+        it("pending test with no body");
+        it.skip("stub, not yet implemented");
+      `,
+    },
+    {
       name: "テスト名を変数で渡す呼び出しは見分けられないため対象外",
       code: `it(caseName, () => {});`,
     },
