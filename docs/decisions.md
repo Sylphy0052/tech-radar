@@ -142,7 +142,11 @@ source_authority_contribution =
 
 ## 認証
 
-MVP では認証を設けない（単一ユーザー）。ただし全テーブルに `user_id` を持たせ、将来のマルチユーザー化を妨げない。
+MVP では認証を設けない（単一ユーザー）。ただしユーザー固有のデータを持つテーブルには `user_id` を持たせ、将来のマルチユーザー化を妨げない。
+
+`user_id` を持つのは `user_articles` / `article_feedback` / `recommendation_runs` / `user_interest_clusters` / `user_topic_preferences` / `user_source_preferences` / `article_registrations` の 7 つ。
+
+`articles` / `source_registry` / `jobs` / `operation_logs` は持たない。記事本体と公式ソースレジストリはユーザー横断で共有し、ジョブキューと構造化ログは特定の利用者に属さないため。`recommendations` も持たないが、これは `run_id` 経由で `recommendation_runs.user_id` へ辿れるため列を重ねていないだけで、所有者は定まる。
 
 ## リポジトリ運用
 
