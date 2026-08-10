@@ -9,28 +9,36 @@ fail() { printf '[check][FAIL] %s\n' "$*" >&2; exit 1; }
 
 COMPOSE_FILE="infra/docker-compose.yml"
 PG_READY_TIMEOUT_SECONDS=60
+# 1 回の TCP 疎通確認に許す秒数。ローカルの localhost 相手なら一瞬で終わる。
+PG_PORT_PROBE_TIMEOUT_SECONDS=3
 
 # DB を使う結合テストのため PostgreSQL を起動する。
 # 既に起動していれば何もしない。CI では services で提供されるため skip する。
-#
-# コンテナ内の pg_isready はホスト側 TCP の受付可否までは保証しないため、
-# テストと同じ経路 (localhost:5432) で接続できるまで待つ。
 ensure_postgres() {
   [[ "${CI:-}" == "true" ]] && { log "CI環境のためPostgreSQL起動をskip"; return 0; }
   [[ -f "$COMPOSE_FILE" ]] || return 0
-  command -v docker >/dev/null 2>&1 || fail "docker未インストール — 結合テストにPostgreSQLが必要"
 
+  # ここで見るホストとポートは、テストが `DATABASE_URL` で接続する先と同じである前提。
+  # 既定値どうしなら一致する。片方だけ環境変数で差し替えると、起動確認と実際の接続先が
+  # 食い違い、確認は通るのにテストが接続エラーで落ちる。
   local host="${POSTGRES_HOST:-localhost}" port="${POSTGRES_PORT:-5432}"
-  if postgres_accepts_connections "$host" "$port"; then
+
+  if postgres_looks_available "$host" "$port"; then
     return 0
   fi
+
+  # ここから先は起動が必要で、docker が要る。
+  command -v docker >/dev/null 2>&1 || fail "docker未インストール — 結合テストにPostgreSQLが必要"
+  assert_docker_reachable
 
   log "PostgreSQL を起動します"
   docker compose -f "$COMPOSE_FILE" up -d postgres >/dev/null 2>&1 \
     || fail "PostgreSQL の起動に失敗しました"
 
+  # 自分で起動した直後は初期化中がありうる。コンテナ内の pg_isready はホスト側 TCP の
+  # 受付可否までは保証しないため、両方を確認する。
   local deadline=$((SECONDS + PG_READY_TIMEOUT_SECONDS))
-  until postgres_accepts_connections "$host" "$port"; do
+  until postgres_is_ready "$host" "$port"; do
     ((SECONDS < deadline)) \
       || fail "PostgreSQL が ${PG_READY_TIMEOUT_SECONDS} 秒以内に接続を受け付けませんでした"
     sleep 1
@@ -38,11 +46,52 @@ ensure_postgres() {
   log "PostgreSQL 起動完了"
 }
 
-postgres_accepts_connections() {
+# 起動済みかどうかを判定する。
+# docker が使えるならコンテナ内の pg_isready まで見る。5432 は取り合いになりやすいポートで、
+# 別プロセスが掴んでいても TCP は通ってしまうため、確かめられるなら確かめる。
+# docker へ触れないシェル (docker group が未反映など) では TCP の結果だけで判断する。
+# ここで諦めても、接続先が実は PostgreSQL でなければ後続の pytest が接続エラーで落ちる。
+postgres_looks_available() {
+  local host="$1" port="$2"
+  postgres_port_is_open "$host" "$port" || return 1
+  docker_is_reachable || return 0
+  postgres_is_ready "$host" "$port"
+}
+
+docker_is_reachable() {
+  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
+
+# docker デーモンへ到達できないまま先へ進めない場面で落とす。
+# 権限で弾かれるのは docker group が現在のシェルへ反映されていないときが多く、
+# 素の失敗メッセージからは切り分けられないため、対処まで示す。
+assert_docker_reachable() {
+  local error script
+  error="$(docker info 2>&1 >/dev/null)" && return 0
+  # `$0` は source された場合に呼び出し元のシェル名になる。案内をそのまま実行できるよう
+  # スクリプト自身のパスを使う。
+  script="${BASH_SOURCE[0]}"
+
+  if [[ "$error" == *"permission denied"* ]]; then
+    fail "dockerへ接続できません — docker groupが現在のシェルに反映されていない可能性があります。newgrp dockerで入り直すか、sg docker -c \"${script}\" のように実行してください（docker groupはroot相当の権限を持ちます）。dockerの出力: ${error}"
+  fi
+  fail "dockerへ接続できません — dockerの出力: ${error}"
+}
+
+# 到達不能なホストを指していると OS 既定のタイムアウトまで待たされるため上限を切る。
+# host / port は `bash -c` の中へ埋め込まず引数で渡す。埋め込むと `POSTGRES_HOST` の
+# 中身がそのままコマンドとして解釈されうるため。
+postgres_port_is_open() {
+  local host="$1" port="$2"
+  timeout "$PG_PORT_PROBE_TIMEOUT_SECONDS" \
+    bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$host" "$port" 2>/dev/null
+}
+
+postgres_is_ready() {
   local host="$1" port="$2"
   docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready \
     -U "${POSTGRES_USER:-techradar}" -d "${POSTGRES_DB:-techradar}" >/dev/null 2>&1 \
-    && (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null
+    && postgres_port_is_open "$host" "$port"
 }
 
 # ---- backend (Python / uv) ----
