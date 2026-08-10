@@ -1,8 +1,50 @@
 import { configure, render, screen } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InterestAnalysisDashboard } from "@/components/features/InterestAnalysisDashboard";
 import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
+
+/**
+ * jsdom 上の recharts の描画はグラフ 1 個あたり 1〜3 秒かかる。7 種のグラフを
+ * 一度に描画するのはこのダッシュボードだけで、`TEST_TIMEOUT_MS` を配っても
+ * グラフが増えるたびに実行時間が伸び続ける（Issue #41）。
+ *
+ * このテストが確かめたいのは「3 つの API から取得したデータで 9 種の可視化が
+ * 出そろうこと」であり、グラフ内部の描画ではない。内部は実物の recharts を使う
+ * 個別のテスト（`InterestGenreChart.test.tsx` など 7 ファイル）が担保している。
+ * グラフを包むカード（見出しと空表示の判定）は実装のまま動くため、素通しの
+ * `div` へ差し替えてもこのファイルの検証内容は変わらない。
+ *
+ * `vitest.setup.ts` は recharts の `ResponsiveContainer` だけを差し替えて残りは
+ * 実物を使う共通の `vi.mock` を置いている。ここでの `vi.mock` はそれをこの
+ * ファイル内でだけ上書きする（同じモジュールに対するファイル内の指定が優先
+ * される）。他のテストファイルには影響しない。
+ */
+vi.mock("recharts", async () => {
+  const { createElement } = await import("react");
+  const stub = (name: string) =>
+    function RechartsStub({ children }: { children?: ReactNode }) {
+      return createElement("div", { "data-recharts-stub": name }, children);
+    };
+  // 7 つのグラフが recharts から取り込んでいる export の和集合。
+  const names = [
+    "Bar",
+    "BarChart",
+    "CartesianGrid",
+    "Cell",
+    "Legend",
+    "Line",
+    "LineChart",
+    "Pie",
+    "PieChart",
+    "ResponsiveContainer",
+    "Tooltip",
+    "XAxis",
+    "YAxis",
+  ];
+  return Object.fromEntries(names.map((name) => [name, stub(name)]));
+});
 
 configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
 
