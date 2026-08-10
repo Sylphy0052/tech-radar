@@ -36,7 +36,11 @@
  * - `it` を別名で import した場合（`import { it as vIt }`）や、計算プロパティ経由の
  *   呼び出し（`it["skip"](...)`）は検出しない
  * - 引数にスプレッドが混ざる呼び出しや、テスト本体が関数リテラルでない呼び出しは、
- *   どれが持ち時間の位置なのかを静的に決められないため対象外
+ *   どれが持ち時間の位置なのかを静的に決められないため対象外。オプションを
+ *   オブジェクトリテラルで直接書かず変数へ入れて渡す形（`it("...", options, fn)`）も
+ *   これに当たる
+ * - テスト本体を渡さない呼び出し（`it("...")` だけの形）は、待つ処理そのものが無いため
+ *   対象外。vitest の型でもテスト本体は任意になっている
  */
 
 const TIMEOUT_IDENTIFIER = "TEST_TIMEOUT_MS";
@@ -175,7 +179,11 @@ const requireTestTimeout = {
         }
 
         const second = node.arguments[1];
-        if (second !== undefined && second.type === "ObjectExpression") {
+        if (second === undefined) {
+          // テスト本体を取らない呼び出し。待つ処理が無いので持ち時間の概念もない。
+          return;
+        }
+        if (second.type === "ObjectExpression") {
           const timeout = findTimeoutOption(second);
           if (timeout === null) {
             return;
@@ -194,7 +202,7 @@ const requireTestTimeout = {
           context.report({ node, messageId: "useOptionsFormat" });
           return;
         }
-        if (second !== undefined && !FUNCTION_LITERALS.has(second.type)) {
+        if (!FUNCTION_LITERALS.has(second.type)) {
           // テスト本体が関数リテラルでない。第3引数を持ち時間と決めつけられない。
           return;
         }
