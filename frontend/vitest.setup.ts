@@ -16,6 +16,10 @@ const MOCK_CHART_HEIGHT = 400;
  * 要素へ直接 `width`/`height` を注入する形で差し替える（他の recharts
  * コンポーネントは実装のまま使う）。全テストファイル共通のため、個別のテストで
  * `vi.mock` を重複させずここへ集約する。
+ *
+ * 例外は `InterestAnalysisDashboard.test.tsx` で、7 種のグラフを一度に描画する
+ * 重さを避けるため recharts 全体を素通しの `div` へ差し替える `vi.mock` を
+ * ファイル内に持ち、この共通の差し替えを上書きする（Issue #41）。
  */
 vi.mock("recharts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("recharts")>();
