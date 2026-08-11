@@ -632,6 +632,22 @@ class TestWarnIfPublishedHostDiffers:
         assert "\x1b" not in result.stderr
         assert "127.0.0.1[2J" in result.stderr
 
+    def test_整形すると設定と一致する公開先でも警告する(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """照合を整形後の値へ移すと、この公開先が設定と一致して警告が黙って消える。
+
+        `\x7f` は残骸を残さずに落ちるため、整形すると設定値そのものになる。生の値で
+        照合している限りは食い違いのままなので警告が出る。Issue #65 の警告が
+        整形の導入（Issue #72）で緩まないことを、実装のコメントではなく挙動で固定する。
+        """
+        result = self._run(tmp_path, fake_docker_bin, published="127.0.0.1\x7f\n")
+
+        assert result.returncode == 0, result.stderr
+        assert "警告" in result.stderr
+        assert "\x7f" not in result.stderr
+        assert "./run.sh --stop" in result.stderr
+
 
 class TestDockerIsReachable:
     """`docker_is_reachable`: 一度確かめたら覚えておく。"""
