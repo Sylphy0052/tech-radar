@@ -93,7 +93,7 @@ DBが増え続けないよう、セッション終了時に自分のDBを DROP �
 
 frontend の vitest も同じ理由で `coverage.reportsDirectory` を `coverage/<pid>` に分けてある ([frontend/vitest.config.mts](frontend/vitest.config.mts))。共有していた頃は同時実行すると片方が `Something removed the coverage directory` で落ちた。孤児ディレクトリの掃除は [frontend/vitest.global-setup.ts](frontend/vitest.global-setup.ts) が行う。
 
-worktree を削除すると、そのハッシュを持つテスト用DBはどのworktreeからも掃除されなくなる（他worktreeのDBには触らない設計のため）。気になる場合は `psql` から手動で消す。
+worktree を削除すると、そのハッシュを持つテスト用DBはどのworktreeからも掃除されなくなる（他worktreeのDBには触らない設計のため）。溜まってきたら `./scripts/cleanup-test-databases.sh` で確認し、`--apply` を付けて消す。生存しているworktreeのDBと、接続が残っているDBには触らない。
 
 ### frontend の Next.js は訓練データと異なる
 

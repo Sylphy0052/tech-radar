@@ -55,6 +55,11 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 # ここでは同等の検証を独立して持つ。
 ALLOWED_TEST_DB_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "postgres"})
 
+# `git worktree list` に許す秒数。ローカルのメタデータを読むだけなので本来は一瞬で終わる。
+# 上限を置くのは、ネットワーク越しの作業ディレクトリや認証情報ヘルパー待ちでハングした
+# ときに、無人実行（skill 経由など）が止まったまま残らないようにするため。
+GIT_TIMEOUT_SECONDS = 30
+
 
 class WorktreeDiscoveryError(RuntimeError):
     """生存 worktree の一覧取得に失敗したことを表す。
@@ -83,6 +88,14 @@ def _discover_live_worktree_paths() -> list[Path]:
     全 worktree（bare を含む）を返す。git が見つからない、または
     コマンドが失敗する（リポジトリ外から実行された等）場合は
     `WorktreeDiscoveryError` を送出する。
+
+    `git worktree remove` を経ずに `rm -rf` 等でディレクトリだけ消された worktree は、
+    登録自体は残ったまま porcelain 出力の当該ブロックに `prunable <理由>` 行が付く。
+    そのような worktree を生存扱いすると、そこに紐付くテスト用 DB がこのスクリプトの
+    掃除対象から外れてしまう（このスクリプトの主目的を取りこぼす）ため、`prunable` 行を
+    持つブロックは除外する。あわせて、`prunable` 行の有無に関わらずパスの実在も確認し、
+    存在しないものは安全側（生存とみなさない）に倒す。`git worktree prune` は実行しない
+    （git のメタデータを書き換えるのはこのスクリプトの責務外で、DB の掃除だけを行う）。
     """
     git_executable = shutil.which("git")
     if git_executable is None:
@@ -95,18 +108,79 @@ def _discover_live_worktree_paths() -> list[Path]:
             capture_output=True,
             text=True,
             check=True,
+            timeout=GIT_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        message = f"git worktree listが{GIT_TIMEOUT_SECONDS}秒以内に応答しませんでした。"
+        raise WorktreeDiscoveryError(message) from exc
     except (OSError, subprocess.CalledProcessError) as exc:
         stderr = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         message = f"git worktree listに失敗しました: {stderr}"
         raise WorktreeDiscoveryError(message) from exc
 
-    paths: list[Path] = []
-    for line in completed.stdout.splitlines():
-        prefix = "worktree "
-        if line.startswith(prefix):
-            paths.append(Path(line[len(prefix) :]).resolve())
-    return paths
+    return [
+        path
+        for path, prunable in _parse_worktree_porcelain(completed.stdout)
+        if not prunable and path.exists()
+    ]
+
+
+def _parse_worktree_porcelain(porcelain_output: str) -> list[tuple[Path, bool]]:
+    """`git worktree list --porcelain` の出力を解析し、`(パス, prunableか)` の一覧を返す。
+
+    porcelain 形式はブロック（空行区切り）単位で 1 worktree を表し、各ブロックは
+    必ず `worktree <path>` 行から始まり、その次の行は `HEAD <sha>` / `bare` /
+    `detached` のいずれかになる。`prunable` はそのブロック内のどこかに
+    `prunable <理由>` という行として現れる。それ以外の行（`branch`, `locked` 等）は
+    無視するため、混ざってもパース結果に影響しない。
+
+    `worktree <path>` の直後が想定の行で始まっていない場合は、出力の構造が想定と
+    違うとみなして `WorktreeDiscoveryError` を送出する。git はパスをエスケープせず
+    そのまま出すため、パスに改行が含まれると `worktree` 行がその位置で分断され、
+    途中で切れたパスを拾ってしまう。切れたパスのハッシュは本物と一致しないので、
+    その worktree は「生存していない」と判定され、現役の DB が削除候補に入る。
+    取りこぼしがそのまま「消してはいけないものを消す」方向へ効くため、
+    解釈できない出力を前にしたら何もせず止まる。
+    """
+    worktree_prefix = "worktree "
+    prunable_prefix = "prunable"
+    # `worktree <path>` の次に来ることが porcelain 形式で保証されている行。
+    expected_after_worktree = ("HEAD ", "bare", "detached")
+
+    entries: list[tuple[Path, bool]] = []
+    current_path: Path | None = None
+    current_prunable = False
+    expecting_header = False
+
+    def flush() -> None:
+        nonlocal current_path, current_prunable
+        if current_path is not None:
+            entries.append((current_path, current_prunable))
+        current_path = None
+        current_prunable = False
+
+    for line in porcelain_output.splitlines():
+        if expecting_header:
+            expecting_header = False
+            if not line.startswith(expected_after_worktree):
+                message = (
+                    "git worktree listの出力を解釈できません"
+                    f"（worktree行の次に想定外の行がありました: {line!r}）。"
+                    "パスに改行が含まれている可能性があります。何も削除せずに終了します。"
+                )
+                raise WorktreeDiscoveryError(message)
+
+        if line == "":
+            flush()
+        elif line.startswith(worktree_prefix):
+            flush()  # 空行区切りが無いまま次のブロックが始まった場合への防御
+            current_path = Path(line[len(worktree_prefix) :]).resolve()
+            expecting_header = True
+        elif line.startswith(prunable_prefix):
+            current_prunable = True
+    flush()
+
+    return entries
 
 
 def _validate_database_identifier(name: str) -> None:
@@ -208,6 +282,41 @@ def _build_plan(connection: Connection, live_worktree_paths: list[Path]) -> Clea
     )
 
 
+def _apply_plan(connection: Connection, plan: CleanupPlan) -> CleanupPlan:
+    """`plan.to_delete` を実際に DROP し、結果を反映した新しい `CleanupPlan` を返す。
+
+    `_build_plan` が接続の有無を確認してから、この関数が実際に DROP するまでには
+    レポート表示等の時間差があり、その間に新しい接続が張られる可能性がある
+    （TOCTOU）。`backend/tests/conftest.py` の `_cleanup_orphaned_test_databases` は
+    確認直後にその場で DROP しており窓が小さいが、このスクリプトは `_build_plan` と
+    DROP が分離しているため、DROP の直前に `_has_active_connections` を再確認する。
+    その時点で接続が残っていた DB は削除せず、`protected_by_connection` へ回して
+    （既存の DB と同じ理由のため合流させる）レポートに反映されるようにする。
+
+    `CleanupPlan` は不変（frozen dataclass）のため、既存のインスタンスを書き換えず
+    新しいインスタンスを作って返す。
+    """
+    dropped: list[str] = []
+    skipped_at_drop: list[str] = []
+    for name in plan.to_delete:
+        if _has_active_connections(connection, name):
+            skipped_at_drop.append(name)
+            continue
+        _drop_database(connection, name)
+        dropped.append(name)
+
+    if not skipped_at_drop:
+        return plan
+
+    return CleanupPlan(
+        live_worktree_paths=plan.live_worktree_paths,
+        existing_database_count=plan.existing_database_count,
+        candidates=plan.candidates,
+        to_delete=dropped,
+        protected_by_connection=[*plan.protected_by_connection, *skipped_at_drop],
+    )
+
+
 def _print_report(plan: CleanupPlan, *, applied: bool) -> None:
     """人が読める形で削除候補・保護対象を報告する。"""
     print(f"[cleanup-test-databases] 生存worktree: {len(plan.live_worktree_paths)}件")
@@ -245,10 +354,13 @@ def _print_report(plan: CleanupPlan, *, applied: bool) -> None:
 def main(argv: list[str] | None = None) -> int:
     """生存 worktree に属さないテスト用 DB を検出し、`--apply` 指定時のみ削除する。
 
+    `git worktree list` の失敗だけは、生存範囲が確定しないという掃除固有の事情を
+    伝えたいため捕捉してメッセージを出す。接続先ホストの検証や DB への接続に失敗した
+    場合は捕捉せず、そのまま送出する（いずれも DROP を実行する前に落ちる）。
+
     Returns:
         終了コード。`git worktree list` に失敗した場合は 1、それ以外は 0。
     """
-    arguments = sys.argv[1:] if argv is None else argv
     parser = argparse.ArgumentParser(
         description="削除済みworktreeに紐付くテスト用DBを掃除する（既定はdry-run）。",
     )
@@ -257,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="実際にDBを削除する。指定しない場合はdry-run（候補の表示のみで削除しない）。",
     )
-    args = parser.parse_args(arguments)
+    args = parser.parse_args(argv)
 
     try:
         live_worktree_paths = _discover_live_worktree_paths()
@@ -271,8 +383,7 @@ def main(argv: list[str] | None = None) -> int:
         with admin_engine.connect() as connection:
             plan = _build_plan(connection, live_worktree_paths)
             if args.apply:
-                for name in plan.to_delete:
-                    _drop_database(connection, name)
+                plan = _apply_plan(connection, plan)
             _print_report(plan, applied=args.apply)
     finally:
         admin_engine.dispose()
