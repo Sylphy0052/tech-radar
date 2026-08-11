@@ -17,12 +17,18 @@ self review で実測によって初めて見つかった次の3件は、いず�
 docker には触れない。`warn_if_published_host_differs` と `docker_is_reachable` は
 `PATH` の先頭へ置いた偽の `docker` で出力と終了コードを差し替える。実dockerを使うと
 実行環境によって結果が変わり、テストが環境の状態を測るものになってしまうため。
+
+`assert_docker_usable` と `assert_docker_reachable` の案内文も同じ枠組みで固定する
+（Issue #70）。この2つはユーザーがそのまま読んで実行する文言を組み立てるため、
+埋め込みが壊れると「案内どおり実行したのに何も起きない」「停止のつもりで起動する」に
+なる。未インストールの経路は `PATH` を空のディレクトリだけにして再現する。
 """
 
 from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -30,6 +36,15 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LIB = _REPO_ROOT / "scripts" / "ai-harness" / "lib" / "postgres.sh"
+
+# `PATH` を空にするテストがあるため、シェル自身は絶対パスで起動する。
+_BASH = shutil.which("bash") or "/bin/bash"
+# 子シェルの `$0`。`ENTRYPOINT_SCRIPT` が無いとき案内文がここへ落ちる。
+_SHELL_ARGV0 = "テスト用シェル"
+
+# docker group が現在のシェルへ反映されていないときに docker が返すエラー。
+# この文字列を含むかどうかで案内の出し分けが決まる（Issue #55）。
+_PERMISSION_DENIED = "permission denied while trying to connect to the Docker daemon socket"
 
 # 全インターフェースへの公開先。ここで待ち受けるわけではなく、テストデータとして
 # 「広げた公開先」を表すために使う。他のケースはドキュメント用に予約された
@@ -53,8 +68,11 @@ _DROPPED_FROM_ENV = frozenset(
         "COMPOSE_FILE",
         "_DOCKER_REACHABLE",
         "FAKE_DOCKER_PS_OUTPUT",
+        "FAKE_DOCKER_STDERR",
         "FAKE_DOCKER_EXIT",
         "FAKE_DOCKER_CALLS",
+        "ENTRYPOINT_SCRIPT",
+        "ENTRYPOINT_ARGS",
     }
 )
 
@@ -74,7 +92,7 @@ def _run_lib(
     run_env = {k: v for k, v in os.environ.items() if k not in _DROPPED_FROM_ENV}
     run_env.update(env or {})
     return subprocess.run(  # noqa: S603
-        ["bash", "-euo", "pipefail", "-c", script, "bash", *args],  # noqa: S607
+        [_BASH, "-euo", "pipefail", "-c", script, _SHELL_ARGV0, *args],
         capture_output=True,
         text=True,
         env=run_env,
@@ -110,8 +128,10 @@ def _write_env_file(tmp_path: Path, content: str) -> Path:
 def fake_docker_bin(tmp_path: Path) -> Path:
     """`PATH` の先頭へ置く偽の `docker` を作り、そのディレクトリを返す。
 
-    引数は見ずに `FAKE_DOCKER_PS_OUTPUT` を出して `FAKE_DOCKER_EXIT` で終わる。
-    `FAKE_DOCKER_CALLS` が指定されていれば呼び出しを1行ずつ追記する
+    引数は見ずに `FAKE_DOCKER_PS_OUTPUT` を標準出力へ、`FAKE_DOCKER_STDERR` を標準
+    エラーへ出して `FAKE_DOCKER_EXIT` で終わる。標準エラーを分けているのは
+    `assert_docker_reachable` が `docker info 2>&1 >/dev/null` で標準エラーだけを
+    拾うため。`FAKE_DOCKER_CALLS` が指定されていれば呼び出しを1行ずつ追記する
     （`docker_is_reachable` のメモ化を回数で確かめるため）。
     """
     bin_dir = tmp_path / "fake-bin"
@@ -123,6 +143,7 @@ def fake_docker_bin(tmp_path: Path) -> Path:
         '  printf "%s\\n" "$*" >>"$FAKE_DOCKER_CALLS"\n'
         "fi\n"
         'printf "%s" "${FAKE_DOCKER_PS_OUTPUT:-}"\n'
+        'printf "%s" "${FAKE_DOCKER_STDERR:-}" >&2\n'
         'exit "${FAKE_DOCKER_EXIT:-0}"\n',
         encoding="utf-8",
     )
@@ -552,3 +573,156 @@ class TestDockerIsReachable:
         assert result.returncode == 0, result.stderr
         assert result.stdout == expected
         assert not calls.exists()
+
+
+class TestAssertDockerUsable:
+    """`assert_docker_usable`: docker が要る場面で、未インストールと到達不可を弾く。"""
+
+    def test_未インストールなら目的を添えて落ちる(self, tmp_path: Path) -> None:
+        """何のために docker が要るのかを、落ちるときのメッセージへ残す。"""
+        empty_bin = tmp_path / "empty-bin"
+        empty_bin.mkdir()
+
+        result = _run_lib(
+            'assert_docker_usable "$1"',
+            "PostgreSQLの起動",
+            cwd=tmp_path,
+            env={"PATH": str(empty_bin)},
+        )
+
+        assert result.returncode == 1
+        assert "docker未インストール" in result.stderr
+        assert "PostgreSQLの起動に必要です" in result.stderr
+
+    def test_到達できるなら何も言わない(self, tmp_path: Path, fake_docker_bin: Path) -> None:
+        result = _run_lib(
+            'assert_docker_usable "$1"; printf "ok"',
+            "PostgreSQLの起動",
+            cwd=tmp_path,
+            env={"PATH": _path_with(fake_docker_bin), "FAKE_DOCKER_EXIT": "0"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "ok"
+        assert result.stderr == ""
+
+    def test_到達できなければ到達不可の案内へ委ねる(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """未インストールではないので、判定は `assert_docker_reachable` の側に出る。"""
+        result = _run_lib(
+            'assert_docker_usable "$1"',
+            "PostgreSQLの起動",
+            cwd=tmp_path,
+            env={
+                "PATH": _path_with(fake_docker_bin),
+                "FAKE_DOCKER_EXIT": "1",
+                "FAKE_DOCKER_STDERR": _PERMISSION_DENIED,
+                "ENTRYPOINT_SCRIPT": "./run.sh",
+            },
+        )
+
+        assert result.returncode == 1
+        assert "docker未インストール" not in result.stderr
+        assert "dockerへ接続できません" in result.stderr
+
+
+class TestAssertDockerReachable:
+    """`assert_docker_reachable`: 到達できないとき、そのまま実行できる案内を出す。
+
+    案内は読んだ人がコピーして実行する。埋め込みが壊れると、ライブラリ自身のパスを
+    案内したり（実行しても何も起きない）、`./run.sh --stop` が `./run.sh` になったり
+    （停止のつもりで起動する）するため、文言ごと固定する（Issue #52 → #55、#70）。
+    """
+
+    def _run(
+        self,
+        tmp_path: Path,
+        fake_docker_bin: Path,
+        *,
+        docker_stderr: str = "",
+        docker_exit: str = "1",
+        entrypoint_script: str | None = None,
+        entrypoint_args: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        env = {
+            "PATH": _path_with(fake_docker_bin),
+            "FAKE_DOCKER_EXIT": docker_exit,
+            "FAKE_DOCKER_STDERR": docker_stderr,
+        }
+        if entrypoint_script is not None:
+            env["ENTRYPOINT_SCRIPT"] = entrypoint_script
+        if entrypoint_args is not None:
+            env["ENTRYPOINT_ARGS"] = entrypoint_args
+        return _run_lib('assert_docker_reachable; printf "ok"', cwd=tmp_path, env=env)
+
+    def test_到達できるなら何も言わない(self, tmp_path: Path, fake_docker_bin: Path) -> None:
+        result = self._run(tmp_path, fake_docker_bin, docker_exit="0")
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "ok"
+        assert result.stderr == ""
+
+    def test_権限で弾かれたら入り直し方まで示す(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            docker_stderr=_PERMISSION_DENIED,
+            entrypoint_script="./run.sh",
+            entrypoint_args="--stop",
+        )
+
+        assert result.returncode == 1
+        assert "docker group" in result.stderr
+        assert "newgrp docker" in result.stderr
+        # 案内はそのまま実行される。引数まで含めて崩れていないことを見る。
+        assert 'sg docker -c "./run.sh --stop"' in result.stderr
+        # docker group を勧める以上、それが何を意味するかも一緒に出す。
+        assert "root相当" in result.stderr
+        assert _PERMISSION_DENIED in result.stderr
+
+    def test_引数が無ければスクリプトだけを案内する(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """`check.sh` は引数を渡さない。余計なものが付かないことを見る。"""
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            docker_stderr=_PERMISSION_DENIED,
+            entrypoint_script="./scripts/ai-harness/check.sh",
+        )
+
+        assert result.returncode == 1
+        assert 'sg docker -c "./scripts/ai-harness/check.sh"' in result.stderr
+
+    def test_呼び出し元が分からなければシェル自身へ落ちる(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """`ENTRYPOINT_SCRIPT` を渡し忘れると `$0` になる。
+
+        ライブラリ自身のパスではなく、呼び出し元のシェルが出る。案内としては弱いが、
+        `${BASH_SOURCE[0]}` を見るよりはましという判断（ライブラリのパスを案内しても
+        実行しようがない）。その判断ごと固定する。
+        """
+        result = self._run(tmp_path, fake_docker_bin, docker_stderr=_PERMISSION_DENIED)
+
+        assert result.returncode == 1
+        assert f'sg docker -c "{_SHELL_ARGV0}"' in result.stderr
+        assert "postgres.sh" not in result.stderr
+
+    def test_権限以外のエラーでは入り直しを勧めない(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """デーモンが落ちているだけのときに docker group を疑わせない。"""
+        error = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+        result = self._run(
+            tmp_path, fake_docker_bin, docker_stderr=error, entrypoint_script="./run.sh"
+        )
+
+        assert result.returncode == 1
+        assert "dockerへ接続できません" in result.stderr
+        assert error in result.stderr
+        assert "newgrp docker" not in result.stderr
+        assert "sg docker" not in result.stderr
