@@ -697,6 +697,25 @@ class TestAssertDockerReachable:
         assert result.returncode == 1
         assert 'sg docker -c "./scripts/ai-harness/check.sh"' in result.stderr
 
+    def test_スクリプトが無くても引数だけは案内へ残る(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """`ENTRYPOINT_ARGS` だけを渡した組み合わせ。
+
+        いまの呼び出し元（`run.sh` / `check.sh`）はどちらも `ENTRYPOINT_SCRIPT` を
+        必ず設定するため実運用では起きない。片方だけ渡したときに案内が壊れないことを
+        見ておく（引数が黙って消えると、停止のつもりで起動する案内になる）。
+        """
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            docker_stderr=_PERMISSION_DENIED,
+            entrypoint_args="--stop",
+        )
+
+        assert result.returncode == 1
+        assert f'sg docker -c "{_SHELL_ARGV0} --stop"' in result.stderr
+
     def test_呼び出し元が分からなければシェル自身へ落ちる(
         self, tmp_path: Path, fake_docker_bin: Path
     ) -> None:
