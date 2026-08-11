@@ -22,6 +22,15 @@ COMPOSE_FILE="infra/docker-compose.yml"
 BACKEND_PORT="${BACKEND_PORT:-18700}"
 FRONTEND_PORT="${FRONTEND_PORT:-13700}"
 
+# listen するインターフェース。単一ユーザーがローカルで動かす前提のため、既定では
+# 他の端末から届かない 127.0.0.1 に閉じる（Issue #64）。認証を置いていないので
+# （PROJECT_SPEC.md §18）、届いた時点で中身が見えてしまう。
+#
+# uvicorn は --host の既定が 127.0.0.1 だが、next dev は -H を渡さないと全
+# インターフェースへ bind する。既定に任せると両者で範囲が食い違うため、どちらにも
+# 明示して渡す。
+BIND_HOST="${BIND_HOST:-127.0.0.1}"
+
 log() { printf '[run] %s\n' "$*" >&2; }
 fail() { printf '[run][FAIL] %s\n' "$*" >&2; exit 1; }
 
@@ -84,11 +93,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 log "backend を起動します (http://localhost:${BACKEND_PORT})"
-(cd backend && uv run uvicorn techradar.main:app --reload --port "$BACKEND_PORT") &
+(cd backend && uv run uvicorn techradar.main:app --reload --host "$BIND_HOST" --port "$BACKEND_PORT") &
 pids+=($!)
 
 log "frontend を起動します (http://localhost:${FRONTEND_PORT})"
-(cd frontend && npm run dev -- --port "$FRONTEND_PORT") &
+(cd frontend && npm run dev -- --hostname "$BIND_HOST" --port "$FRONTEND_PORT") &
 pids+=($!)
 
 log "起動完了。Ctrl-C で停止します"
