@@ -983,10 +983,9 @@ IPv6 private network
 
 ### 認証を置かない前提で守る対策
 
-認証は置かない（§18、[docs/decisions.md](docs/decisions.md)）。APIを守る境界はネットワーク側にある。ただし `run.sh` の起動先は揃っていない。
+認証は置かない（§18、[docs/decisions.md](docs/decisions.md)）。APIとUIを守る境界はネットワーク側にある。`run.sh` はbackendとfrontendの両方を `BIND_HOST`（既定 127.0.0.1）へ明示的にbindする（Issue #64）。PostgreSQLのポート公開はこの境界の外にあり、[infra/docker-compose.yml](infra/docker-compose.yml) がホストの全インターフェースへ向けている（Issue #65で決める）。
 
-* backend（uvicorn）は `--host` を渡していないため、既定の127.0.0.1だけをlistenする。APIを他の端末から直接叩くことはできない
-* frontend（`next dev`）は `-H` を渡していないため、全インターフェースにbindする。同一LANの別端末からUIへ到達でき、そこに描画されるデータも見える。この非対称をどうするかはIssue #64で決める
+既定に任せると範囲が揃わない。uvicornは `--host` の既定が127.0.0.1だが、`next dev` は `-H` を渡さないと全インターフェースへbindし、同一LANの別端末からUIへ到達できてしまう。認証を置いていない以上、到達した時点で中身が見える。
 
 この上に、以下の歯止めを置く。いずれも部分的な対策であり、認証の代わりにはならない。
 
@@ -995,7 +994,7 @@ IPv6 private network
 * 巡回ジョブの重複起動を防ぐ（[backend/src/techradar/api/crawl.py](backend/src/techradar/api/crawl.py)）
 * 一括登録にファイルサイズとURL件数の上限を置く（[backend/src/techradar/api/bulk_import.py](backend/src/techradar/api/bulk_import.py) の `MAX_BULK_IMPORT_FILE_BYTES` / `MAX_BULK_IMPORT_URL_COUNT`）
 
-記事の単体登録やソース登録には回数の上限が無い。意図的に外部へ晒す構成にするなら、認証とあわせてこの節を見直す。
+記事の単体登録やソース登録には回数の上限が無い。`BIND_HOST` を変えて意図的に外部へ晒す構成にするなら、認証とあわせてこの節を見直す。なお `BIND_HOST` だけを広げても、画面上のJavaScriptは既定で自分自身の `localhost` へAPIを呼ぶため、UIを他の端末で使うには `NEXT_PUBLIC_API_BASE_URL` も変える必要がある。APIへの直接の到達は `BIND_HOST` だけで開く。
 
 ### 可観測性
 

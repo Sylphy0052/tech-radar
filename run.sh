@@ -22,6 +22,15 @@ COMPOSE_FILE="infra/docker-compose.yml"
 BACKEND_PORT="${BACKEND_PORT:-18700}"
 FRONTEND_PORT="${FRONTEND_PORT:-13700}"
 
+# listen するインターフェース。単一ユーザーがローカルで動かす前提のため、既定では
+# 他の端末から届かない 127.0.0.1 に閉じる（Issue #64）。認証を置いていないので
+# （PROJECT_SPEC.md §18）、届いた時点で中身が見えてしまう。
+#
+# uvicorn は --host の既定が 127.0.0.1 だが、next dev は --hostname (-H) を
+# 渡さないと全インターフェースへ bind する。既定に任せると両者で範囲が食い違うため、
+# どちらにも明示して渡す。
+BIND_HOST="${BIND_HOST:-127.0.0.1}"
+
 log() { printf '[run] %s\n' "$*" >&2; }
 fail() { printf '[run][FAIL] %s\n' "$*" >&2; exit 1; }
 
@@ -50,6 +59,12 @@ set -a
 # shellcheck disable=SC1091
 source .env
 set +a
+
+# 設定ファイルを読んだ後に確かめる。空のまま渡すと next dev が既定へ落ちて全
+# インターフェースへ開くため、既定値へ戻さず止める（Issue #64）。空白だけの値も
+# 同じ扱いにする。タブや改行が紛れた場合は起動が失敗するだけだが、原因が分かる
+# ところで止めたい。
+[[ "$BIND_HOST" =~ [^[:space:]] ]] || fail "BIND_HOSTが空です（閉じた既定は 127.0.0.1）"
 
 # docker は PostgreSQL を実際に起動するときだけ要る。既に動いていれば触らない。
 command -v uv >/dev/null 2>&1 || fail "uv未インストール — https://astral.sh/uv"
@@ -83,12 +98,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-log "backend を起動します (http://localhost:${BACKEND_PORT})"
-(cd backend && uv run uvicorn techradar.main:app --reload --port "$BACKEND_PORT") &
+log "backend を起動します (http://${BIND_HOST}:${BACKEND_PORT})"
+(cd backend && uv run uvicorn techradar.main:app --reload --host "$BIND_HOST" --port "$BACKEND_PORT") &
 pids+=($!)
 
-log "frontend を起動します (http://localhost:${FRONTEND_PORT})"
-(cd frontend && npm run dev -- --port "$FRONTEND_PORT") &
+log "frontend を起動します (http://${BIND_HOST}:${FRONTEND_PORT})"
+(cd frontend && npm run dev -- --hostname "$BIND_HOST" --port "$FRONTEND_PORT") &
 pids+=($!)
 
 log "起動完了。Ctrl-C で停止します"
