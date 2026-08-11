@@ -76,6 +76,7 @@ _DROPPED_FROM_ENV = frozenset(
         "FAKE_DOCKER_EXIT",
         "FAKE_DOCKER_CALLS",
         "FAKE_DOCKER_ENV_DUMP",
+        "FAKE_TR_ENV_DUMP",
         # 実行中のシェルが export していると、ロケールを固定しているのか
         # 引き継いだだけなのかが見分けられなくなる。
         "LC_ALL",
@@ -203,6 +204,30 @@ def fake_docker_bin(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     # 実行するのはテスト自身だけなので、所有者以外へは開けない。
+    script.chmod(0o700)
+    return bin_dir
+
+
+@pytest.fixture
+def fake_tr_bin(tmp_path: Path) -> Path:
+    """`PATH` の先頭へ置く `tr` の覆いを作り、そのディレクトリを返す。
+
+    `LC_ALL` を `FAKE_TR_ENV_DUMP` へ記録してから本物の `tr` へ渡す。落とす文字の
+    判定そのものは本物に任せるので、他のテストの前提は変わらない。本物の場所は
+    `PATH` を差し替える前に解決しておく（差し替えた後では覆い自身に当たる）。
+    """
+    real_tr = shutil.which("tr")
+    assert real_tr is not None, "tr が見つからない"
+
+    bin_dir = tmp_path / "fake-tr-bin"
+    bin_dir.mkdir()
+    script = bin_dir / "tr"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "LC_ALL=%s\\n" "${LC_ALL:-unset}" >>"$FAKE_TR_ENV_DUMP"\n'
+        f'exec {shlex.quote(real_tr)} "$@"\n',
+        encoding="utf-8",
+    )
     script.chmod(0o700)
     return bin_dir
 
@@ -579,6 +604,49 @@ class TestWarnIfPublishedHostDiffers:
         assert result.stdout == "ok"
         assert "確認できませんでした" in result.stderr
         assert "警告" not in result.stderr
+
+    def test_公開先に含まれる制御文字は落として出す(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """`docker compose ps` の出力もそのまま警告文へ埋まる（Issue #72）。"""
+        result = self._run(tmp_path, fake_docker_bin, published="192.0.2.10\x1b[2J\n")
+
+        assert result.returncode == 0, result.stderr
+        assert "警告" in result.stderr
+        assert "\x1b" not in result.stderr
+        assert "192.0.2.10[2J" in result.stderr
+
+    def test_設定側の値に含まれる制御文字も落として出す(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """同じ行へ並べて出す以上、片方だけ整形すると扱いが食い違う。"""
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            published="192.0.2.10\n",
+            bind_host="127.0.0.1\x1b[2J",
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "警告" in result.stderr
+        assert "\x1b" not in result.stderr
+        assert "127.0.0.1[2J" in result.stderr
+
+    def test_整形すると設定と一致する公開先でも警告する(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """照合を整形後の値へ移すと、この公開先が設定と一致して警告が黙って消える。
+
+        `\x7f` は残骸を残さずに落ちるため、整形すると設定値そのものになる。生の値で
+        照合している限りは食い違いのままなので警告が出る。Issue #65 の警告が
+        整形の導入（Issue #72）で緩まないことを、実装のコメントではなく挙動で固定する。
+        """
+        result = self._run(tmp_path, fake_docker_bin, published="127.0.0.1\x7f\n")
+
+        assert result.returncode == 0, result.stderr
+        assert "警告" in result.stderr
+        assert "\x7f" not in result.stderr
+        assert "./run.sh --stop" in result.stderr
 
 
 class TestDockerIsReachable:
@@ -960,3 +1028,202 @@ class TestAssertDockerReachable:
         assert error in result.stderr
         assert "newgrp docker" not in result.stderr
         assert "sg docker" not in result.stderr
+
+    def test_dockerの出力に含まれる制御文字は落として出す(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """メッセージへ埋める前に整形する（Issue #72）。読める部分は残す。"""
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            docker_stderr="Cannot connect\x1b[2J to the Docker daemon",
+            entrypoint_script="./run.sh",
+        )
+
+        assert result.returncode == 1
+        assert "\x1b" not in result.stderr
+        assert "Cannot connect[2J to the Docker daemon" in result.stderr
+
+    def test_権限の案内でも制御文字は落として出す(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """整形しても、出し分けの判定と一行の案内はこれまでどおり動く。"""
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            docker_stderr=f"{_PERMISSION_DENIED}\x1b[2J",
+            entrypoint_script="./run.sh",
+            entrypoint_args="--stop",
+        )
+
+        assert result.returncode == 1
+        assert "\x1b" not in result.stderr
+        assert _PERMISSION_DENIED in result.stderr
+        assert "sg docker -c './run.sh --stop'" in result.stderr
+
+
+class TestSanitizeForMessage:
+    """`sanitize_for_message`: 外部コマンドの出力をメッセージへ埋める前に通す（Issue #72）。
+
+    `docker` の出力はそのまま端末へ出る。端末制御シーケンスが混じっていると、画面を
+    消す・カーソルを戻して別の文言に見せる・ウィンドウタイトルを書き換える、といった
+    形で表示を攪乱できる。このメッセージは読んだ人が状況を判断するための一次情報
+    なので、攪乱されると判断を誤らせる。
+
+    落とすのは制御文字そのものであって、シーケンス全体ではない。`\\x1b[2J` を渡すと
+    `[2J` が文字として残る。端末がこれを制御として解釈するのは先頭に ESC があるとき
+    だけなので、残骸が出ても攪乱には繋がらない。
+    """
+
+    def _run(self, tmp_path: Path, value: str) -> subprocess.CompletedProcess[str]:
+        return _run_lib(_capture('sanitize_for_message "$1"'), value, cwd=tmp_path)
+
+    def _limit(self, tmp_path: Path) -> int:
+        """打ち切りの上限をライブラリから読む。テスト側へ値を写さないため。"""
+        result = _run_lib('printf "%s" "$_MESSAGE_VALUE_MAX_BYTES"', cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        return int(result.stdout)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(
+                "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+                id="普通のエラーはそのまま",
+            ),
+            pytest.param("dockerへ接続できません", id="日本語を壊さない"),
+            pytest.param("一行目\n二行目", id="改行は残す"),
+            pytest.param("列\tと列", id="タブは残す"),
+            pytest.param("", id="空でも落ちない"),
+            pytest.param("192.0.2.10:5432", id="記号を含む値もそのまま"),
+        ],
+    )
+    def test_読める文字はそのまま通す(self, tmp_path: Path, value: str) -> None:
+        result = self._run(tmp_path, value)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"[{value}]"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            pytest.param("\x1b[2Jerror", "[2Jerror", id="画面消去"),
+            pytest.param("\x1b]0;偽のタイトル\x07error", "]0;偽のタイトルerror", id="タイトル書換"),
+            pytest.param("本当の原因\rにせの原因", "本当の原因にせの原因", id="復帰で上書き"),
+            pytest.param("error\x07", "error", id="ベル"),
+            pytest.param("error\x7f", "error", id="削除"),
+            pytest.param("\x0berror\x0c", "error", id="垂直タブと改ページ"),
+            pytest.param("\x08error", "error", id="後退"),
+            pytest.param("\x1b[1;31merror\x1b[0m", "[1;31merror[0m", id="色指定"),
+        ],
+    )
+    def test_制御文字は落とす(self, tmp_path: Path, value: str, expected: str) -> None:
+        result = self._run(tmp_path, value)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"[{expected}]"
+
+    def test_日本語のバイト列を制御文字と誤認しない(self, tmp_path: Path) -> None:
+        """UTF-8 の継続バイトは 0x80-0xBF で、C1 制御文字の範囲と重なる。
+
+        ここまで落とすと日本語を含む出力が壊れる。C1 は落とさない判断を固定する。
+        """
+        value = "接続できません（ソケットが見つかりません）"
+
+        result = self._run(tmp_path, value)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"[{value}]"
+
+    def test_長すぎる出力は打ち切って省略した旨を示す(self, tmp_path: Path) -> None:
+        """切ったことを隠さない。読み手が「これで全部」と受け取らないようにする。"""
+        limit = self._limit(tmp_path)
+
+        result = self._run(tmp_path, "x" * (limit + 50))
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"[{'x' * limit}…（以下省略）]"
+
+    def test_上限ちょうどなら打ち切らない(self, tmp_path: Path) -> None:
+        limit = self._limit(tmp_path)
+        value = "x" * limit
+
+        result = self._run(tmp_path, value)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"[{value}]"
+
+    def test_多バイト文字の途中では切らない(self, tmp_path: Path) -> None:
+        """バイト単位で切ると日本語が壊れる。壊れた文字を出さず手前で止める。
+
+        C1 制御文字を落とさない判断（日本語を壊さないため）と揃える。ここで途中から
+        切ると、同じ理由で守ったものを打ち切りの側から壊すことになる。
+        """
+        limit = self._limit(tmp_path)
+        head = "x" * (limit - 1)
+        # 3バイト文字。切れ目がこの文字の内側へ落ちる。
+        value = f"{head}あ{'x' * 10}"
+
+        result = self._run(tmp_path, value)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"[{head}…（以下省略）]"
+
+    def test_多バイト文字がちょうど収まるなら残す(self, tmp_path: Path) -> None:
+        """手前へ戻すのは切れ目が文字の内側にあるときだけ。取りすぎない。"""
+        limit = self._limit(tmp_path)
+        head = "x" * (limit - 3)
+        value = f"{head}あ{'x' * 10}"
+
+        result = self._run(tmp_path, value)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"[{head}あ…（以下省略）]"
+
+    def test_長さは制御文字を落とした後で数える(self, tmp_path: Path) -> None:
+        """制御文字で嵩を増して、読める部分を追い出せないようにする。"""
+        limit = self._limit(tmp_path)
+
+        result = self._run(tmp_path, ("x" * limit) + "\x1b" * 100)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"[{'x' * limit}]"
+
+    def test_文字を落とす側までロケールを届ける(self, tmp_path: Path, fake_tr_bin: Path) -> None:
+        """範囲指定の解釈を `tr` の実装まかせにしない。
+
+        GNU の `tr` は8進エスケープの範囲をバイトで見るため、この環境では `LC_ALL` の
+        有無で結果が変わらない（実測で確認した。`local -x` を `local` へ落としても
+        他のテストは全て通る）。POSIX は範囲を照合順序で解釈することを許しており、
+        実装が変われば落ちる文字が変わる。届いていること自体を固定する。
+        """
+        dump = tmp_path / "tr-env"
+
+        result = _run_lib(
+            _capture('sanitize_for_message "$1"'),
+            "error",
+            cwd=tmp_path,
+            env={"PATH": _path_with(fake_tr_bin), "FAKE_TR_ENV_DUMP": str(dump)},
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "[error]"
+        # `_capture` は関数を2度呼ぶ（終了コードを見る分と値を見る分）。回数ではなく、
+        # 記録された全ての呼び出しで固定されていることを見る。
+        recorded = dump.read_text(encoding="utf-8").splitlines()
+        assert recorded, "tr が呼ばれていない"
+        assert set(recorded) == {"LC_ALL=C"}
+
+    def test_ロケールの固定を関数の外へ残さない(self, tmp_path: Path) -> None:
+        """文字の範囲指定は照合順序に左右されるため関数の中で固定する（Issue #71 と同じ轍）。
+
+        固定したまま返すと、呼び出し元の後続の処理まで巻き添えにする。
+        """
+        result = _run_lib(
+            'sanitize_for_message "$1" >/dev/null\nprintf "[%s]" "${LC_ALL:-unset}"',
+            "x",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "[unset]"

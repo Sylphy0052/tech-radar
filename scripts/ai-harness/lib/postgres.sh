@@ -67,6 +67,54 @@ trim_spaces() {
   printf '%s' "$value"
 }
 
+# 打ち切りの上限（バイト）。docker のエラー出力は通常これに収まる。小さくしすぎると
+# 原因を含む行が消えて一次情報として使えなくなるため、余裕を持たせる。
+_MESSAGE_VALUE_MAX_BYTES=2000
+# 打ち切ったときに末尾へ足す。切ったことを隠すと「これで全部」と読まれる。
+_MESSAGE_VALUE_ELLIPSIS='…（以下省略）'
+
+# 外部コマンドの出力をメッセージへ埋める前に通す（Issue #72）。
+#
+# メッセージはそのまま端末へ出る。端末制御シーケンスが混じっていれば、画面を消す・
+# カーソルを戻して別の文言に見せる・ウィンドウタイトルを書き換える、といった形で表示を
+# 攪乱できる。落ちた理由を判断するための一次情報が攪乱されると読み手が判断を誤る。
+# docker バイナリの差し替えかデーモンの応答の細工が要るため脅威モデルとしては外側だが、
+# 防御の深さとして埋めておく。
+#
+# 落とすのは制御文字であってシーケンス全体ではない。`ESC [ 2 J` を渡すと `[2J` が文字
+# として残る。ESC を失えば端末はこれを制御として解釈しないため、残骸が出ても攪乱には
+# 繋がらない。タブと改行は残す（複数行のエラーをそのまま読めるように）。ただし末尾の
+# 改行だけは残らない。ここも埋め込む側もコマンド置換で値を受け渡しており、コマンド置換が
+# 末尾の改行を落とすため。埋め込む先はいずれも文の途中であり、落ちて困る値は無い。
+#
+# C1 制御文字（`\200-\237`）は落とさない。UTF-8 の継続バイトと範囲が重なり、日本語を
+# 含む出力を壊すため。ここは前提を置いている: 端末が UTF-8 で読んでいる限り、この範囲の
+# バイトは文字の一部にしかならない。8bit の制御コードを解釈する設定の端末（非UTF-8の
+# ロケールなど）では、`\233` 単体が ESC [ と同じ働きをする経路が残る。UTF-8 を前提に
+# できない環境まで守ろうとすると日本語の出力を壊すため、そちらは見送っている。
+#
+# 値の比較には使わない。整形した値で突き合わせると、制御文字を挟んだ値が一致してしまい
+# 判定が緩む（`warn_if_published_host_differs` の公開先の照合がこれに当たる）。
+sanitize_for_message() {
+  local value="$1" cleaned cut
+  # 文字クラスの範囲指定は照合順序に左右されるため固定する（Issue #71 と同じ轍）。
+  # `-x` を付けるのは `tr` へも渡すため。長さの数え方もバイトで揃う。関数を抜ければ戻る。
+  # 呼び出し元が既に固定していても、この関数だけで呼ばれる経路のために自分で置く。
+  local -x LC_ALL=C
+  cleaned="$(printf '%s' "$value" | tr -d '\000-\010\013-\037\177')"
+  if ((${#cleaned} > _MESSAGE_VALUE_MAX_BYTES)); then
+    # 切れ目が多バイト文字の途中へ落ちたら、その文字の手前まで戻す。途中で切ると
+    # 壊れたバイト列が出て、C1 を残した意味（日本語をそのまま読める）が無くなる。
+    # UTF-8 の継続バイトは `\200-\277` で、1文字あたり最大3個しか続かない。
+    cut=$_MESSAGE_VALUE_MAX_BYTES
+    while ((cut > 0)) && [[ "${cleaned:cut:1}" == [$'\200'-$'\277'] ]]; do
+      ((cut--))
+    done
+    cleaned="${cleaned:0:cut}${_MESSAGE_VALUE_ELLIPSIS}"
+  fi
+  printf '%s' "$cleaned"
+}
+
 # 設定ファイルから `BIND_HOST` の値だけを拾う。読めなければ空を返す。
 #
 # `source` せずに拾うのは、呼び出し元の環境を書き換えないため。ファイルが無い場合に
@@ -132,7 +180,8 @@ warn_if_published_host_differs() {
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
     [[ "$entry" == "$expected" ]] && continue
-    log "警告: 起動中の PostgreSQL が ${entry} へ公開されています（設定は ${expected}）"
+    # 照合は生の値で済ませ、整形するのは表示だけ（`sanitize_for_message` の注記を参照）。
+    log "警告: 起動中の PostgreSQL が $(sanitize_for_message "$entry") へ公開されています（設定は $(sanitize_for_message "$expected")）"
     log "  ./run.sh --stop で落としてから ./run.sh で起動し直すと反映されます（Issue #65）"
     return 0
   done <<<"$published"
@@ -195,7 +244,7 @@ assert_docker_usable() {
 _SAFE_COMMAND_HINT_PATTERN='^[A-Za-z0-9._/ -]+$'
 
 assert_docker_reachable() {
-  local error command_hint retry_hint
+  local error command_hint retry_hint shown_error
   # 文字クラスの範囲指定（`A-Z` など）は照合順序に左右されるため、判定の間はロケールを
   # 固定する。`-x` を付けるのは `docker` にも渡すため。`local` だけでは、呼び出し元が
   # 既に `LC_ALL` を export している場合しか子プロセスへ伝わらない。docker のメッセージが
@@ -209,6 +258,9 @@ assert_docker_reachable() {
   command_hint="${ENTRYPOINT_SCRIPT:-$0}"
   [[ -n "${ENTRYPOINT_ARGS:-}" ]] && command_hint="${command_hint} ${ENTRYPOINT_ARGS}"
 
+  # 出し分けの判定は生の出力で行い、メッセージへ埋めるのは整形した方（Issue #72）。
+  shown_error="$(sanitize_for_message "$error")"
+
   if [[ "$error" == *"permission denied"* ]]; then
     # そのまま実行できる一行を出せるのは、中身が上のパターンに収まるときだけ。
     # `${var@Q}` で引用するのは、案内文を読むシェルが1語として受け取れるようにするため。
@@ -220,9 +272,9 @@ assert_docker_reachable() {
       # 入ることもあり、「引数に」と断じると原因を取り違えさせる。
       retry_hint="sg dockerで入り直してから元のコマンドを実行し直してください（実行しようとしたコマンドに特殊な文字が含まれるため、そのまま実行できる形では示しません）"
     fi
-    fail "dockerへ接続できません — docker groupが現在のシェルに反映されていない可能性があります。newgrp dockerで入り直すか、${retry_hint}（docker groupはroot相当の権限を持ちます）。dockerの出力: ${error}"
+    fail "dockerへ接続できません — docker groupが現在のシェルに反映されていない可能性があります。newgrp dockerで入り直すか、${retry_hint}（docker groupはroot相当の権限を持ちます）。dockerの出力: ${shown_error}"
   fi
-  fail "dockerへ接続できません — dockerの出力: ${error}"
+  fail "dockerへ接続できません — dockerの出力: ${shown_error}"
 }
 
 # 到達不能なホストを指していると OS 既定のタイムアウトまで待たされるため上限を切る。
