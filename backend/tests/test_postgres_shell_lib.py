@@ -346,6 +346,40 @@ class TestWarnIfPublishedHostDiffers:
         assert result.stdout == "ok"
         assert result.stderr == ""
 
+    def test_composeへ渡す引数を固定する(self, tmp_path: Path, fake_docker_bin: Path) -> None:
+        """設定ファイルの指定・サービス名・出力の形を落としても気付けるようにする。
+
+        偽の `docker` は引数を見ないため、これを見ておかないと `-f` が抜けても
+        サービス名が変わっても出力テンプレートが壊れてもテストは通ってしまう。
+        """
+        calls = tmp_path / "docker-calls"
+        compose_file = tmp_path / "docker-compose.yml"
+
+        result = _run_lib(
+            'warn_if_published_host_differs; printf "ok"',
+            cwd=tmp_path,
+            env={
+                "PATH": _path_with(fake_docker_bin),
+                "ENV_FILE": str(tmp_path / "存在しない"),
+                "COMPOSE_FILE": str(compose_file),
+                "BIND_HOST": "127.0.0.1",
+                "_DOCKER_REACHABLE": "yes",
+                "FAKE_DOCKER_PS_OUTPUT": "127.0.0.1\n",
+                "FAKE_DOCKER_CALLS": str(calls),
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        recorded = calls.read_text(encoding="utf-8")
+        # 出力テンプレートに改行を含むため、記録は1回の呼び出しでも複数行になる。
+        # 呼び出し回数は `ps` の出現数で数える（一時ディレクトリ名にテスト名が入るため、
+        # パスを含む記録全体から "compose" を数えると水増しされる）。
+        assert recorded.count(" ps --format ") == 1
+        assert recorded.startswith(f"compose -f {compose_file} ps --format ")
+        assert "{{range .Publishers}}{{.URL}}" in recorded
+        assert "{{end}}" in recorded
+        assert recorded.rstrip("\n").endswith(" postgres")
+
     def test_公開先が複数でも全て一致なら何も言わない(
         self, tmp_path: Path, fake_docker_bin: Path
     ) -> None:
