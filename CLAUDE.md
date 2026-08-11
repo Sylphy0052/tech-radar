@@ -21,6 +21,8 @@
 - `./run.sh` — backend + frontend を起動する (PostgreSQL は自動起動、ジョブワーカーは backend プロセスに同居)
 - `./run.sh --stop` — PostgreSQL コンテナも含めて停止する
 - `scripts/ai-harness/check.sh` — lint / format / 型チェック / テストを一括実行する。PostgreSQL が未起動なら自動で立ち上げる。commit 前に `pre-bash-guard.sh` から強制実行される
+  - 互いに独立したチェックは並列で走る (Issue #61)。出力は混ざらないよう、全ジョブの完了後にまとめて表示する
+  - pytest と vitest のワーカー数は `PYTEST_WORKERS` / `VITEST_WORKERS` で変えられる (既定はどちらも 8)。既定値はこのマシン (22コア) での実測で決めたもので、コア数が大きく違う環境では調整する。`PYTEST_WORKERS=1` で pytest の並列化を切れる
 
 ## 開発フロー (強制)
 
@@ -89,11 +91,19 @@ override はマージ主体と承認要件のみ。以下は**引き続き強制
 
 backend の pytest はセッション開始時にテスト用DBを DROP/CREATE する ([backend/tests/conftest.py](backend/tests/conftest.py))。DB名は `techradar_test_<8桁hash>_<pid>` で、ハッシュ部分が作業ディレクトリ（worktree）、PID 部分がプロセスを表す。worktree を分けても分けなくても、別セッションが同時に pytest を回して互いのDBを破壊し合うことはない。
 
+check.sh は pytest を pytest-xdist で並列実行する (Issue #61)。xdist のワーカーは別プロセスなので、この PID 単位の分離がそのまま効く。ワーカー数ぶんのテスト用DBが同時に作られ、それぞれにマイグレーションが適用される。
+
 DBが増え続けないよう、セッション終了時に自分のDBを DROP し、異常終了で残った孤児DB（生存していない PID のもの）は次回のセッション開始時に掃除する。掃除は消さない側へ倒してあり、PID が生存している・PIDとして解釈できない・接続が残っている・自分自身、のいずれかに当たるDBには手を触れない。判定ロジックは [backend/tests/db_process_isolation.py](backend/tests/db_process_isolation.py) にある。
 
 frontend の vitest も同じ理由で `coverage.reportsDirectory` を `coverage/<pid>` に分けてある ([frontend/vitest.config.mts](frontend/vitest.config.mts))。共有していた頃は同時実行すると片方が `Something removed the coverage directory` で落ちた。孤児ディレクトリの掃除は [frontend/vitest.global-setup.ts](frontend/vitest.global-setup.ts) が行う。
 
 worktree を削除すると、そのハッシュを持つテスト用DBはどのworktreeからも掃除されなくなる（他worktreeのDBには触らない設計のため）。溜まってきたら `./scripts/cleanup-test-databases.sh` で確認し、`--apply` を付けて消す。生存しているworktreeのDBと、接続が残っているDBには触らない。
+
+### テストに壁時計の絶対時間を書かない (Issue #61)
+
+check.sh は複数のチェックを並列で走らせ、pytest 自体も複数プロセスへ分散させる。そのため「1秒以内に終わること」のような余裕の無い時間アサーションは、対象の実装が速いままでも落ちる。実測では、線形走査の ReDoS 回帰テストがカバレッジ計測のオーバーヘッド（約3倍）と CPU 競合（さらに約3倍）が重なって 0.18秒 → 1.8秒まで伸びた。壁時計を CPU 時間 (`time.process_time`) へ替えても、キャッシュやメモリ帯域の奪い合いまでは避けられない。
+
+時間を測るなら、通す側と落とす側の実測値を両方持ったうえで、その間に桁で離して上限を引く（[backend/tests/test_bulk_import.py](backend/tests/test_bulk_import.py) の `_REDOS_CPU_SECONDS_LIMIT`）。「入力を倍にしたときの伸び率で見る」形も試したが、入力サイズでキャッシュの効き方が変わるため線形の実装でも 3.7倍を観測し、こちらは安定しなかった。時間そのものではなく回数を数えられるなら、そちらの方が確実（フロントエンドの同種の失敗は Issue #40, #41）。
 
 ### frontend の Next.js は訓練データと異なる
 

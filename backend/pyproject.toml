@@ -36,6 +36,7 @@ dev = [
     "ruff>=0.14",
     "ty>=0.0.1a1",
     "trustme>=1.2.1",
+    "pytest-xdist>=3.8.0",
 ]
 
 [build-system]

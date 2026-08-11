@@ -16,6 +16,20 @@ from techradar.api.bulk_import import (
     validate_bulk_import_url,
 )
 
+# ReDoS 回帰テストが許す CPU 時間の上限。線形実装と二次関数的な実装の実測値の
+# 間に、どちらからも 1 桁以上離れた位置で引いている（Issue #61）。
+#
+# - 線形実装（現行）: 0.18秒。カバレッジ計測で約3倍、pytest の並列実行による
+#   CPU の奪い合いでさらに約3倍に伸びて、最悪 1.8秒までを実測した
+# - 二次関数的な実装（かつての正規表現。`extract_first_url` の docstring 参照）:
+#   4万文字で 1.4秒、ここで与える 100万文字級の入力なら外挿で分単位
+#
+# 上限を 1.0秒に置いていた頃は、実装が線形のままでも並列実行で落ちた。壁時計を
+# CPU 時間へ替えるだけでは足りず（キャッシュやメモリ帯域の奪い合いは CPU 時間にも
+# 乗る）、入力を倍にしたときの伸び率で見る形も安定しなかった（入力サイズで
+# キャッシュの効き方が変わり、線形のままでも 3.7倍を観測）。
+_REDOS_CPU_SECONDS_LIMIT = 10.0
+
 _ALLOWED_SCHEMES = ("http://", "https://")
 _MAX_URL_LENGTH = 2048
 
@@ -113,18 +127,21 @@ class TestExtractFirstUrl:
 
         「候補が URL にならなければ次の "://" から探し直す」ループが、候補ごとに
         行全体を舐め直す形になっていないことを固定する。
+
+        壁時計ではなく CPU 時間で測り、上限は `_REDOS_CPU_SECONDS_LIMIT` に置く。
+        理由と実測値はその定数のコメントにある（Issue #61）。
         """
         # Arrange
         line = ("1" * 20 + "://") * 50_000
 
         # Act
-        started_at = time.perf_counter()
+        started_at = time.process_time()
         url = extract_first_url(line)
-        elapsed_seconds = time.perf_counter() - started_at
+        elapsed_seconds = time.process_time() - started_at
 
         # Assert
         assert url is None
-        assert elapsed_seconds < 1.0
+        assert elapsed_seconds < _REDOS_CPU_SECONDS_LIMIT
 
     @pytest.mark.parametrize("line", ["http://", "http://....", "https://。"])
     def test_returns_none_when_the_scheme_has_no_host(self, line: str) -> None:
@@ -204,18 +221,22 @@ class TestExtractFirstUrl:
         """受入基準（ReDoS回帰）: "://" を含まない長い行は、バックトラッキング
         のある正規表現なら二次関数的に劣化する入力だが、線形走査であれば
         一瞬で None を返す。
+
+        壁時計ではなく CPU 時間で測り、上限を `_REDOS_CPU_SECONDS_LIMIT` に置く
+        理由は `test_returns_none_in_linear_time_for_a_long_line_of_invalid_separators`
+        と同じ（Issue #61）。
         """
         # Arrange
         long_line_without_scheme = "a" * 100_000
 
         # Act
-        started_at = time.perf_counter()
+        started_at = time.process_time()
         url = extract_first_url(long_line_without_scheme)
-        elapsed_seconds = time.perf_counter() - started_at
+        elapsed_seconds = time.process_time() - started_at
 
         # Assert
         assert url is None
-        assert elapsed_seconds < 1.0
+        assert elapsed_seconds < _REDOS_CPU_SECONDS_LIMIT
 
 
 class TestParseUrlLines:
