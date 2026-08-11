@@ -79,6 +79,7 @@ from techradar.llm.errors import (
     LLMTimeoutError,
     LLMToolUseDetectedError,
 )
+from techradar.llm.managed_policy import assert_no_managed_policy
 from techradar.llm.prompt import SYSTEM_PROMPT, build_user_prompt
 
 # `--tools` に渡す値。CLI のヘルプに「Use "" to disable all tools」と明記されており、
@@ -278,6 +279,8 @@ class ClaudeCliProvider:
 
     def _invoke(self, prompt: str) -> dict[str, Any]:
         """CLI を実行して JSON 封筒を返す。"""
+        # ポリシー配下では以下の隔離がほとんど機能しないため、起動前に止める。
+        assert_no_managed_policy(self._settings)
         command = _build_command(self._settings, prompt)
         started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="techradar-llm-") as working_directory:
