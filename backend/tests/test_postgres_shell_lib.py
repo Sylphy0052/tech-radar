@@ -211,6 +211,24 @@ def _path_with(bin_dir: Path) -> str:
     return f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
 
+class TestLibraryLoading:
+    """ライブラリの読み込みそのもの。"""
+
+    def test_同じシェルで二回読み込んでも落ちない(self, tmp_path: Path) -> None:
+        """定数を `readonly` にすると、2回目の読み込みで再代入に失敗して落ちる。
+
+        いまの呼び出し元は1プロセスにつき1回しか読み込まないが、読み込み順が変わったり
+        対話シェルから読み直したりしたときに静かに壊れないようにしておく（Issue #71）。
+        """
+        result = _run_lib(
+            f"source {shlex.quote(str(_LIB))}\nprintf 'ok'",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "ok"
+
+
 class TestTrimSpaces:
     """`trim_spaces`: 前後の空白だけを落とし、内側は触らない。"""
 
@@ -843,6 +861,22 @@ class TestAssertDockerReachable:
 
         assert result.returncode == 0, result.stderr
         assert dump.read_text(encoding="utf-8").splitlines() == ["LC_ALL=C"]
+
+    def test_ロケールの固定を関数の外へ残さない(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """固定は判定と docker の呼び出しの間だけ。呼び出し元の環境は変えない。"""
+        result = _run_lib(
+            'assert_docker_reachable || true\nprintf "[%s]" "${LC_ALL:-unset}"',
+            cwd=tmp_path,
+            env={
+                "PATH": _path_with(fake_docker_bin),
+                "FAKE_DOCKER_EXIT": "0",
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "[unset]"
 
     def test_呼び出し元のパスに特殊な文字があっても一行の案内を出さない(
         self, tmp_path: Path, fake_docker_bin: Path
