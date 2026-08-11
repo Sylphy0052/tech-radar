@@ -84,24 +84,27 @@ def test_rejects_empty_cors_allow_origins():
 # 上の一連のテストは初期化引数で値を渡している。この経路は pydantic-settings の
 # 複合型デコードを通らないため、実際の設定ファイルや環境変数から読む経路の壊れ方を
 # 検出できない（Issue #58 はそれで見逃された）。以降はその経路を通す。
-@pytest.mark.parametrize(
-    ("configured", "expected"),
-    [
-        # 配布しているサンプルと同じ、単一オリジンをそのまま書いた形
-        ("http://localhost:13700", ["http://localhost:13700"]),
-        (
-            "http://localhost:13700,http://127.0.0.1:13700",
-            ["http://localhost:13700", "http://127.0.0.1:13700"],
-        ),
-        # JSON 配列の記法。pydantic-settings が本来受け付ける形で、
-        # 既にこの形で書かれている設定を壊さない
-        ('["http://localhost:13700"]', ["http://localhost:13700"]),
-        (
-            '["http://localhost:13700", "http://127.0.0.1:13700"]',
-            ["http://localhost:13700", "http://127.0.0.1:13700"],
-        ),
-    ],
-)
+#
+# 設定ファイルと環境変数はデコードを担う実装が別（`DotEnvSettingsSource` と
+# `EnvSettingsSource`）なので、同じ記法を両方へ通して食い違いが出ないようにする。
+_CORS_ORIGIN_CASES = [
+    # 配布しているサンプルと同じ、単一オリジンをそのまま書いた形
+    ("http://localhost:13700", ["http://localhost:13700"]),
+    (
+        "http://localhost:13700,http://127.0.0.1:13700",
+        ["http://localhost:13700", "http://127.0.0.1:13700"],
+    ),
+    # JSON 配列の記法。pydantic-settings が本来受け付ける形で、
+    # 既にこの形で書かれている設定を壊さない
+    ('["http://localhost:13700"]', ["http://localhost:13700"]),
+    (
+        '["http://localhost:13700", "http://127.0.0.1:13700"]',
+        ["http://localhost:13700", "http://127.0.0.1:13700"],
+    ),
+]
+
+
+@pytest.mark.parametrize(("configured", "expected"), _CORS_ORIGIN_CASES)
 def test_reads_cors_allow_origins_from_a_settings_file(
     tmp_path, configured: str, expected: list[str]
 ):
@@ -116,18 +119,18 @@ def test_reads_cors_allow_origins_from_a_settings_file(
     assert settings.cors_allow_origins == expected
 
 
-def test_reads_cors_allow_origins_from_the_environment(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(("configured", "expected"), _CORS_ORIGIN_CASES)
+def test_reads_cors_allow_origins_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, configured: str, expected: list[str]
+):
     # Arrange
-    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "http://localhost:13700,http://127.0.0.1:13700")
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", configured)
 
     # Act
     settings = Settings(_env_file=None)
 
     # Assert
-    assert settings.cors_allow_origins == [
-        "http://localhost:13700",
-        "http://127.0.0.1:13700",
-    ]
+    assert settings.cors_allow_origins == expected
 
 
 def test_rejects_malformed_cors_allow_origins_from_a_settings_file(tmp_path):
