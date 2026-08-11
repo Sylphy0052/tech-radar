@@ -11,11 +11,11 @@
 | §19 データモデル案 | 初期設計時の記録 | [backend/src/techradar/db/models.py](backend/src/techradar/db/models.py) |
 | §20 API案 | 初期設計時の記録 | [backend/openapi.json](backend/openapi.json) |
 | §21 セキュリティ要件 | 現役の要件 | SSRF対策は [backend/src/techradar/fetcher/](backend/src/techradar/fetcher/)、LLMへ渡す内容は [backend/src/techradar/llm/](backend/src/techradar/llm/)、外部検索へ送る内容は [backend/src/techradar/collectors/](backend/src/techradar/collectors/) |
-| §22 MVPスコープ | 「必須」は初期設計時の記録。**「MVPでは実装しない」は現役のスコープ境界** | 「必須」はGitLabのRoadmap Issue #17。「MVPでは実装しない」は本節そのもの |
-| §23 実装順序 | 初期設計時の記録 | GitLabのRoadmap Issue #17 |
+| §22 MVPスコープ | 「必須」は初期設計時の記録。**「MVPでは実装しない」は現役のスコープ境界** | 「必須」はロードマップIssue #17。「MVPでは実装しない」は本節そのもの |
+| §23 実装順序 | 初期設計時の記録 | ロードマップIssue #17 |
 | §24 非機能要件 | 現役の要件 | — |
 | §25 Claude Codeへの実装方針 | 現役の要件 | [CLAUDE.md](CLAUDE.md) |
-| §26 完了条件 | 初期設計時の記録 | GitLabのRoadmap Issue #17、[docs/decisions.md](docs/decisions.md) |
+| §26 完了条件 | 初期設計時の記録 | ロードマップIssue #17、[docs/decisions.md](docs/decisions.md) |
 | §27 初回実装時に決定する必要がある事項 | 初期設計時の記録 | [docs/decisions.md](docs/decisions.md)、[docs/adr/](docs/adr/) |
 
 §22の「MVPでは実装しない」だけは扱いが違う。詳しくは同節の注記を読む。
@@ -865,9 +865,9 @@ IPv6 private network
 
 ## 22. MVPスコープ
 
-> 下の「必須」は初期設計時の記録であり、実装へ追随させていない。挙げた項目はGitLabのRoadmap Issue #17のPhase 1〜5としてすべて完了している。現在どこまで進んでいるかはRoadmap Issueを参照する。
+> 下の「必須」は初期設計時の記録であり、実装へ追随させていない。挙げた項目はロードマップIssue #17のPhase 1〜5としてすべて完了している。現在どこまで進んでいるかはロードマップIssueを参照する。
 >
-> ただし「MVPでは実装しない」は記録ではなく、**今も守っているスコープの境界**として読む。挙げた項目はいずれも実装していない。境界の典拠はRoadmap Issueではなくこの節そのもので、ここへ手を出す判断をするときは、まずこの節を更新してから着手する。Roadmap Issueへ該当する項目を足すときも同じ。
+> ただし「MVPでは実装しない」は記録ではなく、**今も守っているスコープの境界**として読む。挙げた項目はいずれも実装していない。境界の典拠はロードマップIssueではなくこの節そのもので、ここへ手を出す判断をするときは、まずこの節を更新してから着手する。ロードマップIssueへ該当する項目を足すときも同じ。
 
 ### 必須
 
@@ -907,7 +907,7 @@ IPv6 private network
 
 ## 23. 実装順序
 
-> 初期設計時の記録であり、実装へ追随させていない。実際の実装順序と進捗、Issue番号と依存関係はGitLabのRoadmap Issue #17が持つ。ここに書かれたPhase 1〜5は完了している。
+> 初期設計時の記録であり、実装へ追随させていない。実際の実装順序と進捗、Issue番号と依存関係はロードマップIssue #17が持つ。ここに書かれたPhase 1〜5は完了している。
 
 ### Phase 1: 基盤
 
@@ -986,7 +986,7 @@ IPv6 private network
 認証は置かない（§18、[docs/decisions.md](docs/decisions.md)）。APIを守る境界はネットワーク側にある。ただし `run.sh` の起動先は揃っていない。
 
 * backend（uvicorn）は `--host` を渡していないため、既定の127.0.0.1だけをlistenする。APIを他の端末から直接叩くことはできない
-* frontend（`next dev`）は `-H` を渡していないため、全インターフェースにbindする。同一LANの別端末からUIへ到達でき、そこに描画されるデータも見える
+* frontend（`next dev`）は `-H` を渡していないため、全インターフェースにbindする。同一LANの別端末からUIへ到達でき、そこに描画されるデータも見える。この非対称をどうするかはIssue #64で決める
 
 この上に、以下の歯止めを置く。いずれも部分的な対策であり、認証の代わりにはならない。
 
@@ -1042,7 +1042,7 @@ IPv6 private network
 
 ## 26. 完了条件
 
-> 初期設計時の記録であり、実装へ追随させていない。ここに挙げた条件はすべて満たしており、実装はその先へ進んでいる（情報源選好の学習・レート制限・保持期間など）。現行の到達点はGitLabのRoadmap Issue #17と [docs/decisions.md](docs/decisions.md)、APIの形は [backend/openapi.json](backend/openapi.json) を参照する。
+> 初期設計時の記録であり、実装へ追随させていない。ここに挙げた条件はすべて満たしており、実装はその先へ進んでいる（情報源選好の学習・レート制限・保持期間など）。現行の到達点はロードマップIssue #17と [docs/decisions.md](docs/decisions.md)、APIの形は [backend/openapi.json](backend/openapi.json) を参照する。
 >
 > 記録扱いにするのは「MVPが完了したか」という判定であって、条件そのものではない。SSRF対策は§21、テストと可観測性は§24が現役の要件として持っており、退行があればそちら違反として扱う。
 
