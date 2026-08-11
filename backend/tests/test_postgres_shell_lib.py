@@ -360,8 +360,9 @@ class TestWarnIfPublishedHostDiffers:
 
         assert result.returncode == 0, result.stderr
         assert "警告" in result.stderr
-        assert "192.0.2.10" in result.stderr
-        assert "127.0.0.1" in result.stderr
+        # どちらが公開先でどちらが設定かを取り違えていないところまで見る。入れ替わって
+        # いても警告自体は出るため、含まれるかどうかだけでは読み手を誤らせる文言を通す。
+        assert "が 192.0.2.10 へ公開されています（設定は 127.0.0.1）" in result.stderr
         assert "./run.sh --stop" in result.stderr
 
     @pytest.mark.parametrize(
@@ -369,15 +370,17 @@ class TestWarnIfPublishedHostDiffers:
         [
             pytest.param("127.0.0.1\n192.0.2.10\n", id="食い違いが最後の行"),
             pytest.param("192.0.2.10\n127.0.0.1\n", id="食い違いが最初の行"),
+            pytest.param("127.0.0.1\n192.0.2.10\n127.0.0.1\n", id="食い違いが中間の行"),
         ],
     )
     def test_複数の公開先のうち1つでも食い違えば警告する(
         self, tmp_path: Path, fake_docker_bin: Path, published: str
     ) -> None:
-        """食い違いの位置を変えて両方向を見る。
+        """食い違いの位置を変えて、全ての行を見ていることを確かめる。
 
-        片方だけだと、出力の最後の行しか見ない実装（`tail -1` 相当）へ後退しても
-        テストが通ってしまう。広く公開されている行が先頭に来る並びは実際に起こりうる。
+        最後の行だけを見る実装（`tail -1` 相当）でも、最初と最後だけを見る実装でも
+        通らないよう、3通りの並びを与える。広く公開されている行が先頭や中間に来る
+        並びは実際に起こりうる。
         """
         result = self._run(tmp_path, fake_docker_bin, published=published)
 
@@ -400,12 +403,17 @@ class TestWarnIfPublishedHostDiffers:
         [
             pytest.param("127.0.0.1", "127.0.0.10\n", id="前方一致で見逃さない"),
             pytest.param(_ALL_INTERFACES, "10.0.0.0\n", id="後方一致で見逃さない"),
+            pytest.param("127.0.0.1", "127.0.0\n", id="公開先が設定値の一部でも見逃さない"),
         ],
     )
     def test_公開先の判定は完全一致(
         self, tmp_path: Path, fake_docker_bin: Path, expected: str, published: str
     ) -> None:
-        """部分一致だと `127.0.0.1` が `127.0.0.10` に一致して見逃す（Issue #65）。"""
+        """部分一致だと `127.0.0.1` が `127.0.0.10` に一致して見逃す（Issue #65）。
+
+        包含の向きも両方見る。設定が公開先を含む形（`127.0.0.1` に対して `127.0.0`）で
+        判定する実装へ書き換わっても、片方向だけでは気付けない。
+        """
         result = self._run(tmp_path, fake_docker_bin, published=published, bind_host=expected)
 
         assert result.returncode == 0, result.stderr
