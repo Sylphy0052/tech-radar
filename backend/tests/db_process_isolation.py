@@ -57,14 +57,19 @@ POSTGRES_IDENTIFIER_MAX_BYTES = 63
 # `os.kill()` へ渡した際に `OverflowError` を誘発しうる（Issue #33 self review）。
 PID_DIGITS_MAX = 10
 
-# `techradar_test_<hash8>_<pid>` 形式。pid 部分は 1〜`PID_DIGITS_MAX` 桁の数字のみを
+# `techradar_test_<hash8>_<pid>` 形式。pid 部分は先頭 1〜`PID_DIGITS_MAX` 桁の数字のみを
 # 許可し、それ以外（空・非数字を含む・桁数超過等）は「このリポジトリが生成した
 # 名前ではない」として扱う（後続の孤児判定で安全側＝消さない側に倒すため）。
+# pid 部分の先頭は `1-9` に限定し、`0` 単体および先頭ゼロ（`007` 等）を弾く。
+# `os.getpid()` 由来の実在する DB 名は必ず 1 以上のため実害は無いが、`0` を通すと
+# `os.kill(0, 0)` が「自プロセスグループ全体」への問い合わせになり例外を出さない
+# ため、`pid_is_alive(0)` が常に真を返し、`techradar_test_<hash8>_0` のような
+# DB 名が来た場合に恒久的に保護されてしまう（Issue #63 self review）。
 # 終端は `$` ではなく `\Z` を使う。`re` の `$` は文字列末尾の直前の改行にも
 # マッチするため、末尾に改行を含む名前を誤って通過させうる（Issue #33 self review）。
 _DATABASE_NAME_PATTERN = re.compile(
     rf"^{re.escape(DATABASE_NAME_PREFIX)}"
-    rf"(?P<hash>[0-9a-f]{{{WORKTREE_HASH_LENGTH}}})_(?P<pid>[0-9]{{1,{PID_DIGITS_MAX}}})\Z"
+    rf"(?P<hash>[0-9a-f]{{{WORKTREE_HASH_LENGTH}}})_(?P<pid>[1-9][0-9]{{0,{PID_DIGITS_MAX - 1}}})\Z"
 )
 
 # `techradar_test_<hash8>` 形式（PID 接尾辞なし、Issue #23 時代の旧形式）。

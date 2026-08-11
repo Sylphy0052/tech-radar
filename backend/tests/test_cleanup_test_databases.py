@@ -33,6 +33,7 @@ import pytest
 from scripts import cleanup_test_databases as cleanup_module
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 
 from techradar.config import get_settings
 from tests.db_process_isolation import build_database_name, worktree_hash
@@ -465,6 +466,196 @@ class TestBuildPlanRecentCreationProtection:
         assert db_name in plan.to_delete
         assert db_name not in plan.protected_by_recent_creation
 
+    def test_boundary_at_exactly_min_age_minutes_is_not_protected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        admin_engine: Engine,
+        cleanup_database_names: list[str],
+    ) -> None:
+        """猶予期間の境界値: ちょうど`min_age_minutes`分前に作られた扱いにしても
+        保護されないこと（実装の比較が`<`であることの固定、Issue #63 self review）。
+
+        `_build_plan`内で計算される`datetime.now(UTC)`は、この`created_at`を
+        用意した時点より必ず後になるため、実際の経過時間は境界をまたいで
+        `min_age_minutes`以上になる。
+        """
+        # Arrange — PID保護に引っかからないよう実在しえないPIDを使う
+        backend_root = _FAKE_ISSUE_63_REPO_ROOT / "backend"
+        db_name = build_database_name(backend_root, ANOTHER_DEAD_PID)
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{db_name}"'))
+        cleanup_database_names.append(db_name)
+
+        min_age_minutes = 5
+        boundary_creation_time = datetime.now(UTC) - timedelta(minutes=min_age_minutes)
+        monkeypatch.setattr(
+            cleanup_module,
+            "_database_creation_times",
+            lambda _connection: {db_name: boundary_creation_time},
+        )
+
+        # Act
+        with admin_engine.connect() as connection:
+            plan = cleanup_module._build_plan(connection, [], min_age_minutes=min_age_minutes)
+
+        # Assert
+        assert db_name not in plan.protected_by_recent_creation
+        assert db_name in plan.to_delete
+
+
+class TestBuildPlanPidTrustWindow:
+    """PID信用期限（Issue #63）: 作成から`PID_TRUST_WINDOW_HOURS`時間を超えたDBは、
+    DB名に埋め込まれたPIDが生存していても、その保護をスキップすること。
+    """
+
+    def test_does_not_trust_alive_pid_after_trust_window_expires(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        admin_engine: Engine,
+        cleanup_database_names: list[str],
+    ) -> None:
+        # Arrange — 自分自身（生存中）のPIDを使う。PID再利用でたまたま生存中の
+        # 別プロセスに割り当たったケースを模す。作成時刻だけ信用期限より古く見せる。
+        backend_root = _FAKE_ISSUE_63_REPO_ROOT / "backend"
+        db_name = build_database_name(backend_root, os.getpid())
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{db_name}"'))
+        cleanup_database_names.append(db_name)
+
+        old_creation_time = datetime.now(UTC) - timedelta(
+            hours=cleanup_module.PID_TRUST_WINDOW_HOURS, minutes=1
+        )
+        monkeypatch.setattr(
+            cleanup_module,
+            "_database_creation_times",
+            lambda _connection: {db_name: old_creation_time},
+        )
+
+        # Act — 猶予期間保護（Issue #63の別項目）は無効化し、PID信用期限だけを見る
+        with admin_engine.connect() as connection:
+            plan = cleanup_module._build_plan(connection, [], min_age_minutes=0)
+
+        # Assert — PIDは生存しているが信用期限切れのため保護されず、削除対象になる
+        assert db_name not in plan.protected_by_alive_pid
+        assert db_name in plan.to_delete
+
+    def test_trusts_alive_pid_within_trust_window(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        admin_engine: Engine,
+        cleanup_database_names: list[str],
+    ) -> None:
+        # Arrange — 信用期限（`PID_TRUST_WINDOW_HOURS`時間）ぎりぎり内側の作成時刻
+        backend_root = _FAKE_ISSUE_63_REPO_ROOT / "backend"
+        db_name = build_database_name(backend_root, os.getpid())
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{db_name}"'))
+        cleanup_database_names.append(db_name)
+
+        recent_creation_time = datetime.now(UTC) - timedelta(
+            hours=cleanup_module.PID_TRUST_WINDOW_HOURS, minutes=-1
+        )
+        monkeypatch.setattr(
+            cleanup_module,
+            "_database_creation_times",
+            lambda _connection: {db_name: recent_creation_time},
+        )
+
+        # Act
+        with admin_engine.connect() as connection:
+            plan = cleanup_module._build_plan(connection, [], min_age_minutes=0)
+
+        # Assert — 信用期限内のため、従来どおりPID生存で保護される
+        assert db_name in plan.protected_by_alive_pid
+        assert db_name not in plan.to_delete
+
+
+class TestDatabaseCreationTimes:
+    """`_database_creation_times`が例外を捕まえて`None`を返す経路（Issue #63）。
+
+    `_build_plan`はこの`None`を「作成時刻不明」として扱い、作成直後DBの猶予期間
+    保護とPID信用期限の判定を無効化する（従来どおりPID生存を信用する安全側）。
+    """
+
+    def test_returns_none_and_warns_when_query_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        admin_engine: Engine,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Arrange — 実接続のexecuteだけをエラーに差し替える
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise SQLAlchemyError("boom")
+
+        with admin_engine.connect() as connection:
+            monkeypatch.setattr(connection, "execute", _raise)
+
+            # Act
+            result = cleanup_module._database_creation_times(connection)
+
+        # Assert
+        assert result is None
+        assert "作成時刻の取得に失敗" in capsys.readouterr().err
+
+
+class TestCheckMaxDelete:
+    """`--apply`時のサーキットブレーカー（Issue #63）: 削除候補が上限を超えたら中止する。"""
+
+    @staticmethod
+    def _plan_with_to_delete_count(count: int) -> cleanup_module.CleanupPlan:
+        names = [f"techradar_test_deadbeef_{i + 1}" for i in range(count)]
+        return cleanup_module.CleanupPlan(
+            live_worktree_paths=[],
+            existing_database_count=count,
+            candidates=names,
+            to_delete=names,
+            protected_by_connection=[],
+            protected_by_alive_pid=[],
+            protected_by_recent_creation=[],
+        )
+
+    def test_raises_when_to_delete_exceeds_max_delete(self) -> None:
+        # Arrange
+        plan = self._plan_with_to_delete_count(cleanup_module.DEFAULT_MAX_DELETE + 1)
+
+        # Act / Assert
+        with pytest.raises(cleanup_module.TooManyDeletionsError):
+            cleanup_module._check_max_delete(plan, cleanup_module.DEFAULT_MAX_DELETE)
+
+    def test_does_not_raise_when_to_delete_equals_max_delete(self) -> None:
+        # Arrange
+        plan = self._plan_with_to_delete_count(cleanup_module.DEFAULT_MAX_DELETE)
+
+        # Act / Assert — 例外が出なければOK（境界＝上限ちょうどは許容する）
+        cleanup_module._check_max_delete(plan, cleanup_module.DEFAULT_MAX_DELETE)
+
+    def test_zero_means_unlimited(self) -> None:
+        # Arrange
+        plan = self._plan_with_to_delete_count(cleanup_module.DEFAULT_MAX_DELETE * 100)
+
+        # Act / Assert — 例外が出なければOK
+        cleanup_module._check_max_delete(plan, 0)
+
+
+def _plan_limited_to(plan: cleanup_module.CleanupPlan, name: str) -> cleanup_module.CleanupPlan:
+    """`to_delete` をこのテストが作った DB 1 件だけに絞った plan を返す。
+
+    `_build_plan` へ空の生存 worktree 一覧を渡すと、クラスタ上の全テスト用 DB が
+    削除候補になる。そのまま `_apply_plan` へ渡すと、同時に走っている別セッションの
+    テストが使う DB まで本当に DROP してしまう（新形式で PID が生きているものは
+    保護されるが、旧形式や実在しない PID を使うダミーは保護に掛からない）。
+    削除の対象を自分が作った DB へ限定してから `_apply_plan` を呼ぶ（Issue #63）。
+    """
+    return cleanup_module.CleanupPlan(
+        live_worktree_paths=plan.live_worktree_paths,
+        existing_database_count=plan.existing_database_count,
+        candidates=[name],
+        to_delete=[name] if name in plan.to_delete else [],
+        protected_by_connection=[],
+        protected_by_alive_pid=[],
+        protected_by_recent_creation=[],
+    )
+
 
 class TestApplyPlan:
     """`--apply`（`_apply_plan`）の実DBに対する振る舞い。"""
@@ -509,7 +700,7 @@ class TestApplyPlan:
             assert db_name in plan.to_delete
 
             # Act
-            applied_plan = cleanup_module._apply_plan(connection, plan)
+            applied_plan = cleanup_module._apply_plan(connection, _plan_limited_to(plan, db_name))
 
         # Assert
         assert db_name in applied_plan.to_delete
@@ -519,6 +710,40 @@ class TestApplyPlan:
                 text("SELECT 1 FROM pg_database WHERE datname = :name"), {"name": db_name}
             )
             assert result.first() is None
+
+    def test_apply_skips_database_whose_pid_becomes_alive_before_drop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        admin_engine: Engine,
+        cleanup_database_names: list[str],
+    ) -> None:
+        """DROP直前のPID再確認分岐: `_build_plan`時点では削除対象でも、DROP直前に
+        `pid_is_alive`がTrueを返せば削除せず`protected_by_alive_pid`へ回ること。
+        """
+        # Arrange — 理由はtest_dry_run_does_not_dropと同じ
+        orphaned_backend_root = _FAKE_ORPHANED_REPO_ROOT / "backend"
+        db_name = build_database_name(orphaned_backend_root, DEAD_PID)
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{db_name}"'))
+        cleanup_database_names.append(db_name)
+
+        with admin_engine.connect() as connection:
+            plan = cleanup_module._build_plan(connection, [], min_age_minutes=0)
+        assert db_name in plan.to_delete
+
+        # Act — DROP直前にPIDが生存扱いになる状況を再現する
+        monkeypatch.setattr(cleanup_module, "pid_is_alive", lambda _pid: True)
+        with admin_engine.connect() as connection:
+            applied_plan = cleanup_module._apply_plan(connection, _plan_limited_to(plan, db_name))
+
+        # Assert — 削除されず、保護対象へ回る
+        assert db_name not in applied_plan.to_delete
+        assert db_name in applied_plan.protected_by_alive_pid
+        with admin_engine.connect() as connection:
+            result = connection.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :name"), {"name": db_name}
+            )
+            assert result.first() is not None
 
     def test_apply_skips_database_that_gained_connection_after_planning(
         self, admin_engine: Engine, cleanup_database_names: list[str]
@@ -544,7 +769,9 @@ class TestApplyPlan:
             assert _wait_until_has_active_connection(admin_engine, db_name) is True
 
             with admin_engine.connect() as connection:
-                applied_plan = cleanup_module._apply_plan(connection, plan)
+                applied_plan = cleanup_module._apply_plan(
+                    connection, _plan_limited_to(plan, db_name)
+                )
 
             # Assert — 削除されず、保護対象へ回る
             assert db_name not in applied_plan.to_delete
