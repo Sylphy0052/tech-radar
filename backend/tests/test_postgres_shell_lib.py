@@ -15,7 +15,7 @@ self review で実測によって初めて見つかった次の3件は、いず�
 落ちないこと（受入基準）がそのまま終了コードで確かめられる。
 
 docker には触れない。`warn_if_published_host_differs` と `docker_is_reachable` は
-`PATH` の先頭へ置いた偽の `docker` で出力と終了コードを差し替える。実 docker を使うと
+`PATH` の先頭へ置いた偽の `docker` で出力と終了コードを差し替える。実dockerを使うと
 実行環境によって結果が変わり、テストが環境の状態を測るものになってしまうため。
 """
 
@@ -33,7 +33,8 @@ _LIB = _REPO_ROOT / "scripts" / "ai-harness" / "lib" / "postgres.sh"
 
 # 全インターフェースへの公開先。ここで待ち受けるわけではなく、テストデータとして
 # 「広げた公開先」を表すために使う。他のケースはドキュメント用に予約された
-# TEST-NET-1（RFC 5737）の値を使い、実在するアドレスをテストへ持ち込まない。
+# TEST-NET-1（RFC 5737）を主に使い、判定の境界を見たいところだけプライベート
+# アドレス（10.0.0.0/8）を混ぜる。いずれも文字列の比較にしか使わず接続はしない。
 _ALL_INTERFACES = "0.0.0.0"  # noqa: S104
 
 # このライブラリは `log` / `fail` を定義せず呼び出し元のものを使う。テストでも同じ前提で
@@ -125,7 +126,8 @@ def fake_docker_bin(tmp_path: Path) -> Path:
         'exit "${FAKE_DOCKER_EXIT:-0}"\n',
         encoding="utf-8",
     )
-    script.chmod(0o755)
+    # 実行するのはテスト自身だけなので、所有者以外へは開けない。
+    script.chmod(0o700)
     return bin_dir
 
 
@@ -215,11 +217,12 @@ class TestReadBindHostFromEnvFile:
     def test_読めないファイルでも落ちない(self, tmp_path: Path) -> None:
         env_file = _write_env_file(tmp_path, "BIND_HOST=192.0.2.10\n")
         env_file.chmod(0o000)
-        if os.access(env_file, os.R_OK):
-            # root で実行している場合は権限で弾かれない。判定できないので飛ばす。
-            pytest.skip("パーミッションによる読み取り不可を再現できない")
-
         try:
+            if os.access(env_file, os.R_OK):
+                # root で実行している場合は権限で弾かれない。判定できないので飛ばす。
+                # skip も例外なので、権限を戻す処理はこの try の中に入れておく。
+                pytest.skip("パーミッションによる読み取り不可を再現できない")
+
             result = _run_lib(
                 _capture("read_bind_host_from_env_file"),
                 cwd=tmp_path,
@@ -349,6 +352,7 @@ class TestWarnIfPublishedHostDiffers:
         result = self._run(tmp_path, fake_docker_bin, published="127.0.0.1\n127.0.0.1\n")
 
         assert result.returncode == 0, result.stderr
+        assert result.stdout == "ok"
         assert result.stderr == ""
 
     def test_食い違えば警告と対処を出す(self, tmp_path: Path, fake_docker_bin: Path) -> None:
@@ -360,10 +364,22 @@ class TestWarnIfPublishedHostDiffers:
         assert "127.0.0.1" in result.stderr
         assert "./run.sh --stop" in result.stderr
 
+    @pytest.mark.parametrize(
+        "published",
+        [
+            pytest.param("127.0.0.1\n192.0.2.10\n", id="食い違いが最後の行"),
+            pytest.param("192.0.2.10\n127.0.0.1\n", id="食い違いが最初の行"),
+        ],
+    )
     def test_複数の公開先のうち1つでも食い違えば警告する(
-        self, tmp_path: Path, fake_docker_bin: Path
+        self, tmp_path: Path, fake_docker_bin: Path, published: str
     ) -> None:
-        result = self._run(tmp_path, fake_docker_bin, published="127.0.0.1\n192.0.2.10\n")
+        """食い違いの位置を変えて両方向を見る。
+
+        片方だけだと、出力の最後の行しか見ない実装（`tail -1` 相当）へ後退しても
+        テストが通ってしまう。広く公開されている行が先頭に来る並びは実際に起こりうる。
+        """
+        result = self._run(tmp_path, fake_docker_bin, published=published)
 
         assert result.returncode == 0, result.stderr
         assert "警告" in result.stderr
