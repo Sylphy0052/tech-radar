@@ -173,6 +173,12 @@ class Settings(BaseSettings):
         文字列比較するため。スキーム欠落や末尾スラッシュがあっても起動自体は
         成功し、ブラウザからの preflight だけが静かに落ちる。原因が追いにくい
         ため、起動時に弾く。
+
+        ブラウザが送る `Origin` ヘッダと決して一致しない表記も同じ理由で弾く
+        （Issue #62）。ワイルドカードだけは事情が異なり、完全一致比較では無害な
+        一方、`allow_origin_regex` を併用する変更が入った途端に本物の
+        ワイルドカードとして働く。`main.create_app` は `allow_credentials=True`
+        を指定しているため、そのとき許可範囲が一気に広がる。
         """
         if not value:
             message = "CORS_ALLOW_ORIGINS には 1 つ以上のオリジンを指定してください"
@@ -189,6 +195,31 @@ class Settings(BaseSettings):
                 message = (
                     f"CORS_ALLOW_ORIGINS の値 '{origin}' にパス・クエリは指定できません"
                     "（Origin ヘッダと文字列一致しないため末尾スラッシュも不可）"
+                )
+                raise ValueError(message)
+            if "*" in parsed.netloc:
+                message = (
+                    f"CORS_ALLOW_ORIGINS の値 '{origin}' にワイルドカードは指定できません"
+                    "（許可リストは Origin ヘッダとの完全一致で判定するため、"
+                    "書けてもマッチしない）"
+                )
+                raise ValueError(message)
+            if parsed.username is not None or parsed.password is not None:
+                message = (
+                    f"CORS_ALLOW_ORIGINS の値 '{origin}' に認証情報は指定できません"
+                    "（Origin ヘッダに userinfo は含まれないため一致しない）"
+                )
+                raise ValueError(message)
+            if not parsed.hostname:
+                message = f"CORS_ALLOW_ORIGINS の値 '{origin}' からホスト名を読み取れません"
+                raise ValueError(message)
+            # 小文字へ正規化せず拒否する。正規化すると設定ミスに気付かないまま
+            # 動いてしまい、後から表記を直す動機が消える。
+            if origin != origin.lower():
+                message = (
+                    f"CORS_ALLOW_ORIGINS の値 '{origin}' は小文字で指定してください"
+                    "（ブラウザはスキームとホストを小文字に正規化して Origin ヘッダを"
+                    "送るため、大文字のままでは一致しない）"
                 )
                 raise ValueError(message)
         return value
