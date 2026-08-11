@@ -81,6 +81,65 @@ def test_rejects_empty_cors_allow_origins():
         Settings(_env_file=None, cors_allow_origins="")
 
 
+# 上の一連のテストは初期化引数で値を渡している。この経路は pydantic-settings の
+# 複合型デコードを通らないため、実際の設定ファイルや環境変数から読む経路の壊れ方を
+# 検出できない（Issue #58 はそれで見逃された）。以降はその経路を通す。
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        # 配布しているサンプルと同じ、単一オリジンをそのまま書いた形
+        ("http://localhost:13700", ["http://localhost:13700"]),
+        (
+            "http://localhost:13700,http://127.0.0.1:13700",
+            ["http://localhost:13700", "http://127.0.0.1:13700"],
+        ),
+        # JSON 配列の記法。pydantic-settings が本来受け付ける形で、
+        # 既にこの形で書かれている設定を壊さない
+        ('["http://localhost:13700"]', ["http://localhost:13700"]),
+        (
+            '["http://localhost:13700", "http://127.0.0.1:13700"]',
+            ["http://localhost:13700", "http://127.0.0.1:13700"],
+        ),
+    ],
+)
+def test_reads_cors_allow_origins_from_a_settings_file(
+    tmp_path, configured: str, expected: list[str]
+):
+    # Arrange
+    settings_file = tmp_path / "settings"
+    settings_file.write_text(f"CORS_ALLOW_ORIGINS={configured}\n", encoding="utf-8")
+
+    # Act
+    settings = Settings(_env_file=str(settings_file))
+
+    # Assert
+    assert settings.cors_allow_origins == expected
+
+
+def test_reads_cors_allow_origins_from_the_environment(monkeypatch: pytest.MonkeyPatch):
+    # Arrange
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "http://localhost:13700,http://127.0.0.1:13700")
+
+    # Act
+    settings = Settings(_env_file=None)
+
+    # Assert
+    assert settings.cors_allow_origins == [
+        "http://localhost:13700",
+        "http://127.0.0.1:13700",
+    ]
+
+
+def test_rejects_malformed_cors_allow_origins_from_a_settings_file(tmp_path):
+    # Arrange — 設定ファイル経由でも表記の検証が効くこと
+    settings_file = tmp_path / "settings"
+    settings_file.write_text("CORS_ALLOW_ORIGINS=localhost:13700\n", encoding="utf-8")
+
+    # Act / Assert
+    with pytest.raises(ValueError):
+        Settings(_env_file=str(settings_file))
+
+
 def test_rejects_non_positive_worker_concurrency():
     # Arrange / Act / Assert
     with pytest.raises(ValueError):

@@ -6,14 +6,15 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, PostgresDsn, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # リポジトリルート (backend/src/techradar/config.py から 3 階層上)
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -92,7 +93,13 @@ class Settings(BaseSettings):
     # ポートは既定値を変えられるため（`.env` の `FRONTEND_PORT`）、許可オリジンも
     # 環境変数で追随できるようにする。`allow_credentials=True` と併用するため
     # ワイルドカードは受け付けない（`main.create_app`）。
-    cors_allow_origins: list[str] = Field(default_factory=lambda: [_DEFAULT_FRONTEND_ORIGIN])
+    # `NoDecode` を付けて pydantic-settings の自動 JSON デコードを止める。付けないと
+    # 環境変数や設定ファイルから読んだ値が、下の `mode="before"` バリデータへ渡る前に
+    # JSON として解釈され、カンマ区切りで書いた時点で `SettingsError` になる。この
+    # デコードは失敗した瞬間に例外を投げるため、バリデータには到達しない（Issue #58）。
+    cors_allow_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [_DEFAULT_FRONTEND_ORIGIN]
+    )
     log_retention_days: int = Field(default=90, gt=0)
     # `recommendation_runs` の保持期間（Issue #28）。`GET /api/feed` は呼ばれる
     # たびに run を作りうるため、`operation_logs` と同じ発想で古い run を削除する。
@@ -132,14 +139,26 @@ class Settings(BaseSettings):
     @field_validator("cors_allow_origins", mode="before")
     @classmethod
     def _split_comma_separated_origins(cls, value: object) -> object:
-        """カンマ区切りの文字列をオリジンのリストとして解釈する。
+        """文字列で書かれたオリジンをリストとして解釈する。
 
         `list[str]` の設定を pydantic-settings に素直に渡すと JSON 形式
-        （`["http://..."]`）でしか書けず、`.env` に書きづらい。区切り文字を
+        （`["http://..."]`）でしか書けず、設定ファイルに書きづらい。区切り文字を
         許すことで `A,B` の形式でも設定できるようにする。空要素は除去する。
+
+        JSON 形式も引き続き受け付ける。フィールドに `NoDecode` を付けて自動
+        デコードを止めた以上、ここで解釈しないと従来 JSON で書いていた設定が
+        1 要素の文字列として扱われてしまうため。
         """
         if not isinstance(value, str):
             return value
+        stripped = value.strip()
+        if stripped.startswith("["):
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                # 壊れた JSON をカンマ区切りとして読み直しても意味のある結果に
+                # ならないが、`_validate_origins` が表記を検証して弾く。
+                pass
         return [origin.strip() for origin in value.split(",") if origin.strip()]
 
     @field_validator("cors_allow_origins", mode="after")
