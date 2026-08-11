@@ -45,6 +45,15 @@ ENTRYPOINT_ARGS="$*"
 # shellcheck source=scripts/ai-harness/lib/postgres.sh
 source "$REPO_ROOT/scripts/ai-harness/lib/postgres.sh"
 
+# 前回の起動を止めるための関数群。
+# shellcheck source=scripts/ai-harness/lib/app_processes.sh
+source "$REPO_ROOT/scripts/ai-harness/lib/app_processes.sh"
+
+# 起動したプロセスグループの ID を残す場所。git 管理外（.gitignore 済み）。
+# 次回の起動で「前回の残り」を特定するために使う。
+BACKEND_PID_FILE="$REPO_ROOT/.run/backend.pid"
+FRONTEND_PID_FILE="$REPO_ROOT/.run/frontend.pid"
+
 if [[ "${1:-}" == "--stop" ]]; then
   log "PostgreSQL を停止します"
   assert_docker_usable "PostgreSQLの停止"
@@ -88,23 +97,51 @@ if [[ ! -d frontend/node_modules ]]; then
   (cd frontend && npm ci) || fail "frontend: npm ci失敗"
 fi
 
+# 前回の起動が残っていれば先に止める。同じポートを掴んだままの相手が居ると、
+# uvicorn / next dev はエラーで落ちるか、こちらが起動したつもりで前回のプロセスを
+# 見続けることになる。判定は PID ファイルとコマンドラインの二重で行う。
+stop_previous_instance "$BACKEND_PID_FILE" "backend" \
+  "uvicorn techradar.main:app" "--port $BACKEND_PORT"
+stop_previous_instance "$FRONTEND_PID_FILE" "frontend" \
+  "next dev" "--port $FRONTEND_PORT"
+
 pids=()
 cleanup() {
   log "停止します (PostgreSQL は起動したままです。完全に停止するには ./run.sh --stop)"
   for pid in "${pids[@]:-}"; do
-    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    [[ -n "$pid" ]] || continue
+    # 起動時に独立したプロセスグループを作っているため、グループごと止める。
+    # プロセス単体へ送ると、uvicorn の reload 用の子や next-server が残る。
+    stop_process_group "$pid" || true
   done
+  # 自分が書いた PID ファイルだけを消す。新しい実行に止められた場合、この後片付けは
+  # 相手が自分の値を書き終えた後に走るため、無条件に消すと相手の分まで消えてしまう。
+  remove_pid_file_if_matches "$BACKEND_PID_FILE" "${backend_pgid:-}"
+  remove_pid_file_if_matches "$FRONTEND_PID_FILE" "${frontend_pgid:-}"
   wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
+# 起動コマンドへは環境変数として渡す。値を二重引用符で組み立てて渡すと、引用符を含む
+# 設定値でコマンドの構造が変わってしまう。
+export BIND_HOST BACKEND_PORT FRONTEND_PORT
+
 log "backend を起動します (http://${BIND_HOST}:${BACKEND_PORT})"
-(cd backend && uv run uvicorn techradar.main:app --reload --host "$BIND_HOST" --port "$BACKEND_PORT") &
-pids+=($!)
+# setsid で独立したプロセスグループにする。子孫までまとめて止められるようにするため。
+# Ctrl-C の SIGINT は届かなくなるが、停止は上の cleanup が担う。
+# 変数はここではなく起動先のシェルで展開する（上の export 参照）。
+# shellcheck disable=SC2016
+setsid bash -c 'cd backend && exec uv run uvicorn techradar.main:app --reload --host "$BIND_HOST" --port "$BACKEND_PORT"' &
+backend_pgid="$(process_group_of $!)"
+pids+=("$backend_pgid")
+write_pid_file "$BACKEND_PID_FILE" "$backend_pgid"
 
 log "frontend を起動します (http://${BIND_HOST}:${FRONTEND_PORT})"
-(cd frontend && npm run dev -- --hostname "$BIND_HOST" --port "$FRONTEND_PORT") &
-pids+=($!)
+# shellcheck disable=SC2016
+setsid bash -c 'cd frontend && exec npm run dev -- --hostname "$BIND_HOST" --port "$FRONTEND_PORT"' &
+frontend_pgid="$(process_group_of $!)"
+pids+=("$frontend_pgid")
+write_pid_file "$FRONTEND_PID_FILE" "$frontend_pgid"
 
 log "起動完了。Ctrl-C で停止します"
 wait

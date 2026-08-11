@@ -41,6 +41,9 @@ models/
 # Docker のボリューム
 infra/pgdata/
 
+# run.sh が起動したプロセスグループの ID (ローカル実行時のみ)
+.run/
+
 # エディタ・OS
 .DS_Store
 .idea/
