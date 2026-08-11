@@ -35,6 +35,7 @@ ensure_postgres() {
   local host="${POSTGRES_HOST:-localhost}" port="${POSTGRES_PORT:-5432}"
 
   if postgres_looks_available "$host" "$port"; then
+    warn_if_published_host_differs
     return 0
   fi
 
@@ -54,6 +55,22 @@ ensure_postgres() {
     sleep 1
   done
   log "PostgreSQL 起動完了"
+}
+
+# 起動中のコンテナが、いま設定している範囲へ公開されているかを見る（Issue #65）。
+#
+# `docker compose` の ports を変えても、既に動いているコンテナは作り直すまで古い範囲の
+# ままになる。閉じたつもりが LAN へ開いたまま、という状態に気付けないため警告を出す。
+# 判定できないときは黙って返す。ここは起動の可否とは無関係で、docker へ触れないシェル
+# や別の手段で立てた PostgreSQL を相手にしていることもある。
+warn_if_published_host_differs() {
+  local expected="${BIND_HOST:-127.0.0.1}" published
+  docker_is_reachable || return 0
+  published="$(docker compose -f "$COMPOSE_FILE" ps --format '{{.Publishers}}' postgres 2>/dev/null)" || return 0
+  [[ -n "$published" ]] || return 0
+  [[ "$published" == *"$expected"* ]] && return 0
+  log "警告: 起動中の PostgreSQL の公開先が設定 (${expected}) と違います — ${published}"
+  log "  反映するには ./run.sh --stop でコンテナを作り直してください（Issue #65）"
 }
 
 # 起動済みかどうかを判定する。
