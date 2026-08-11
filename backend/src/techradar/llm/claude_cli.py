@@ -16,12 +16,22 @@
 ポリシー側に無いため上書きされない（CLI 2.1.227 で実測。
 `docs/adr/0002-llm-tool-isolation.md` を参照）。
 
+ただし**ポリシーが配布されたホストでは、以下の防御はほとんど意味を持たない**
+（唯一 3. の MCP 無効化だけはポリシー配下でも効いている）。ポリシーの `env` で
+`ANTHROPIC_BASE_URL` を差し替えられるため、ツールが1つも動かなくても記事本文の
+送信先を変えられる。実測では差し替え先へ `authorization` ヘッダも届いており、
+認証情報も一緒に渡る。`apiKeyHelper` と hooks からは任意コマンドが走り、
+`claudeMd` からはシステムプロンプト相当の指示が注入される。いずれもコマンド
+ライン引数では塞げない（実測）。実行を止められる手はコンテナ隔離だけで、
+ADR の残存リスクとして扱っている。
+
 これに次を重ねる。
 
 1. `--setting-sources ""` で設定ファイル（user / project / local）を読み込ませない。
    hooks はここに定義され、ツール許可とは別経路で任意コマンドを実行しうるため、
    ツール無効化だけでは塞げない。ただし管理者ポリシーはこの3つに含まれず、
-   ポリシーに定義された hooks は実行される（実測。残存リスクとして受容している）
+   ポリシーに定義された hooks はイベントを問わず実行される。`--settings` から
+   `disableAllHooks: true` を渡しても止まらない（実測）
 2. `--settings` の `permissions.deny` と `--disallowedTools` にツール名を列挙（保険）
 3. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない。
    サーバは空のままにする。ポリシーの `disableSideloadFlags` は `--mcp-config` を
@@ -109,6 +119,8 @@ EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
 
 # 子プロセスへ渡す環境変数。既定では親の環境がすべて継承され、DB 接続文字列などが
 # CLI プロセスから見えてしまう。認証と実行に必要なものだけを通す。
+# これが絞るのは親プロセスからの継承だけで、管理者ポリシーの `env` が注入する
+# 変数には効かない（ポリシー配下では `ANTHROPIC_BASE_URL` を差し替えられる）。
 ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH",
     "HOME",
