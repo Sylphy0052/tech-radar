@@ -22,7 +22,9 @@
 : "${PG_PORT_PROBE_TIMEOUT_SECONDS:=3}"
 
 # PostgreSQL を使えるようにする。既に起動していれば何もしない。
-# CI では services で提供されるため skip する。
+# `CI=true` のときは何もせず返す。CI では services が PostgreSQL を提供するため。
+# この分岐は呼び出し元によらず効くので、ローカル用のスクリプトから呼ぶ場合も
+# `CI` が紛れ込んでいないか気に留めること。
 ensure_postgres() {
   [[ "${CI:-}" == "true" ]] && { log "CI環境のためPostgreSQL起動をskip"; return 0; }
   [[ -f "$COMPOSE_FILE" ]] || return 0

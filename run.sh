@@ -6,6 +6,10 @@
 #
 # 常駐するのは PostgreSQL コンテナのみ。backend / frontend は Ctrl-C で終了する。
 # ジョブワーカーは backend プロセスに同居するため、別プロセスの起動は不要。
+#
+# PostgreSQL は既に応答していれば docker に触れずそのまま使う（Issue #55）。
+# infra/docker-compose.yml の定義やイメージを変えたときは、`./run.sh --stop` で
+# 一度落としてから起動し直さないと反映されない。
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
