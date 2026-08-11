@@ -32,13 +32,18 @@ from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import make_url
 
 from techradar.config import get_settings
-from tests.db_process_isolation import build_database_name
+from tests.db_process_isolation import build_database_name, worktree_hash
+from tests.fake_worktree_roots import DEAD_PID, fake_worktree_path
 
-# 実物の worktree パスとは絶対に一致しない、このテスト専用のダミー repo root。
-# 本番の掃除ロジックが使う worktree ハッシュとは別の名前空間になるため、
-# 実行中に他プロセスの掃除へ拾われることがない。
-_FAKE_LIVE_REPO_ROOT = Path("/nonexistent/techradar-test-fixture-issue-51-live")
-_FAKE_ORPHANED_REPO_ROOT = Path("/nonexistent/techradar-test-fixture-issue-51-orphaned")
+# このテスト専用のダミー repo root。本番の掃除ロジックが使う worktree ハッシュとは
+# 別の名前空間になるため、実行中に他プロセスの掃除へ拾われることがない。実 worktree と
+# 実プロセスから派生させる理由は `tests/fake_worktree_roots` を参照（Issue #59）。
+_FAKE_LIVE_REPO_ROOT = fake_worktree_path(
+    cleanup_module.BACKEND_ROOT.parent, "issue-51-live", os.getpid()
+)
+_FAKE_ORPHANED_REPO_ROOT = fake_worktree_path(
+    cleanup_module.BACKEND_ROOT.parent, "issue-51-orphaned", os.getpid()
+)
 
 
 class _FakeCompletedProcess:
@@ -268,7 +273,9 @@ class TestBuildPlan:
 
         live_db = build_database_name(live_backend_root, os.getpid())
         candidate_no_conn_db = build_database_name(orphaned_backend_root, os.getpid())
-        candidate_with_conn_db = build_database_name(orphaned_backend_root, os.getpid() + 1)
+        # 自分の PID を足した値にすると、同時に走る別 pytest プロセスの実 PID と
+        # 一致して同名の DB を取り合う。実在しえない PID を使う（Issue #59）。
+        candidate_with_conn_db = build_database_name(orphaned_backend_root, DEAD_PID)
         names = [live_db, candidate_no_conn_db, candidate_with_conn_db]
 
         with admin_engine.connect() as connection:
@@ -385,3 +392,28 @@ class TestApplyPlan:
                 text("SELECT 1 FROM pg_database WHERE datname = :name"), {"name": db_name}
             )
             assert result.first() is not None
+
+
+class TestFakeRepoRoots:
+    """このテスト専用のダミー repo root が名前空間を占有しないこと（Issue #59）。
+
+    `fake_worktree_path` 自体の性質は `tests/test_fake_worktree_roots` で検証する。
+    ここでは、このファイルのダミーがそれを実際に通っているかだけを見る。
+    """
+
+    def test_module_level_roots_vary_by_worktree_and_process(self) -> None:
+        # Arrange / Act / Assert — 固定値ではなく実行中の worktree とプロセスから決まること
+        real_repo_root = cleanup_module.BACKEND_ROOT.parent
+        for root in (_FAKE_LIVE_REPO_ROOT, _FAKE_ORPHANED_REPO_ROOT):
+            assert root.parent == real_repo_root.parent
+            assert real_repo_root.name in root.name
+            assert str(os.getpid()) in root.name
+
+    def test_does_not_share_a_hash_with_the_real_worktree(self) -> None:
+        # Arrange / Act / Assert — 実 worktree のテスト用 DB を巻き込まないこと
+        real_hash = worktree_hash(cleanup_module.BACKEND_ROOT)
+        assert worktree_hash(_FAKE_LIVE_REPO_ROOT / "backend") != real_hash
+        assert worktree_hash(_FAKE_ORPHANED_REPO_ROOT / "backend") != real_hash
+        assert worktree_hash(_FAKE_LIVE_REPO_ROOT / "backend") != worktree_hash(
+            _FAKE_ORPHANED_REPO_ROOT / "backend"
+        )

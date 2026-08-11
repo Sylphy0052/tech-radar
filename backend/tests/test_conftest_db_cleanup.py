@@ -16,6 +16,10 @@
 
 という2点を両立する。作った DB はテスト自身が必ず後始末する（`cleanup_database_names`
 フィクスチャが `finally` 相当のティアダウンで DROP する。失敗時も残さない）。
+
+ダミーのパスは固定値ではなく、実行中の worktree と pytest プロセスから派生させる
+（Issue #59）。固定にするとどこから実行しても同じ DB 名になり、複数の worktree や
+プロセスで同時に pytest を回したときに `DuplicateDatabase` で落ちる。
 """
 
 from __future__ import annotations
@@ -24,24 +28,18 @@ import os
 import subprocess
 import time
 from collections.abc import Iterator
-from pathlib import Path
 
 import pytest
 from sqlalchemy import Connection, Engine, create_engine, text
 
 from tests import conftest as conftest_module
 from tests.db_process_isolation import DATABASE_NAME_PREFIX, build_database_name, worktree_hash
+from tests.fake_worktree_roots import ANOTHER_DEAD_PID, DEAD_PID, fake_worktree_path
 
-# 実物の worktree パス（`/home/.../techradar` 配下）とは絶対に一致しない、
-# このテスト専用のダミー backend_root。本番の掃除ロジックが使う worktree ハッシュとは
-# 別の名前空間になるため、実行中に他プロセスの掃除へ拾われることがない。
-_FAKE_BACKEND_ROOT = Path("/nonexistent/techradar-test-fixture-issue-33-self-review-a")
-_OTHER_FAKE_BACKEND_ROOT = Path("/nonexistent/techradar-test-fixture-issue-33-self-review-b")
-
-# OS 上に実在しえない極端に大きい PID（32bit 符号付き pid_t の上限付近）。
-# 実プロセスをフォーク/待機させずに「確実に死んでいる PID」を得るために使う。
-_DEAD_PID = 2147483647
-_ANOTHER_DEAD_PID = 2147483646
+# このテスト専用のダミー backend_root。実 worktree・実プロセスから派生させるため、
+# 別 worktree や別プロセスの pytest が同時に走っても DB 名を取り合わない。
+_FAKE_BACKEND_ROOT = fake_worktree_path(conftest_module.BACKEND_ROOT, "a", os.getpid())
+_OTHER_FAKE_BACKEND_ROOT = fake_worktree_path(conftest_module.BACKEND_ROOT, "b", os.getpid())
 
 
 def _database_exists(connection: Connection, database_name: str) -> bool:
@@ -174,10 +172,10 @@ class TestCleanupOrphanedTestDatabases:
         try:
             alive_pid = alive_process.pid
 
-            dead_pid_name = build_database_name(_FAKE_BACKEND_ROOT, _DEAD_PID)
+            dead_pid_name = build_database_name(_FAKE_BACKEND_ROOT, DEAD_PID)
             alive_pid_name = build_database_name(_FAKE_BACKEND_ROOT, alive_pid)
             own_pid_name = build_database_name(_FAKE_BACKEND_ROOT, own_pid)
-            other_worktree_name = build_database_name(_OTHER_FAKE_BACKEND_ROOT, _DEAD_PID)
+            other_worktree_name = build_database_name(_OTHER_FAKE_BACKEND_ROOT, DEAD_PID)
             names = [dead_pid_name, alive_pid_name, own_pid_name, other_worktree_name]
 
             with admin_engine.connect() as connection:
@@ -206,7 +204,7 @@ class TestCleanupOrphanedTestDatabases:
     ) -> None:
         # Arrange
         monkeypatch.setattr(conftest_module, "BACKEND_ROOT", _FAKE_BACKEND_ROOT)
-        name = build_database_name(_FAKE_BACKEND_ROOT, _ANOTHER_DEAD_PID)
+        name = build_database_name(_FAKE_BACKEND_ROOT, ANOTHER_DEAD_PID)
         with admin_engine.connect() as connection:
             connection.execute(text(f'CREATE DATABASE "{name}"'))
         cleanup_database_names.append(name)
@@ -281,3 +279,25 @@ class TestCleanupLegacyTestDatabases:
         finally:
             target_connection.close()
             target_engine.dispose()
+
+
+class TestFakeBackendRoots:
+    """このテスト専用のダミー backend_root が名前空間を占有しないこと（Issue #59）。
+
+    `fake_worktree_path` 自体の性質は `tests/test_fake_worktree_roots` で検証する。
+    ここでは、このファイルのダミーがそれを実際に通っているかだけを見る。
+    """
+
+    def test_module_level_roots_vary_by_worktree_and_process(self) -> None:
+        # Arrange / Act / Assert — 固定値ではなく実行中の worktree とプロセスから決まること
+        for root in (_FAKE_BACKEND_ROOT, _OTHER_FAKE_BACKEND_ROOT):
+            assert root.parent == conftest_module.BACKEND_ROOT.parent
+            assert conftest_module.BACKEND_ROOT.name in root.name
+            assert str(os.getpid()) in root.name
+
+    def test_does_not_share_a_hash_with_the_real_worktree(self) -> None:
+        # Arrange / Act / Assert — 実 worktree のテスト用 DB を巻き込まないこと
+        real_hash = worktree_hash(conftest_module.BACKEND_ROOT)
+        assert worktree_hash(_FAKE_BACKEND_ROOT) != real_hash
+        assert worktree_hash(_OTHER_FAKE_BACKEND_ROOT) != real_hash
+        assert worktree_hash(_FAKE_BACKEND_ROOT) != worktree_hash(_OTHER_FAKE_BACKEND_ROOT)
