@@ -35,32 +35,12 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from tests import conftest as conftest_module
 from tests.db_process_isolation import DATABASE_NAME_PREFIX, build_database_name, worktree_hash
-
-
-def _fake_backend_root(base: Path, label: str, pid: int) -> Path:
-    """このテスト専用のダミー backend_root を組み立てる（Issue #59）。
-
-    実 backend_root の兄弟にあたる、実在しないパスを返す。ハッシュは実 worktree の
-    ものとは別値になるため、掃除ロジックが見る「自分のハッシュ」を巻き込まない。
-
-    派生元に実 backend_root と実行中プロセスの PID を使うのは、ダミー DB 名が
-    worktree とプロセスをまたいで衝突しないようにするため。固定パスにすると
-    どの worktree のどのプロセスから実行しても同じ DB 名になり、複数の pytest が
-    同時に走ったときに `DuplicateDatabase` で落ちる。ダミー PID（`_DEAD_PID`）は
-    固定のままでよい。名前空間はハッシュ側で分かれる。
-    """
-    return base.parent / f"{base.name}-test-fixture-{label}-{pid}"
-
+from tests.fake_worktree_roots import ANOTHER_DEAD_PID, DEAD_PID, fake_worktree_path
 
 # このテスト専用のダミー backend_root。実 worktree・実プロセスから派生させるため、
 # 別 worktree や別プロセスの pytest が同時に走っても DB 名を取り合わない。
-_FAKE_BACKEND_ROOT = _fake_backend_root(conftest_module.BACKEND_ROOT, "a", os.getpid())
-_OTHER_FAKE_BACKEND_ROOT = _fake_backend_root(conftest_module.BACKEND_ROOT, "b", os.getpid())
-
-# OS 上に実在しえない極端に大きい PID（32bit 符号付き pid_t の上限付近）。
-# 実プロセスをフォーク/待機させずに「確実に死んでいる PID」を得るために使う。
-_DEAD_PID = 2147483647
-_ANOTHER_DEAD_PID = 2147483646
+_FAKE_BACKEND_ROOT = fake_worktree_path(conftest_module.BACKEND_ROOT, "a", os.getpid())
+_OTHER_FAKE_BACKEND_ROOT = fake_worktree_path(conftest_module.BACKEND_ROOT, "b", os.getpid())
 
 
 def _database_exists(connection: Connection, database_name: str) -> bool:
@@ -193,10 +173,10 @@ class TestCleanupOrphanedTestDatabases:
         try:
             alive_pid = alive_process.pid
 
-            dead_pid_name = build_database_name(_FAKE_BACKEND_ROOT, _DEAD_PID)
+            dead_pid_name = build_database_name(_FAKE_BACKEND_ROOT, DEAD_PID)
             alive_pid_name = build_database_name(_FAKE_BACKEND_ROOT, alive_pid)
             own_pid_name = build_database_name(_FAKE_BACKEND_ROOT, own_pid)
-            other_worktree_name = build_database_name(_OTHER_FAKE_BACKEND_ROOT, _DEAD_PID)
+            other_worktree_name = build_database_name(_OTHER_FAKE_BACKEND_ROOT, DEAD_PID)
             names = [dead_pid_name, alive_pid_name, own_pid_name, other_worktree_name]
 
             with admin_engine.connect() as connection:
@@ -225,7 +205,7 @@ class TestCleanupOrphanedTestDatabases:
     ) -> None:
         # Arrange
         monkeypatch.setattr(conftest_module, "BACKEND_ROOT", _FAKE_BACKEND_ROOT)
-        name = build_database_name(_FAKE_BACKEND_ROOT, _ANOTHER_DEAD_PID)
+        name = build_database_name(_FAKE_BACKEND_ROOT, ANOTHER_DEAD_PID)
         with admin_engine.connect() as connection:
             connection.execute(text(f'CREATE DATABASE "{name}"'))
         cleanup_database_names.append(name)
@@ -311,15 +291,15 @@ class TestFakeBackendRoots:
         other_base = Path("/elsewhere/techradar/backend")
 
         # Act / Assert — worktree・プロセス・ラベルのどれが違っても別パスになること
-        assert _fake_backend_root(base, "a", 100) != _fake_backend_root(other_base, "a", 100)
-        assert _fake_backend_root(base, "a", 100) != _fake_backend_root(base, "a", 200)
-        assert _fake_backend_root(base, "a", 100) != _fake_backend_root(base, "b", 100)
+        assert fake_worktree_path(base, "a", 100) != fake_worktree_path(other_base, "a", 100)
+        assert fake_worktree_path(base, "a", 100) != fake_worktree_path(base, "a", 200)
+        assert fake_worktree_path(base, "a", 100) != fake_worktree_path(base, "b", 100)
 
     def test_module_level_roots_belong_to_this_worktree_and_process(self) -> None:
         # Arrange / Act / Assert — 固定値ではなく実行中の worktree とプロセスから決まること
         own_pid = os.getpid()
-        assert _FAKE_BACKEND_ROOT == _fake_backend_root(conftest_module.BACKEND_ROOT, "a", own_pid)
-        assert _OTHER_FAKE_BACKEND_ROOT == _fake_backend_root(
+        assert _FAKE_BACKEND_ROOT == fake_worktree_path(conftest_module.BACKEND_ROOT, "a", own_pid)
+        assert _OTHER_FAKE_BACKEND_ROOT == fake_worktree_path(
             conftest_module.BACKEND_ROOT, "b", own_pid
         )
 
