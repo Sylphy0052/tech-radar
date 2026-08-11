@@ -395,16 +395,19 @@ class TestApplyPlan:
 
 
 class TestFakeRepoRoots:
-    """このテスト専用のダミー repo root が名前空間を占有しないこと（Issue #59）。"""
+    """このテスト専用のダミー repo root が名前空間を占有しないこと（Issue #59）。
 
-    def test_module_level_roots_belong_to_this_worktree_and_process(self) -> None:
+    `fake_worktree_path` 自体の性質は `tests/test_fake_worktree_roots` で検証する。
+    ここでは、このファイルのダミーがそれを実際に通っているかだけを見る。
+    """
+
+    def test_module_level_roots_vary_by_worktree_and_process(self) -> None:
         # Arrange / Act / Assert — 固定値ではなく実行中の worktree とプロセスから決まること
-        own_pid = os.getpid()
         real_repo_root = cleanup_module.BACKEND_ROOT.parent
-        assert _FAKE_LIVE_REPO_ROOT == fake_worktree_path(real_repo_root, "issue-51-live", own_pid)
-        assert _FAKE_ORPHANED_REPO_ROOT == fake_worktree_path(
-            real_repo_root, "issue-51-orphaned", own_pid
-        )
+        for root in (_FAKE_LIVE_REPO_ROOT, _FAKE_ORPHANED_REPO_ROOT):
+            assert root.parent == real_repo_root.parent
+            assert real_repo_root.name in root.name
+            assert str(os.getpid()) in root.name
 
     def test_does_not_share_a_hash_with_the_real_worktree(self) -> None:
         # Arrange / Act / Assert — 実 worktree のテスト用 DB を巻き込まないこと

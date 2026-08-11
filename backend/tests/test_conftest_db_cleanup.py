@@ -28,7 +28,6 @@ import os
 import subprocess
 import time
 from collections.abc import Iterator
-from pathlib import Path
 
 import pytest
 from sqlalchemy import Connection, Engine, create_engine, text
@@ -283,25 +282,18 @@ class TestCleanupLegacyTestDatabases:
 
 
 class TestFakeBackendRoots:
-    """このテスト専用のダミー backend_root が名前空間を占有しないこと（Issue #59）。"""
+    """このテスト専用のダミー backend_root が名前空間を占有しないこと（Issue #59）。
 
-    def test_derives_a_distinct_path_per_worktree_process_and_label(self) -> None:
-        # Arrange
-        base = Path("/somewhere/techradar/backend")
-        other_base = Path("/elsewhere/techradar/backend")
+    `fake_worktree_path` 自体の性質は `tests/test_fake_worktree_roots` で検証する。
+    ここでは、このファイルのダミーがそれを実際に通っているかだけを見る。
+    """
 
-        # Act / Assert — worktree・プロセス・ラベルのどれが違っても別パスになること
-        assert fake_worktree_path(base, "a", 100) != fake_worktree_path(other_base, "a", 100)
-        assert fake_worktree_path(base, "a", 100) != fake_worktree_path(base, "a", 200)
-        assert fake_worktree_path(base, "a", 100) != fake_worktree_path(base, "b", 100)
-
-    def test_module_level_roots_belong_to_this_worktree_and_process(self) -> None:
+    def test_module_level_roots_vary_by_worktree_and_process(self) -> None:
         # Arrange / Act / Assert — 固定値ではなく実行中の worktree とプロセスから決まること
-        own_pid = os.getpid()
-        assert _FAKE_BACKEND_ROOT == fake_worktree_path(conftest_module.BACKEND_ROOT, "a", own_pid)
-        assert _OTHER_FAKE_BACKEND_ROOT == fake_worktree_path(
-            conftest_module.BACKEND_ROOT, "b", own_pid
-        )
+        for root in (_FAKE_BACKEND_ROOT, _OTHER_FAKE_BACKEND_ROOT):
+            assert root.parent == conftest_module.BACKEND_ROOT.parent
+            assert conftest_module.BACKEND_ROOT.name in root.name
+            assert str(os.getpid()) in root.name
 
     def test_does_not_share_a_hash_with_the_real_worktree(self) -> None:
         # Arrange / Act / Assert — 実 worktree のテスト用 DB を巻き込まないこと

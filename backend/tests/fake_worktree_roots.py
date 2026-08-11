@@ -8,6 +8,8 @@ worktree のパスから決まるハッシュで「自分の DB かどうか」�
 どの worktree のどのプロセスから実行しても同じ DB 名になり、複数の pytest が同時に
 走ったときに `DuplicateDatabase` で落ちる（Issue #23 の worktree 単位分離と
 Issue #33 のプロセス単位分離が、このダミーにだけ効いていなかった）。
+
+このモジュール自体のテストは `tests/test_fake_worktree_roots.py` に置く。
 """
 
 from __future__ import annotations
