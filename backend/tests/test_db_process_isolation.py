@@ -80,6 +80,9 @@ class TestParseDatabaseName:
             "postgres",  # 管理用 DB
             "techradar_test_deadbeef_" + "9" * (PID_DIGITS_MAX + 1),  # PID 桁数が上限超過
             "techradar_test_deadbeef_123\n",  # 末尾に改行（`$`ではなく`\Z`終端であることの確認）
+            "techradar_test_deadbeef_0",  # PID部分が"0"単体（Issue #63 self review）
+            "techradar_test_deadbeef_007",  # PID部分が先頭ゼロ（Issue #63 self review）
+            "techradar_test_deadbeef_00",  # PID部分が全てゼロ・複数桁
         ],
     )
     def test_returns_none_for_unrecognized_formats(self, database_name: str):

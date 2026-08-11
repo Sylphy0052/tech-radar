@@ -24,6 +24,7 @@ from tests.db_process_isolation import (
     build_database_name,
     find_orphaned_database_names,
     find_own_worktree_legacy_database_names,
+    pid_is_alive,
 )
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -159,29 +160,6 @@ def _drop_own_test_database() -> None:
         admin_engine.dispose()
 
 
-def _pid_is_alive(pid: int) -> bool:
-    """指定 PID のプロセスが生存しているかを判定する。
-
-    シグナル番号 0 はプロセスを実際には終了させず、存在確認だけを行う
-    （`kill(2)` の慣用的な使い方）。`ProcessLookupError`（プロセスが存在しない）
-    以外は、原因を問わずすべて「生存している」側に倒す（安全側に倒す）。
-
-    権限不足で確認できない場合（別ユーザーのプロセス等）の `PermissionError` は
-    `OSError` のサブクラスだが、`os.kill()` には巨大な PID（`sys.maxsize` 超）を
-    渡すと `OverflowError` が飛ぶことがあり、これは `OSError` のサブクラスでは
-    ない（Issue #33 self review）。DB 名の PID 部分の桁数には上限を設けている
-    （`db_process_isolation.PID_DIGITS_MAX`）ため通常はここまで巨大な値は来ない
-    はずだが、想定外の呼び出し経路に備えて `Exception` 全体を捕捉する。
-    """
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except Exception:
-        return True
-    return True
-
-
 def _existing_test_database_names(connection: Connection) -> list[str]:
     """このリポジトリのテスト用 DB 名を列挙する（他 worktree ・他プロセス分も含む）。"""
     result = connection.execute(
@@ -207,7 +185,7 @@ def _cleanup_orphaned_test_databases() -> None:
                 existing_names,
                 backend_root=BACKEND_ROOT,
                 own_pid=os.getpid(),
-                is_pid_alive=_pid_is_alive,
+                is_pid_alive=pid_is_alive,
             )
             for name in orphans:
                 if _has_active_connections(connection, name):
