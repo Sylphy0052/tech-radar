@@ -11,20 +11,21 @@
 
 主防御は `--tools ""` で、CLI のヘルプに「Use "" to disable all tools」と
 明記されたフラグ。組み込みツールを列挙ではなく構造的に空にするため、
-新しいツールが増えても漏れない。
+新しいツールが増えても漏れない。管理者ポリシー（admin-managed policy）は
+コマンドライン引数より上位のスコープだが、このフラグに相当する設定キーが
+ポリシー側に無いため上書きされない（CLI 2.1.227 で実測。
+`docs/adr/0002-llm-tool-isolation.md` を参照）。
 
 これに次を重ねる。
 
 1. `--setting-sources ""` で設定ファイル（user / project / local）を読み込ませない。
    hooks はここに定義され、ツール許可とは別経路で任意コマンドを実行しうるため、
-   ツール無効化だけでは塞げない。ただし管理者ポリシー（admin-managed policy）は
-   この3つに含まれず、ポリシーに定義された hooks は実行される（実測）。
-   主防御の `--tools ""` はポリシーからは上書きされない
-   （`docs/adr/0002-llm-tool-isolation.md` の残存リスクを参照）
+   ツール無効化だけでは塞げない。ただし管理者ポリシーはこの3つに含まれず、
+   ポリシーに定義された hooks は実行される（実測。残存リスクとして受容している）
 2. `--settings` の `permissions.deny` と `--disallowedTools` にツール名を列挙（保険）
 3. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない。
    サーバは空のままにする。ポリシーの `disableSideloadFlags` は `--mcp-config` を
-   拒否するが、空の指定だけは受理される（1つでも足すと起動できなくなる）
+   拒否するが、空の指定だけは受理される（`command` 型のサーバを足すと起動できなくなる）
 4. `--disable-slash-commands` で Skills（`/skill-name`）を無効化する。Skills は
    ツール無効化の管轄外にある独立した実行経路で、`--tools ""` でも `--bare` でも残る
 5. 環境変数を許可リストで絞り、DB 接続文字列などを子プロセスへ渡さない
@@ -102,7 +103,8 @@ DENIED_TOOLS: tuple[str, ...] = (
 
 # MCP サーバーを 1 つも読み込ませない設定。空のままにしておくこと。
 # 管理者ポリシーの `disableSideloadFlags` は `--mcp-config` を起動時に拒否するが、
-# サーバを含まない指定は受理される。1 つでも足すとポリシー配下のホストで起動できない。
+# サーバを含まない指定は受理される。`command` 型のサーバを足すと、ポリシーが
+# 配布されたホストで起動できなくなる。
 EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
 
 # 子プロセスへ渡す環境変数。既定では親の環境がすべて継承され、DB 接続文字列などが
