@@ -2,21 +2,23 @@
 
 ## この文書の読み方
 
-実装は文書より先へ進む。どの節が現役の要件で、どの節が初期設計時の記録なのかを下の表で示す（Issue #57 で全節を実装と突き合わせた結果）。記録として残す節は実装へ追随させない。読むときは「現行の参照先」を見る。
+実装は文書より先へ進む。どの節が現役の要件で、どの節が初期設計時の記録なのかを下の表で示す(Issue #57で全節を実装と突き合わせた結果)。記録として残す節は実装へ追随させない。読むときは「現行の参照先」を見る。
 
 | 節 | 位置づけ | 現行の参照先 |
 | --- | --- | --- |
 | §1 プロジェクト概要 〜 §17 重複排除 | 現役の要件 | — |
-| §18 推奨技術スタック | 現役の要件（候補の並記は初期設計時のもの） | [docs/adr/0001-technology-stack.md](docs/adr/0001-technology-stack.md) |
+| §18 推奨技術スタック | 現役の要件(候補の並記は初期設計時のもの) | [docs/adr/0001-technology-stack.md](docs/adr/0001-technology-stack.md) |
 | §19 データモデル案 | 初期設計時の記録 | [backend/src/techradar/db/models.py](backend/src/techradar/db/models.py) |
 | §20 API案 | 初期設計時の記録 | [backend/openapi.json](backend/openapi.json) |
-| §21 セキュリティ要件 | 現役の要件 | — |
-| §22 MVPスコープ | 初期設計時の記録 | GitLab の Roadmap Issue #17 |
-| §23 実装順序 | 初期設計時の記録 | GitLab の Roadmap Issue #17 |
+| §21 セキュリティ要件 | 現役の要件 | [backend/src/techradar/fetcher/](backend/src/techradar/fetcher/)、[backend/src/techradar/llm/](backend/src/techradar/llm/) |
+| §22 MVPスコープ | 「必須」は初期設計時の記録。**「MVPでは実装しない」は現役のスコープ境界** | GitLabのRoadmap Issue #17 |
+| §23 実装順序 | 初期設計時の記録 | GitLabのRoadmap Issue #17 |
 | §24 非機能要件 | 現役の要件 | — |
 | §25 Claude Codeへの実装方針 | 現役の要件 | [CLAUDE.md](CLAUDE.md) |
-| §26 完了条件 | 初期設計時の記録 | GitLab の Roadmap Issue #17、[docs/decisions.md](docs/decisions.md) |
+| §26 完了条件 | 初期設計時の記録 | GitLabのRoadmap Issue #17、[docs/decisions.md](docs/decisions.md) |
 | §27 初回実装時に決定する必要がある事項 | 初期設計時の記録 | [docs/decisions.md](docs/decisions.md)、[docs/adr/](docs/adr/) |
+
+§22の「MVPでは実装しない」だけは他の記録節と扱いが違う。完了したかどうかの記録ではなく、今も守っているスコープの境界であるため、現役の要件として読む。
 
 ---
 
@@ -573,7 +575,7 @@ Discoverフィードでは以下を目安に候補を混ぜる。
 
 ## 18. 推奨技術スタック
 
-> 各項目に候補を並べているのは初期設計時のもの。どれを採ったかは [docs/adr/0001-technology-stack.md](docs/adr/0001-technology-stack.md) が決めており、実装もその決定に従っている。ジョブ基盤に Redis / Celery を使わず PostgreSQL のキューにした点、認証を MVP では置かない点は ADR を参照する。
+> 各項目に候補を並べているのは初期設計時のもの。どれを採ったかは [docs/adr/0001-technology-stack.md](docs/adr/0001-technology-stack.md) が決めており、実装もその決定に従っている。ジョブ基盤にRedis/Celeryを使わずPostgreSQLのキューにした点、認証をMVPでは置かない点はADRを参照する。認証を置かないことはセキュリティ要件(§21)の適用除外ではない。
 
 ### Frontend
 
@@ -863,9 +865,9 @@ IPv6 private network
 
 ## 22. MVPスコープ
 
-> 初期設計時の記録であり、実装へ追随させていない。ここに挙げた必須項目は GitLab の Roadmap Issue #17 の Phase 1〜5 としてすべて完了している。現在どこまで進んでいるかは Roadmap Issue を参照する。
+> 下の「必須」は初期設計時の記録であり、実装へ追随させていない。挙げた項目はGitLabのRoadmap Issue #17のPhase 1〜5としてすべて完了している。現在どこまで進んでいるかはRoadmap Issueを参照する。
 >
-> 「MVPでは実装しない」として挙げた項目（マルチユーザー・SNS連携・コメント・チーム共有・課金・モバイルアプリ・独自ML学習・高度な協調フィルタリング・複雑なマルチエージェント・ブラウザ通知・Slack連携・MCPサーバー）は、いずれも今も実装していない。
+> ただし「MVPでは実装しない」は記録ではなく、**今も守っているスコープの境界**として読む。挙げた項目はいずれも実装していない。ここへ手を出す判断をするときは、この節を更新してから着手する。
 
 ### 必須
 
@@ -905,7 +907,7 @@ IPv6 private network
 
 ## 23. 実装順序
 
-> 初期設計時の記録であり、実装へ追随させていない。実際の実装順序と進捗、Issue 番号と依存関係は GitLab の Roadmap Issue #17 が持つ。ここに書かれた Phase 1〜5 は完了している。
+> 初期設計時の記録であり、実装へ追随させていない。実際の実装順序と進捗、Issue番号と依存関係はGitLabのRoadmap Issue #17が持つ。ここに書かれたPhase 1〜5は完了している。
 
 ### Phase 1: 基盤
 
@@ -1024,7 +1026,7 @@ IPv6 private network
 
 ## 26. 完了条件
 
-> 初期設計時の記録であり、実装へ追随させていない。ここに挙げた条件はすべて満たしており、実装はその先へ進んでいる（情報源選好の学習・レート制限・保持期間など）。現行の到達点は GitLab の Roadmap Issue #17 と [docs/decisions.md](docs/decisions.md)、API の形は [backend/openapi.json](backend/openapi.json) を参照する。
+> 初期設計時の記録であり、実装へ追随させていない。ここに挙げた条件はすべて満たしており、実装はその先へ進んでいる(情報源選好の学習・レート制限・保持期間など)。現行の到達点はGitLabのRoadmap Issue #17と [docs/decisions.md](docs/decisions.md)、APIの形は [backend/openapi.json](backend/openapi.json) を参照する。
 
 MVP完了条件:
 
@@ -1048,7 +1050,7 @@ MVP完了条件:
 
 ## 27. 初回実装時に決定する必要がある事項
 
-> 初期設計時の記録であり、実装へ追随させていない。ここに挙げた項目はすべて決定済みで、決定内容は [docs/decisions.md](docs/decisions.md)（インフラ・外部サービス・フィード・データ保持・運用・認証の各表）と [docs/adr/](docs/adr/)（技術選定の根拠）にある。末尾の「推奨初期値」も decisions.md の記述のほうが具体的で、そちらが現行の決定である。
+> 初期設計時の記録であり、実装へ追随させていない。ここに挙げた項目はすべて決定済みで、決定内容は [docs/decisions.md](docs/decisions.md)(インフラ・外部サービス・フィード・データ保持・運用・認証の各表)と [docs/adr/](docs/adr/)(技術選定の根拠)にある。末尾の「推奨初期値」もdecisions.mdの記述のほうが具体的で、そちらが現行の決定である。
 
 以下は未確定のため、実装着手前または初期段階で決定する。
 
