@@ -370,6 +370,7 @@ class TestWarnIfPublishedHostDiffers:
         )
 
         assert result.returncode == 0, result.stderr
+        assert result.stdout == "ok"
         recorded = calls.read_text(encoding="utf-8")
         # 出力テンプレートに改行を含むため、記録は1回の呼び出しでも複数行になる。
         # 呼び出し回数は `ps` の出現数で数える（一時ディレクトリ名にテスト名が入るため、
