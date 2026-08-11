@@ -264,3 +264,24 @@ def db_session(migrated_engine: Engine) -> Iterator[Session]:
         if transaction.is_active:
             transaction.rollback()
         connection.close()
+
+
+@pytest.fixture(autouse=True)
+def isolate_managed_policy_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """管理者ポリシーの検査が実行ホストの状態に依存しないようにする（Issue #67）。
+
+    `ClaudeCliProvider` は CLI を起動する前に配置先を検査する。既定の配置先を
+    そのまま見ると、ポリシーが配布されたホスト（管理端末や CI イメージ）で
+    ポリシーと無関係なテストまで一斉に落ちる。空のディレクトリへ向け直して
+    ホスト非依存にする。
+
+    検査そのものを確かめるテストは、この後から同じ属性を差し替えるか
+    `directories` を明示的に渡すため影響を受けない。
+    """
+    empty = tmp_path_factory.mktemp("no-managed-policy")
+    monkeypatch.setattr(
+        "techradar.llm.managed_policy.managed_policy_directories",
+        lambda platform=None: (empty,),
+    )

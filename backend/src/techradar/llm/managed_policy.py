@@ -25,12 +25,15 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Iterable
 from pathlib import Path
 
 from techradar.config import Settings, get_settings
 from techradar.llm.errors import LLMManagedPolicyDetectedError
+
+logger = logging.getLogger(__name__)
 
 # ポリシー本体のファイル名と、systemd 風の drop-in ディレクトリ名。
 # drop-in だけを置いた状態でも hooks が実行されることを実測済み（Issue #66）。
@@ -57,19 +60,35 @@ def managed_policy_directories(platform: str | None = None) -> tuple[Path, ...]:
     return tuple(Path(directory) for directory in directories)
 
 
+def _dropin_files(dropin: Path) -> list[Path]:
+    """drop-in ディレクトリの中から CLI が読むファイルを拾う。
+
+    ディレクトリが無い場合は何も返さない。拡張子の判定は大文字小文字を無視する。
+    CLI が `*.JSON` を読むかは確認していないが、読まれる可能性がある側へ倒す。
+    """
+    try:
+        entries = sorted(dropin.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    return [entry for entry in entries if entry.suffix.lower() == ".json" and entry.is_file()]
+
+
 def find_managed_policy_files(directories: Iterable[Path]) -> list[Path]:
     """配置先にあるポリシーファイルを列挙する。
 
-    ディレクトリが存在しない場合は何も返さない。drop-in ディレクトリからは
-    CLI が読む `*.json` だけを拾う。
+    ディレクトリが存在しない場合は何も返さない。読めない場合は `OSError` を
+    そのまま送出する。「存在しない」と「判定できない」を同じ扱いにしないため
+    （呼び出し側が検知として扱う）。
+
+    Raises:
+        OSError: 配置先を読めなかった場合（権限不足など）。
     """
     found: list[Path] = []
     for directory in directories:
         policy_file = directory / POLICY_FILE_NAME
         if policy_file.is_file():
             found.append(policy_file)
-        dropin = directory / POLICY_DROPIN_DIR_NAME
-        found.extend(sorted(path for path in dropin.glob("*.json") if path.is_file()))
+        found.extend(_dropin_files(directory / POLICY_DROPIN_DIR_NAME))
     return found
 
 
@@ -80,19 +99,34 @@ def assert_no_managed_policy(
 ) -> None:
     """ポリシーが配布されていないことを確認する。
 
+    配置先を読めなかった場合も検知として扱う。存在しないことを確かめられて
+    いない以上、通してよい根拠が無いため。
+
     Args:
         settings: 省略時はアプリケーション設定を読む。
         directories: 検査対象。省略時はプラットフォームごとの既定。
 
     Raises:
-        LLMManagedPolicyDetectedError: ポリシーが見つかった場合。
+        LLMManagedPolicyDetectedError: ポリシーが見つかった、または検査できなかった場合。
     """
-    resolved = settings or get_settings()
+    resolved = settings if settings is not None else get_settings()
     if resolved.allow_managed_policy:
+        logger.warning(
+            "ALLOW_MANAGED_POLICY が有効なため管理者ポリシーの検査を省きます。"
+            "ポリシー配下では CLI 側の隔離がほとんど機能しません"
+        )
         return
 
     targets = directories if directories is not None else managed_policy_directories()
-    found = find_managed_policy_files(targets)
+    try:
+        found = find_managed_policy_files(targets)
+    except OSError as exc:
+        message = (
+            "管理者ポリシーの配置先を確認できませんでした。"
+            f"存在しないと確かめられないため実行しません: {exc}"
+        )
+        raise LLMManagedPolicyDetectedError(message) from exc
+
     if not found:
         return
 

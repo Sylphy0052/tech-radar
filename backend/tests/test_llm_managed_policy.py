@@ -7,24 +7,27 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from techradar.config import Settings
+from techradar.llm import managed_policy
 from techradar.llm.claude_cli import ClaudeCliProvider
 from techradar.llm.errors import LLMManagedPolicyDetectedError
 from techradar.llm.managed_policy import (
+    POLICY_DROPIN_DIR_NAME as DROPIN_DIR_NAME,
+)
+from techradar.llm.managed_policy import (
+    POLICY_FILE_NAME,
     assert_no_managed_policy,
     find_managed_policy_files,
     managed_policy_directories,
 )
 from techradar.llm.retry import NON_RETRYABLE
 from tests.test_llm_claude_cli import ArticleSummary
-
-POLICY_FILE_NAME = "managed-settings.json"
-DROPIN_DIR_NAME = "managed-settings.d"
 
 
 @pytest.fixture
@@ -200,3 +203,102 @@ class TestProviderIntegration:
                 untrusted_content="本文",
                 schema=ArticleSummary,
             )
+
+
+class TestUnreadableDirectory:
+    """存在しないことを確かめられない場合も止める。"""
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root では権限による読み取り拒否を再現できない",
+    )
+    def test_読めないディレクトリは検知として扱う(self, tmp_path: Path, settings: Settings) -> None:
+        # Arrange
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        (locked / POLICY_FILE_NAME).write_text("{}", encoding="utf-8")
+        locked.chmod(0o000)
+
+        # Act / Assert
+        try:
+            with pytest.raises(LLMManagedPolicyDetectedError) as exc_info:
+                assert_no_managed_policy(settings, directories=[locked])
+            assert "確認できませんでした" in str(exc_info.value)
+        finally:
+            locked.chmod(0o755)
+
+
+class TestMultipleMatches:
+    def test_本体とdropinの両方を報告する(self, tmp_path: Path, settings: Settings) -> None:
+        # Arrange
+        policy = tmp_path / POLICY_FILE_NAME
+        policy.write_text("{}", encoding="utf-8")
+        dropin = tmp_path / DROPIN_DIR_NAME
+        dropin.mkdir()
+        extra = dropin / "10-hooks.json"
+        extra.write_text("{}", encoding="utf-8")
+
+        # Act / Assert
+        with pytest.raises(LLMManagedPolicyDetectedError) as exc_info:
+            assert_no_managed_policy(settings, directories=[tmp_path])
+
+        message = str(exc_info.value)
+        assert str(policy) in message
+        assert str(extra) in message
+
+    def test_拡張子の大文字小文字を区別しない(self, tmp_path: Path) -> None:
+        """CLI が `*.JSON` を読むかは未確認。読まれる側へ倒す。"""
+        # Arrange
+        dropin = tmp_path / DROPIN_DIR_NAME
+        dropin.mkdir()
+        upper = dropin / "10-HOOKS.JSON"
+        upper.write_text("{}", encoding="utf-8")
+
+        # Act
+        found = find_managed_policy_files([tmp_path])
+
+        # Assert
+        assert found == [upper]
+
+
+class TestOptOutLogging:
+    def test_許可したときは警告を残す(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """黙って通さない。後から無効化されていたことを追えるようにする。
+
+        `caplog` ではなくロガーを直接差し替える。並列実行のワーカーでは
+        `caplog` がハンドラを拾えず、実装が正しくても落ちることがある。
+        """
+        # Arrange
+        (tmp_path / POLICY_FILE_NAME).write_text("{}", encoding="utf-8")
+        permissive = Settings(_env_file=None, allow_managed_policy=True)
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            managed_policy.logger,
+            "warning",
+            lambda message, *args, **kwargs: warnings.append(str(message)),
+        )
+
+        # Act
+        assert_no_managed_policy(permissive, directories=[tmp_path])
+
+        # Assert
+        assert len(warnings) == 1
+        assert "ALLOW_MANAGED_POLICY" in warnings[0]
+
+
+class TestHostIndependence:
+    """検査が実行ホストのポリシー配布状況に引きずられないことを固定する。"""
+
+    def test_テストでは既定の配置先を見ない(self) -> None:
+        """`conftest` の autouse フィクスチャが効いていることを確かめる。
+
+        これが外れると、ポリシーが配布されたホストで CLI を使う全テストが
+        一斉に落ちる。落ちてから気づくのでは遅いのでここで固定する。
+        """
+        # Arrange / Act
+        directories = managed_policy.managed_policy_directories()
+
+        # Assert
+        assert Path("/etc/claude-code") not in directories
