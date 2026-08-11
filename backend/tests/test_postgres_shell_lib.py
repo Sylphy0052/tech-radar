@@ -75,6 +75,10 @@ _DROPPED_FROM_ENV = frozenset(
         "FAKE_DOCKER_STDERR",
         "FAKE_DOCKER_EXIT",
         "FAKE_DOCKER_CALLS",
+        "FAKE_DOCKER_ENV_DUMP",
+        # 実行中のシェルが export していると、ロケールを固定しているのか
+        # 引き継いだだけなのかが見分けられなくなる。
+        "LC_ALL",
         "ENTRYPOINT_SCRIPT",
         "ENTRYPOINT_ARGS",
     }
@@ -189,6 +193,9 @@ def fake_docker_bin(tmp_path: Path) -> Path:
         "#!/usr/bin/env bash\n"
         'if [[ -n "${FAKE_DOCKER_CALLS:-}" ]]; then\n'
         '  printf "%s\\n" "$*" >>"$FAKE_DOCKER_CALLS"\n'
+        "fi\n"
+        'if [[ -n "${FAKE_DOCKER_ENV_DUMP:-}" ]]; then\n'
+        '  printf "LC_ALL=%s\\n" "${LC_ALL:-unset}" >>"$FAKE_DOCKER_ENV_DUMP"\n'
         "fi\n"
         'printf "%s" "${FAKE_DOCKER_PS_OUTPUT:-}"\n'
         'printf "%s" "${FAKE_DOCKER_STDERR:-}" >&2\n'
@@ -811,6 +818,31 @@ class TestAssertDockerReachable:
         assert executed.returncode == 0, executed.stderr
         # 呼び出し元が1回、引数ひとつで動いただけ。別のコマンドは動いていない。
         assert executed.stdout == "entry:[--stop]"
+
+    def test_dockerを呼ぶときはロケールを固定する(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """判定の安定のために `LC_ALL=C` を `docker` まで届ける。
+
+        許可文字の判定に使う文字クラスの範囲指定は照合順序に左右される。docker 側の
+        メッセージも英語で揃えば `permission denied` の判定が安定する。`local` だけでは
+        呼び出し元が export 済みのときしか子プロセスへ渡らないため、`-x` が要る
+        （実測で確認した）。ここでは実行中のシェルの `LC_ALL` を落としてから呼ぶ。
+        """
+        dump = tmp_path / "docker-env"
+
+        result = _run_lib(
+            "assert_docker_reachable || true",
+            cwd=tmp_path,
+            env={
+                "PATH": _path_with(fake_docker_bin),
+                "FAKE_DOCKER_EXIT": "0",
+                "FAKE_DOCKER_ENV_DUMP": str(dump),
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert dump.read_text(encoding="utf-8").splitlines() == ["LC_ALL=C"]
 
     def test_呼び出し元のパスに特殊な文字があっても一行の案内を出さない(
         self, tmp_path: Path, fake_docker_bin: Path

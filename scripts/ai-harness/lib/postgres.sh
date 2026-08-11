@@ -190,13 +190,17 @@ assert_docker_usable() {
 #
 # 非ASCIIの文字も通さない。日本語を含むパスから起動した場合は一行の案内が出ず、
 # 入り直す手順だけの案内になる。
-readonly _SAFE_COMMAND_HINT_PATTERN='^[A-Za-z0-9._/ -]+$'
+# 定数として扱う。`readonly` にはしない（このファイルを同じシェルで2回読み込むと
+# 再代入で落ちるため。読み込みが1回で済む今の呼び出し方に依存させない）。
+_SAFE_COMMAND_HINT_PATTERN='^[A-Za-z0-9._/ -]+$'
 
 assert_docker_reachable() {
   local error command_hint retry_hint
   # 文字クラスの範囲指定（`A-Z` など）は照合順序に左右されるため、判定の間はロケールを
-  # 固定する。`docker info` のメッセージも英語で揃い、`permission denied` の判定が安定する。
-  local LC_ALL=C
+  # 固定する。`-x` を付けるのは `docker` にも渡すため。`local` だけでは、呼び出し元が
+  # 既に `LC_ALL` を export している場合しか子プロセスへ伝わらない。docker のメッセージが
+  # 英語で揃えば `permission denied` の判定も安定する。関数を抜ければ元へ戻る。
+  local -x LC_ALL=C
   error="$(docker info 2>&1 >/dev/null)" && return 0
   # 案内をそのまま実行できるよう、呼び出し元スクリプトのパスと引数を使う。ここで
   # `${BASH_SOURCE[0]}` を見るとこのライブラリ自身のパスになってしまう。引数を
