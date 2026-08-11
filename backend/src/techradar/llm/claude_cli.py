@@ -18,10 +18,13 @@
 1. `--setting-sources ""` で設定ファイル（user / project / local）を読み込ませない。
    hooks はここに定義され、ツール許可とは別経路で任意コマンドを実行しうるため、
    ツール無効化だけでは塞げない。ただし管理者ポリシー（admin-managed policy）は
-   この3つに含まれず、コマンドライン引数より優先されるため塞げない
+   この3つに含まれず、ポリシーに定義された hooks は実行される（実測）。
+   主防御の `--tools ""` はポリシーからは上書きされない
    （`docs/adr/0002-llm-tool-isolation.md` の残存リスクを参照）
 2. `--settings` の `permissions.deny` と `--disallowedTools` にツール名を列挙（保険）
-3. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない
+3. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない。
+   サーバは空のままにする。ポリシーの `disableSideloadFlags` は `--mcp-config` を
+   拒否するが、空の指定だけは受理される（1つでも足すと起動できなくなる）
 4. `--disable-slash-commands` で Skills（`/skill-name`）を無効化する。Skills は
    ツール無効化の管轄外にある独立した実行経路で、`--tools ""` でも `--bare` でも残る
 5. 環境変数を許可リストで絞り、DB 接続文字列などを子プロセスへ渡さない
@@ -97,7 +100,9 @@ DENIED_TOOLS: tuple[str, ...] = (
     "ReadMcpResource",
 )
 
-# MCP サーバーを 1 つも読み込ませない設定。
+# MCP サーバーを 1 つも読み込ませない設定。空のままにしておくこと。
+# 管理者ポリシーの `disableSideloadFlags` は `--mcp-config` を起動時に拒否するが、
+# サーバを含まない指定は受理される。1 つでも足すとポリシー配下のホストで起動できない。
 EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
 
 # 子プロセスへ渡す環境変数。既定では親の環境がすべて継承され、DB 接続文字列などが
