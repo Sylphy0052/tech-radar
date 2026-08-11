@@ -97,7 +97,11 @@ DBが増え続けないよう、セッション終了時に自分のDBを DROP �
 
 frontend の vitest も同じ理由で `coverage.reportsDirectory` を `coverage/<pid>` に分けてある ([frontend/vitest.config.mts](frontend/vitest.config.mts))。共有していた頃は同時実行すると片方が `Something removed the coverage directory` で落ちた。孤児ディレクトリの掃除は [frontend/vitest.global-setup.ts](frontend/vitest.global-setup.ts) が行う。
 
-worktree を削除すると、そのハッシュを持つテスト用DBはどのworktreeからも掃除されなくなる（他worktreeのDBには触らない設計のため）。溜まってきたら `./scripts/cleanup-test-databases.sh` で確認し、`--apply` を付けて消す。生存しているworktreeのDBと、接続が残っているDBには触らない。
+worktree を削除すると、そのハッシュを持つテスト用DBはどのworktreeからも掃除されなくなる（他worktreeのDBには触らない設計のため）。この掃除は `gitlab-cleanup` skill の worktree 削除ステップから呼ばれる（Issue #60）。dry-run の結果を確認してから `--apply` する流れになっているので、cleanup を通していれば溜まらない。
+
+cleanup を経由せず worktree を消したときは `./scripts/cleanup-test-databases.sh` で確認し、`--apply` を付けて消す。生存しているworktreeのDBと、接続が残っているDBには触らない。
+
+**別セッションが同じリポジトリでテストを走らせている最中に `--apply` しない。** そのテストが使う一時DBが削除候補に混ざり、巻き込んで消すことがある（実測で2件消した）。dry-run に心当たりのないDB名が出たら、他セッションの実行が終わってから改めて実行する。
 
 ### テストに壁時計の絶対時間を書かない (Issue #61)
 
