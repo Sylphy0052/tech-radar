@@ -20,34 +20,68 @@ ENTRYPOINT_SCRIPT="${BASH_SOURCE[0]}"
 # shellcheck source=lib/postgres.sh
 source "$REPO_ROOT/scripts/ai-harness/lib/postgres.sh"
 
-# pytest を何プロセスへ分散させるか（pytest-xdist）。ワーカーごとにテスト用 DB を
-# 作り直すため（Issue #33）、CPU 数ぶんまで増やすと PostgreSQL 側が重くなり、
-# 他のチェックと CPU も取り合う。既定値は実測で決めた（Issue #61）。
-# 1 を指定すると xdist を使わず単一プロセスで実行する。
-PYTEST_WORKERS="${PYTEST_WORKERS:-8}"
-
-# vitest のワーカー数。既定では CPU 数ぶんまで起動するため、pytest と同時に走ると
-# コア数を超えて奪い合い、両方とも単独実行より遅くなる（実測）。上限を決めておく。
-VITEST_WORKERS="${VITEST_WORKERS:-8}"
+# pytest と vitest をそれぞれ何プロセスへ分散させるか。
+#
+# pytest はワーカーごとにテスト用 DB を作り直すため（Issue #33）、CPU 数ぶんまで
+# 増やすと PostgreSQL 側が重くなる。vitest は既定で CPU 数ぶん起動するため、
+# 制限しないと pytest と奪い合って両方とも単独実行より遅くなる。
+#
+# 22 コア機での実測では 8 + 8 が最も速かった（Issue #61）。コア数の少ない環境で
+# 同じ値を使うと過剰になるため、コア数の半分と 8 の小さい方を既定にする
+# （22 コアなら 8 で実測どおり、8 コアなら 4、2 コアなら 1）。環境変数を明示すれば
+# その値をそのまま使う。`PYTEST_WORKERS=1` は xdist を使わない単一プロセス実行。
+_default_workers() {
+  local cores half
+  cores="$(nproc 2>/dev/null || echo 1)"
+  half=$((cores / 2))
+  ((half < 1)) && half=1
+  ((half > 8)) && half=8
+  printf '%s' "$half"
+}
+PYTEST_WORKERS="${PYTEST_WORKERS:-$(_default_workers)}"
+VITEST_WORKERS="${VITEST_WORKERS:-$(_default_workers)}"
 
 # 並列実行するジョブを、ラベル・PID・出力先の3つの並びで管理する。
 JOB_LABELS=()
 JOB_PIDS=()
 JOB_LOGS=()
 
-cleanup_job_logs() {
+# ジョブごとに独立したプロセスグループを作る。中断されたときに、ジョブが起動した
+# 子孫（pytest のワーカー、vitest の fork）までまとめて止めるために要る。
+set -m
+
+# 中断時に、走っているジョブと一時ファイルを片付ける。
+# このスクリプト自身だけを終了させた場合（hook や CI のタイムアウトによる kill、
+# Ctrl-C）、後始末をしないと pytest や vitest のワーカーが生き残る。残った
+# ワーカーはテスト用 DB への接続を掴んだままになり、接続が残っている DB は
+# 孤児掃除の対象外にしてあるため（Issue #33）、DB が回収されなくなる。
+cleanup_jobs() {
+  local pid
+  for pid in ${JOB_PIDS[@]+"${JOB_PIDS[@]}"}; do
+    # プロセスグループごと止める。ジョブのサブシェルだけを止めても、その先の
+    # pytest や vitest は親を失って動き続ける（実測で確認）。
+    kill -- "-$pid" 2>/dev/null || true
+  done
   ((${#JOB_LOGS[@]} > 0)) && rm -f "${JOB_LOGS[@]}"
   return 0
 }
-trap cleanup_job_logs EXIT
+trap cleanup_jobs EXIT
+trap 'cleanup_jobs; exit 130' INT
+trap 'cleanup_jobs; exit 143' TERM
 
-# ジョブをバックグラウンドで開始する。出力は端末へ流さずファイルへ溜める。
+# ジョブをバックグラウンドで開始する。出力は端末へ流さずファイルへ溜めるため、
+# 何が走っているかはここで先に出す。溜めた出力は最後にまとめて出るので、
+# これが無いと数十秒のあいだ端末が無言になり、停止と区別が付かない。
+#
+# 標準入力は `/dev/null` へ向ける。複数のジョブが端末の標準入力を共有すると、
+# どれかが入力待ちに入ったときに取り合いになる。
 start_job() {
   local label="$1"
   shift
   local logfile
   logfile="$(mktemp)"
-  ("$@") >"$logfile" 2>&1 &
+  log "開始: $label"
+  ("$@") </dev/null >"$logfile" 2>&1 &
   JOB_LABELS+=("$label")
   JOB_PIDS+=("$!")
   JOB_LOGS+=("$logfile")
@@ -97,13 +131,18 @@ backend_pytest() {
 backend_openapi_freshness() {
   cd "$REPO_ROOT/backend"
   log "backend: openapi.jsonの鮮度チェック"
-  local tmp
-  tmp="$(mktemp --suffix=.json)"
-  uv run python -m techradar.openapi_export "$tmp" \
+  # 鮮度チェックに引っかかった場合も消す。`fail` はこのジョブのサブシェルごと
+  # 終了させるため、末尾に `rm` を置くだけでは失敗経路で残る。
+  #
+  # `local` にはしない。EXIT trap が発火する時点では関数のスコープを抜けており、
+  # `set -u` の下では unbound variable で落ちる（実測で確認）。ジョブはサブシェル
+  # として起動するため、ここでグローバルへ置いても他のジョブには影響しない。
+  freshness_tmp="$(mktemp --suffix=.json)"
+  trap 'rm -f "$freshness_tmp"' EXIT
+  uv run python -m techradar.openapi_export "$freshness_tmp" \
     || fail "backend: openapi.jsonの生成に失敗しました"
-  diff -q openapi.json "$tmp" >/dev/null \
+  diff -q openapi.json "$freshness_tmp" >/dev/null \
     || fail "backend: openapi.jsonが最新ではありません（uv run python -m techradar.openapi_exportで再生成してcommitしてください）"
-  rm -f "$tmp"
 }
 
 # ---- frontend (TypeScript / npm) のジョブ ----
@@ -128,13 +167,13 @@ frontend_vitest() {
 frontend_api_schema_freshness() {
   cd "$REPO_ROOT/frontend"
   log "frontend: api-schema.d.tsの鮮度チェック"
-  local tmp
-  tmp="$(mktemp --suffix=.d.ts)"
-  npx openapi-typescript "$REPO_ROOT/backend/openapi.json" -o "$tmp" \
+  # 失敗経路でも消す。`local` にしない理由も `backend_openapi_freshness` と同じ。
+  freshness_tmp="$(mktemp --suffix=.d.ts)"
+  trap 'rm -f "$freshness_tmp"' EXIT
+  npx openapi-typescript "$REPO_ROOT/backend/openapi.json" -o "$freshness_tmp" \
     || fail "frontend: api-schema.d.tsの生成に失敗しました"
-  diff -q src/lib/api-schema.d.ts "$tmp" >/dev/null \
+  diff -q src/lib/api-schema.d.ts "$freshness_tmp" >/dev/null \
     || fail "frontend: api-schema.d.tsが最新ではありません（npm run gen:api-typesで再生成してcommitしてください）"
-  rm -f "$tmp"
 }
 
 # ---- 依存の用意（並列ジョブの前提になるため直列で済ませる） ----

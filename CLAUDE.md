@@ -22,7 +22,7 @@
 - `./run.sh --stop` — PostgreSQL コンテナも含めて停止する
 - `scripts/ai-harness/check.sh` — lint / format / 型チェック / テストを一括実行する。PostgreSQL が未起動なら自動で立ち上げる。commit 前に `pre-bash-guard.sh` から強制実行される
   - 互いに独立したチェックは並列で走る (Issue #61)。出力は混ざらないよう、全ジョブの完了後にまとめて表示する
-  - pytest と vitest のワーカー数は `PYTEST_WORKERS` / `VITEST_WORKERS` で変えられる (既定はどちらも 8)。既定値はこのマシン (22コア) での実測で決めたもので、コア数が大きく違う環境では調整する。`PYTEST_WORKERS=1` で pytest の並列化を切れる
+  - pytest と vitest のワーカー数は `PYTEST_WORKERS` / `VITEST_WORKERS` で変えられる。既定はコア数の半分と 8 の小さい方 (22コア機なら 8、8コア機なら 4)。22コア機での実測では 8 + 8 が最速だった。`PYTEST_WORKERS=1` で pytest の並列化を切れる
 
 ## 開発フロー (強制)
 

@@ -16,19 +16,41 @@ from techradar.api.bulk_import import (
     validate_bulk_import_url,
 )
 
-# ReDoS 回帰テストが許す CPU 時間の上限。線形実装と二次関数的な実装の実測値の
-# 間に、どちらからも 1 桁以上離れた位置で引いている（Issue #61）。
+# 走査が現実的な時間で終わることを確かめる回帰テストの上限（Issue #61）。
 #
-# - 線形実装（現行）: 0.18秒。カバレッジ計測で約3倍、pytest の並列実行による
-#   CPU の奪い合いでさらに約3倍に伸びて、最悪 1.8秒までを実測した
-# - 二次関数的な実装（かつての正規表現。`extract_first_url` の docstring 参照）:
-#   4万文字で 1.4秒、ここで与える 100万文字級の入力なら外挿で分単位
+# CPU 時間の上限は、通す側と落とす側の実測の間に 1 桁以上のマージンを取って引く。
+#
+# - 通す側（現行の線形実装）: 0.18秒。カバレッジ計測で約3倍、pytest の並列実行に
+#   よる CPU の奪い合いでさらに約3倍に伸びて、最悪 1.8秒までを実測した
+# - 落とす側（かつての正規表現。`extract_first_url` の docstring 参照）:
+#   `test_returns_none_in_linear_time_for_a_long_line_without_a_scheme` が与える
+#   30万文字の入力に対して、同じマシンで 78.3秒（10万文字で 16.8秒、20万文字で
+#   59.7秒と二次関数的に伸びる）
 #
 # 上限を 1.0秒に置いていた頃は、実装が線形のままでも並列実行で落ちた。壁時計を
 # CPU 時間へ替えるだけでは足りず（キャッシュやメモリ帯域の奪い合いは CPU 時間にも
 # 乗る）、入力を倍にしたときの伸び率で見る形も安定しなかった（入力サイズで
 # キャッシュの効き方が変わり、線形のままでも 3.7倍を観測）。
 _REDOS_CPU_SECONDS_LIMIT = 10.0
+
+# 壁時計の上限。CPU 時間は待機（ロック待ち・I/O・sleep）を数えないため、CPU を
+# 焼かずに詰まる形の劣化を取りこぼす。並列実行のぶれを吸収しつつ、その種のハングは
+# 捕まえられる位置に、大きめの上限を併せて置く。
+_REDOS_WALL_SECONDS_LIMIT = 60.0
+
+
+def _assert_scans_without_blowing_up(line: str) -> None:
+    """`extract_first_url` がこの行を現実的な時間で走査し切ることを確かめる。"""
+    started_cpu = time.process_time()
+    started_wall = time.perf_counter()
+    url = extract_first_url(line)
+    cpu_seconds = time.process_time() - started_cpu
+    wall_seconds = time.perf_counter() - started_wall
+
+    assert url is None
+    assert cpu_seconds < _REDOS_CPU_SECONDS_LIMIT
+    assert wall_seconds < _REDOS_WALL_SECONDS_LIMIT
+
 
 _ALLOWED_SCHEMES = ("http://", "https://")
 _MAX_URL_LENGTH = 2048
@@ -128,20 +150,19 @@ class TestExtractFirstUrl:
         「候補が URL にならなければ次の "://" から探し直す」ループが、候補ごとに
         行全体を舐め直す形になっていないことを固定する。
 
-        壁時計ではなく CPU 時間で測り、上限は `_REDOS_CPU_SECONDS_LIMIT` に置く。
-        理由と実測値はその定数のコメントにある（Issue #61）。
+        固定できるのは線形走査自身の再走査バグまでで、正規表現への差し戻しは
+        この入力では捕まえられない。旧正規表現はスキームの先頭を `[a-zA-Z]` に
+        限るため、"1" で始まるこの入力は各開始位置の 1 文字目で不一致になり、
+        バックトラッキングを起こさないまま 0.00秒で終わる（実測。Issue #61 の
+        レビューで判明）。正規表現への差し戻しは
+        `test_returns_none_in_linear_time_for_a_long_line_without_a_scheme`
+        が捕まえる。
         """
         # Arrange
         line = ("1" * 20 + "://") * 50_000
 
-        # Act
-        started_at = time.process_time()
-        url = extract_first_url(line)
-        elapsed_seconds = time.process_time() - started_at
-
-        # Assert
-        assert url is None
-        assert elapsed_seconds < _REDOS_CPU_SECONDS_LIMIT
+        # Act / Assert
+        _assert_scans_without_blowing_up(line)
 
     @pytest.mark.parametrize("line", ["http://", "http://....", "https://。"])
     def test_returns_none_when_the_scheme_has_no_host(self, line: str) -> None:
@@ -220,23 +241,19 @@ class TestExtractFirstUrl:
     def test_returns_none_in_linear_time_for_a_long_line_without_a_scheme(self) -> None:
         """受入基準（ReDoS回帰）: "://" を含まない長い行は、バックトラッキング
         のある正規表現なら二次関数的に劣化する入力だが、線形走査であれば
-        一瞬で None を返す。
+        一瞬で None を返す。正規表現への差し戻しを実際に捕まえられるのはこちら。
 
-        壁時計ではなく CPU 時間で測り、上限を `_REDOS_CPU_SECONDS_LIMIT` に置く
-        理由は `test_returns_none_in_linear_time_for_a_long_line_of_invalid_separators`
-        と同じ（Issue #61）。
+        入力長は、旧正規表現との差が上限（`_REDOS_CPU_SECONDS_LIMIT`）を挟んで
+        桁で開く位置に取る。同じマシンでの実測では、旧正規表現は 10万文字で
+        16.8秒、20万文字で 59.7秒と二次関数的に伸び、ここで与える 30万文字では
+        78.3秒かかった。現行の線形走査は 30万文字でも 0.0002秒で終わる
+        （Issue #61）。
         """
         # Arrange
-        long_line_without_scheme = "a" * 100_000
+        long_line_without_scheme = "a" * 300_000
 
-        # Act
-        started_at = time.process_time()
-        url = extract_first_url(long_line_without_scheme)
-        elapsed_seconds = time.process_time() - started_at
-
-        # Assert
-        assert url is None
-        assert elapsed_seconds < _REDOS_CPU_SECONDS_LIMIT
+        # Act / Assert
+        _assert_scans_without_blowing_up(long_line_without_scheme)
 
 
 class TestParseUrlLines:
