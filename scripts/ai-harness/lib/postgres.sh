@@ -59,18 +59,41 @@ ensure_postgres() {
   log "PostgreSQL 起動完了"
 }
 
+# 前後の空白を落とす。
+trim_spaces() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+# 設定ファイルから `BIND_HOST` の値だけを拾う。読めなければ空を返す。
+#
+# `source` せずに拾うのは、呼び出し元の環境を書き換えないため。ファイルが無い場合に
+# ここで落ちないよう、失敗はすべて空として扱う（worktree を作った直後は設定ファイルが
+# まだ無く、`set -e` の下でそのまま落とすと起動確認どころではなくなる）。
+read_bind_host_from_env_file() {
+  local raw=""
+  [[ -f "$ENV_FILE" ]] || return 0
+  raw="$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?BIND_HOST[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" 2>/dev/null | tail -1)" || return 0
+  raw="${raw%%#*}"
+  raw="${raw%$'\r'}"
+  raw="$(trim_spaces "$raw")"
+  raw="${raw#[\"\']}"
+  raw="${raw%[\"\']}"
+  trim_spaces "$raw"
+}
+
 # 期待する公開先を返す。環境にあればそれ、無ければ設定ファイルから拾う。
 #
 # `run.sh` は設定ファイルを読んでから呼ぶが、`check.sh` は読まない。環境変数だけを見ると、
 # 設定ファイルで広げている運用に対して `check.sh` から呼ぶたび食い違い扱いになり、
 # 正しい状態に警告が出続ける。両方から同じ値を見るためにここで拾う。
 expected_bind_host() {
-  local from_file=""
-  [[ -n "${BIND_HOST:-}" ]] && { printf '%s' "$BIND_HOST"; return 0; }
-  from_file="$(sed -n 's/^[[:space:]]*BIND_HOST[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" 2>/dev/null | tail -1)"
-  from_file="${from_file%\"}"
-  from_file="${from_file#\"}"
-  printf '%s' "${from_file:-127.0.0.1}"
+  local value="${BIND_HOST:-}"
+  [[ "$value" =~ [^[:space:]] ]] || value="$(read_bind_host_from_env_file)"
+  [[ "$value" =~ [^[:space:]] ]] || value="127.0.0.1"
+  trim_spaces "$value"
 }
 
 # 起動中のコンテナが、いま設定している範囲へ公開されているかを見る（Issue #65）。
@@ -122,8 +145,19 @@ postgres_looks_available() {
   postgres_is_ready "$host" "$port"
 }
 
+# 一度確かめたら覚えておく。起動確認の経路で複数回聞かれるが、`docker info` は
+# 100ms 程度かかるうえ、同じプロセスの中で到達性が変わることはない。
 docker_is_reachable() {
-  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+  case "${_DOCKER_REACHABLE:-}" in
+    yes) return 0 ;;
+    no) return 1 ;;
+  esac
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    _DOCKER_REACHABLE=yes
+    return 0
+  fi
+  _DOCKER_REACHABLE=no
+  return 1
 }
 
 # docker が無いと先へ進めない場面で、未インストールと到達不可をまとめて判定する。
