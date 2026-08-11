@@ -307,13 +307,20 @@ def test_stop_previous_instance_stops_process_from_pid_file(tmp_path: Path) -> N
 
 
 def test_stop_previous_instance_keeps_unrelated_process(tmp_path: Path) -> None:
-    """PID が再利用されていた場合、コマンドラインが一致しないので止めない。"""
+    """PID が再利用されていた場合、コマンドラインが一致しないので止めない。
+
+    ここで渡す語は、実在しないことが確実なものにする。`uvicorn techradar.main:app` の
+    ような実際の起動コマンドを渡すと、PID ファイル側の判定を通らなくても、後段の
+    コマンドライン検索が開発中の `run.sh` の backend を見つけて停止してしまう
+    （実測で発生した）。`run.sh` は語にポート番号を含めて呼ぶため実運用では起こらないが、
+    テストからは実行中のプロセスへ触れないようにする。
+    """
     pgid = _spawn_group("sleep 30 && true # techradar-test-marker-unrelated")
     pid_file = tmp_path / "app.pid"
     pid_file.write_text(f"{pgid}\n", encoding="utf-8")
     try:
         result = _run(
-            f"stop_previous_instance '{pid_file}' 'テスト対象' 'uvicorn techradar.main:app'"
+            f"stop_previous_instance '{pid_file}' 'テスト対象' 'techradar-nonexistent-pattern-zzz'"
         )
 
         assert result.returncode == 0, result.stderr
