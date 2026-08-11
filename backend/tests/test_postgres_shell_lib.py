@@ -39,6 +39,8 @@ _LIB = _REPO_ROOT / "scripts" / "ai-harness" / "lib" / "postgres.sh"
 
 # `PATH` を空にするテストがあるため、シェル自身は絶対パスで起動する。
 _BASH = shutil.which("bash") or "/bin/bash"
+# `sg` が案内文の中身を実行するときのシェル（man sg より `/bin/sh`）。
+_SH = shutil.which("sh") or "/bin/sh"
 # 子シェルの `$0`。`ENTRYPOINT_SCRIPT` が無いとき案内文がここへ落ちる。
 # 案内へそのまま載せてよい文字だけで組む（`assert_docker_reachable` は非ASCIIを
 # 安全側へ倒して一行の案内を出さないため、日本語の名前にすると別の分岐を見てしまう）。
@@ -153,7 +155,7 @@ def _simulate_sg(stderr: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     ここで実行するのは、テストが用意した無害なスクリプトだけに限る。
     """
     return subprocess.run(  # noqa: S603
-        [_BASH, "-c", f"sh -c {_hint_text(stderr)}"],
+        [_BASH, "-c", f"{_SH} -c {_hint_text(stderr)}"],
         capture_output=True,
         text=True,
         cwd=str(cwd),
@@ -680,9 +682,10 @@ class TestAssertDockerReachable:
     案内したり（実行しても何も起きない）、`./run.sh --stop` が `./run.sh` になったり
     （停止のつもりで起動する）するため、文言ごと固定する（Issue #52 → #55、#70）。
 
-    ここで見るのは案内が壊れていないことだけで、埋め込む値の安全性は見ていない。
-    引用符を含む値を渡したときに案内の引用が保たれるかは Issue #71 で扱う。この
-    クラスが緑でも、その観点は担保されていない。
+    埋め込む値の安全性も、このクラスで見る。`sg` は受け取った文字列を `/bin/sh` で
+    実行するため、引用が1語に収まっていても中身は改めて解釈される。特殊な文字を
+    含むときに一行の案内を出さないことと、出すときはそれを実行しても呼び出し元の
+    スクリプトしか動かないことを固定する（Issue #71）。
     """
 
     def _run(
@@ -791,7 +794,6 @@ class TestAssertDockerReachable:
             encoding="utf-8",
         )
         entry.chmod(0o700)
-        marker = tmp_path / "injected"
 
         result = self._run(
             tmp_path,
@@ -807,8 +809,28 @@ class TestAssertDockerReachable:
         executed = _simulate_sg(result.stderr, tmp_path)
 
         assert executed.returncode == 0, executed.stderr
+        # 呼び出し元が1回、引数ひとつで動いただけ。別のコマンドは動いていない。
         assert executed.stdout == "entry:[--stop]"
-        assert not marker.exists()
+
+    def test_呼び出し元のパスに特殊な文字があっても一行の案内を出さない(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """特殊な文字が入るのは引数側とは限らない。
+
+        パス側だけが原因のときも、案内を出さない側へ倒れる。案内の文言も原因を
+        引数と決めつけない（読み手が自分の打った引数を疑って迷う）。
+        """
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            docker_stderr=_PERMISSION_DENIED,
+            entrypoint_script="./起動.sh",
+        )
+
+        assert result.returncode == 1
+        assert _HINT_MARKER not in result.stderr
+        assert "./起動.sh" not in result.stderr
+        assert "実行しようとしたコマンド" in result.stderr
 
     def test_引数が無ければスクリプトだけを案内する(
         self, tmp_path: Path, fake_docker_bin: Path
