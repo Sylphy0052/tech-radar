@@ -25,11 +25,16 @@ PID を持たないため worktree ハッシュの一致までしか判定でき
 得られる「現存する worktree の一覧」を唯一の判定材料にする
 `find_database_names_without_live_worktree` を別途用意し、
 `backend/scripts/cleanup_test_databases.py` から使う。
+
+`pid_is_alive` は元々 `tests/conftest.py` にのみ置いていたが、
+`backend/scripts/cleanup_test_databases.py` の掃除でも同じ PID 生存判定が
+必要になったため、両方から使えるこのモジュールへ移した（Issue #63）。
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -69,6 +74,29 @@ _DATABASE_NAME_PATTERN = re.compile(
 _LEGACY_DATABASE_NAME_PATTERN = re.compile(
     rf"^{re.escape(DATABASE_NAME_PREFIX)}(?P<hash>[0-9a-f]{{{WORKTREE_HASH_LENGTH}}})\Z"
 )
+
+
+def pid_is_alive(pid: int) -> bool:
+    """指定 PID のプロセスが生存しているかを判定する。
+
+    シグナル番号 0 はプロセスを実際には終了させず、存在確認だけを行う
+    （`kill(2)` の慣用的な使い方）。`ProcessLookupError`（プロセスが存在しない）
+    以外は、原因を問わずすべて「生存している」側に倒す（安全側に倒す）。
+
+    権限不足で確認できない場合（別ユーザーのプロセス等）の `PermissionError` は
+    `OSError` のサブクラスだが、`os.kill()` には巨大な PID（`sys.maxsize` 超）を
+    渡すと `OverflowError` が飛ぶことがあり、これは `OSError` のサブクラスでは
+    ない（Issue #33 self review）。DB 名の PID 部分の桁数には上限を設けている
+    （`PID_DIGITS_MAX`）ため通常はここまで巨大な値は来ないはずだが、想定外の
+    呼び出し経路に備えて `Exception` 全体を捕捉する。
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except Exception:
+        return True
+    return True
 
 
 def worktree_hash(backend_root: Path) -> str:

@@ -11,8 +11,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from tests import conftest as conftest_module
-from tests.db_process_isolation import worktree_hash
+from tests.db_process_isolation import pid_is_alive, worktree_hash
 from tests.fake_worktree_roots import ANOTHER_DEAD_PID, DEAD_PID, fake_worktree_path
 
 
@@ -63,4 +62,4 @@ class TestDeadPids:
     def test_are_not_alive(self) -> None:
         # Arrange / Act / Assert — 掃除ロジックが使う生存判定に掛けても死んでいると出ること
         for pid in (DEAD_PID, ANOTHER_DEAD_PID):
-            assert conftest_module._pid_is_alive(pid) is False
+            assert pid_is_alive(pid) is False

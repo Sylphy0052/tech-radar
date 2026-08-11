@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import Connection, Engine, create_engine, text
@@ -38,6 +39,7 @@ from tests.db_process_isolation import (
     find_database_names_without_live_worktree,
     parse_database_name,
     parse_legacy_database_name,
+    pid_is_alive,
 )
 
 from techradar.config import get_settings
@@ -60,6 +62,13 @@ ALLOWED_TEST_DB_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "postgres"})
 # ときに、無人実行（skill 経由など）が止まったまま残らないようにするため。
 GIT_TIMEOUT_SECONDS = 30
 
+# 作成から間もない DB を保護する既定の猶予期間（分）。PID 生存判定は「DB 名に
+# 埋め込まれた PID が今も動いているか」しか見ないため、PID の再利用やこの
+# スクリプト自身の判定漏れなど、想定していない経路で誤って削除候補に挙がった
+# 場合でも、作られたばかりの DB であれば時間経過という別軸でもう一段保護する
+# （Issue #63）。`--min-age-minutes 0` で無効化できる。
+DEFAULT_MIN_AGE_MINUTES = 10
+
 
 class WorktreeDiscoveryError(RuntimeError):
     """生存 worktree の一覧取得に失敗したことを表す。
@@ -79,6 +88,8 @@ class CleanupPlan:
     candidates: list[str]
     to_delete: list[str]
     protected_by_connection: list[str]
+    protected_by_alive_pid: list[str]
+    protected_by_recent_creation: list[str]
 
 
 def _discover_live_worktree_paths() -> list[Path]:
@@ -96,6 +107,14 @@ def _discover_live_worktree_paths() -> list[Path]:
     持つブロックは除外する。あわせて、`prunable` 行の有無に関わらずパスの実在も確認し、
     存在しないものは安全側（生存とみなさない）に倒す。`git worktree prune` は実行しない
     （git のメタデータを書き換えるのはこのスクリプトの責務外で、DB の掃除だけを行う）。
+
+    このスクリプトは必ずリポジトリ内（いずれかの worktree）から実行されるため、
+    自分自身（`BACKEND_ROOT.parent`）は取得した一覧に必ず含まれるはずである。
+    含まれない場合は `git worktree list` の結果が実態を反映していない状態
+    （壊れた `.git/worktrees` メタデータ等）であり、他の worktree の判定も
+    信用できない。そのまま処理を進めるとほぼ全ての DB が削除候補に挙がって
+    しまうため、`WorktreeDiscoveryError` を送出して呼び出し側（`main`）に
+    「何も削除せず終了する」経路を辿らせる（Issue #63）。
     """
     git_executable = shutil.which("git")
     if git_executable is None:
@@ -118,11 +137,22 @@ def _discover_live_worktree_paths() -> list[Path]:
         message = f"git worktree listに失敗しました: {stderr}"
         raise WorktreeDiscoveryError(message) from exc
 
-    return [
+    live_paths = [
         path
         for path, prunable in _parse_worktree_porcelain(completed.stdout)
         if not prunable and path.exists()
     ]
+
+    own_worktree_root = BACKEND_ROOT.parent.resolve()
+    if own_worktree_root not in live_paths:
+        message = (
+            "自分自身のworktree"
+            f"（{own_worktree_root}）がgit worktree listの結果に含まれていません。"
+            "git worktree listの結果が信用できない状態のため、何も削除せずに終了します。"
+        )
+        raise WorktreeDiscoveryError(message)
+
+    return live_paths
 
 
 def _parse_worktree_porcelain(porcelain_output: str) -> list[tuple[Path, bool]]:
@@ -251,12 +281,56 @@ def _drop_database(connection: Connection, database_name: str) -> None:
     connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
 
 
-def _build_plan(connection: Connection, live_worktree_paths: list[Path]) -> CleanupPlan:
+def _database_creation_times(connection: Connection) -> dict[str, datetime] | None:
+    """このリポジトリのテスト用 DB について、作成時刻の代わりに使える時刻を一括取得する。
+
+    `pg_database` 自体には作成時刻を持つ列が無いため、DB ディレクトリ内の
+    `PG_VERSION` ファイル（DB 作成時に一度だけ書かれ、以後更新されない）の
+    更新時刻を `pg_stat_file` で読み、作成時刻の代替として使う。ローカルの
+    接続ユーザーが superuser であることは実測で確認済み。
+
+    DB 単位で毎回クエリを発行せず一括で取得するのは、呼び出し回数を減らす
+    ためだけでなく、「一部の DB だけ取得に失敗する」というあいまいな状態を
+    作らないため。権限不足やファイルの欠落等で 1 件でも失敗した場合は例外を
+    投げっぱなしにせず、保護そのものを無効化する（`None` を返す）。呼び出し側
+    が警告を出したうえで、作成時刻に基づく保護をスキップする（Issue #63）。
+    """
+    try:
+        result = connection.execute(
+            text(
+                "SELECT datname, "
+                "(pg_stat_file('base/' || oid || '/PG_VERSION')).modification "
+                "FROM pg_database WHERE datname LIKE :pattern"
+            ),
+            {"pattern": f"{DATABASE_NAME_PREFIX}%"},
+        )
+        return {row[0]: row[1] for row in result}
+    except Exception as exc:
+        print(
+            "[cleanup-test-databases][WARN] 作成時刻の取得に失敗したため、"
+            f"作成直後DBの保護を無効化します: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _build_plan(
+    connection: Connection,
+    live_worktree_paths: list[Path],
+    *,
+    min_age_minutes: int = DEFAULT_MIN_AGE_MINUTES,
+) -> CleanupPlan:
     """現状の DB 一覧と生存 worktree から、削除候補と実際に削除してよい DB を仕分ける。
 
-    削除候補（`find_database_names_without_live_worktree` の結果）のうち、
-    接続が残っている DB は削除しない（他プロセスが使用中の可能性を否定できない
-    ため、消さない側に倒す）。
+    削除候補（`find_database_names_without_live_worktree` の結果）を、以下の
+    優先順位で保護する（いずれにも該当しない DB だけが `to_delete` に入る）。
+
+    1. 新形式（`techradar_test_<hash8>_<pid>`）の DB で PID が生存している
+       （別セッションの pytest が今まさに使っている可能性が高いため、最優先で保護）
+    2. 作成から `min_age_minutes` 分未満（`min_age_minutes` が 0 なら無効）
+    3. 接続が残っている（他プロセスが使用中の可能性を否定できない）
+
+    旧形式（PID 接尾辞なし）の DB は PID を持たないため 1. の対象外。
     """
     existing_names = _existing_test_database_names(connection)
     live_backend_roots = [path / "backend" for path in live_worktree_paths]
@@ -265,9 +339,25 @@ def _build_plan(connection: Connection, live_worktree_paths: list[Path]) -> Clea
         live_backend_roots=live_backend_roots,
     )
 
+    creation_times = _database_creation_times(connection) if min_age_minutes > 0 else None
+    age_threshold = timedelta(minutes=min_age_minutes)
+    now = datetime.now(UTC)
+
     to_delete: list[str] = []
     protected_by_connection: list[str] = []
+    protected_by_alive_pid: list[str] = []
+    protected_by_recent_creation: list[str] = []
     for name in candidates:
+        parsed = parse_database_name(name)
+        if parsed is not None and pid_is_alive(parsed[1]):
+            protected_by_alive_pid.append(name)
+            continue
+
+        created_at = creation_times.get(name) if creation_times is not None else None
+        if created_at is not None and (now - created_at) < age_threshold:
+            protected_by_recent_creation.append(name)
+            continue
+
         if _has_active_connections(connection, name):
             protected_by_connection.append(name)
         else:
@@ -279,33 +369,44 @@ def _build_plan(connection: Connection, live_worktree_paths: list[Path]) -> Clea
         candidates=candidates,
         to_delete=to_delete,
         protected_by_connection=protected_by_connection,
+        protected_by_alive_pid=protected_by_alive_pid,
+        protected_by_recent_creation=protected_by_recent_creation,
     )
 
 
 def _apply_plan(connection: Connection, plan: CleanupPlan) -> CleanupPlan:
     """`plan.to_delete` を実際に DROP し、結果を反映した新しい `CleanupPlan` を返す。
 
-    `_build_plan` が接続の有無を確認してから、この関数が実際に DROP するまでには
-    レポート表示等の時間差があり、その間に新しい接続が張られる可能性がある
-    （TOCTOU）。`backend/tests/conftest.py` の `_cleanup_orphaned_test_databases` は
-    確認直後にその場で DROP しており窓が小さいが、このスクリプトは `_build_plan` と
-    DROP が分離しているため、DROP の直前に `_has_active_connections` を再確認する。
-    その時点で接続が残っていた DB は削除せず、`protected_by_connection` へ回して
-    （既存の DB と同じ理由のため合流させる）レポートに反映されるようにする。
+    `_build_plan` が接続の有無や PID の生死を確認してから、この関数が実際に DROP
+    するまでにはレポート表示等の時間差があり、その間に新しい接続が張られたり、
+    再利用された PID のプロセスが動き出したりする可能性がある（TOCTOU）。
+    `backend/tests/conftest.py` の `_cleanup_orphaned_test_databases` は確認直後に
+    その場で DROP しており窓が小さいが、このスクリプトは `_build_plan` と DROP が
+    分離しているため、DROP の直前に `_has_active_connections` と `pid_is_alive` を
+    再確認する。その時点で該当した DB は削除せず、対応する保護区分
+    （`protected_by_connection` / `protected_by_alive_pid`）へ回して（既存の DB と
+    同じ理由のため合流させる）レポートに反映されるようにする。作成からの経過時間
+    （`protected_by_recent_creation`）は `_build_plan` から DROP までの間に短縮
+    されることが無い（時間は不可逆に進む一方のため）ので、ここでは再確認しない。
 
     `CleanupPlan` は不変（frozen dataclass）のため、既存のインスタンスを書き換えず
     新しいインスタンスを作って返す。
     """
     dropped: list[str] = []
-    skipped_at_drop: list[str] = []
+    skipped_at_drop_connection: list[str] = []
+    skipped_at_drop_alive_pid: list[str] = []
     for name in plan.to_delete:
+        parsed = parse_database_name(name)
+        if parsed is not None and pid_is_alive(parsed[1]):
+            skipped_at_drop_alive_pid.append(name)
+            continue
         if _has_active_connections(connection, name):
-            skipped_at_drop.append(name)
+            skipped_at_drop_connection.append(name)
             continue
         _drop_database(connection, name)
         dropped.append(name)
 
-    if not skipped_at_drop:
+    if not skipped_at_drop_connection and not skipped_at_drop_alive_pid:
         return plan
 
     return CleanupPlan(
@@ -313,7 +414,9 @@ def _apply_plan(connection: Connection, plan: CleanupPlan) -> CleanupPlan:
         existing_database_count=plan.existing_database_count,
         candidates=plan.candidates,
         to_delete=dropped,
-        protected_by_connection=[*plan.protected_by_connection, *skipped_at_drop],
+        protected_by_connection=[*plan.protected_by_connection, *skipped_at_drop_connection],
+        protected_by_alive_pid=[*plan.protected_by_alive_pid, *skipped_at_drop_alive_pid],
+        protected_by_recent_creation=plan.protected_by_recent_creation,
     )
 
 
@@ -335,6 +438,22 @@ def _print_report(plan: CleanupPlan, *, applied: bool) -> None:
             print(f"  - {name}")
     else:
         print("[cleanup-test-databases] 削除対象なし")
+
+    if plan.protected_by_alive_pid:
+        print(
+            "[cleanup-test-databases] 保護（DB名に埋め込まれたPIDが生存しているため削除しない）: "
+            f"{len(plan.protected_by_alive_pid)}件"
+        )
+        for name in plan.protected_by_alive_pid:
+            print(f"  - {name}")
+
+    if plan.protected_by_recent_creation:
+        print(
+            "[cleanup-test-databases] 保護（作成から間もないため削除しない）: "
+            f"{len(plan.protected_by_recent_creation)}件"
+        )
+        for name in plan.protected_by_recent_creation:
+            print(f"  - {name}")
 
     if plan.protected_by_connection:
         print(
@@ -369,7 +488,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="実際にDBを削除する。指定しない場合はdry-run（候補の表示のみで削除しない）。",
     )
+    parser.add_argument(
+        "--min-age-minutes",
+        type=int,
+        default=DEFAULT_MIN_AGE_MINUTES,
+        help=(
+            "作成からこの分数未満のDBを削除対象から保護する猶予期間"
+            f"（既定{DEFAULT_MIN_AGE_MINUTES}分）。0を指定すると無効化する。"
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.min_age_minutes < 0:
+        parser.error("--min-age-minutesは0以上を指定してください。")
 
     try:
         live_worktree_paths = _discover_live_worktree_paths()
@@ -381,7 +511,9 @@ def main(argv: list[str] | None = None) -> int:
     admin_engine = _admin_engine()
     try:
         with admin_engine.connect() as connection:
-            plan = _build_plan(connection, live_worktree_paths)
+            plan = _build_plan(
+                connection, live_worktree_paths, min_age_minutes=args.min_age_minutes
+            )
             if args.apply:
                 plan = _apply_plan(connection, plan)
             _print_report(plan, applied=args.apply)

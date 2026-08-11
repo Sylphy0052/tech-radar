@@ -7,8 +7,10 @@ self review で「手動実行ログでしか検証されていない」と指�
 
 - `_discover_live_worktree_paths` の porcelain 解析（`subprocess` をモック）
 - `git` が見つからない・`git worktree list` が失敗した場合の `WorktreeDiscoveryError`
+- 自分自身の worktree が生存一覧に含まれない場合の `WorktreeDiscoveryError`（Issue #63）
 - `_validate_database_identifier` / `_assert_safe_host` の拒否条件
-- 実 DB を使った `_build_plan` の仕分け（生存worktreeに属さないDB／接続が残っているDB）
+- 実 DB を使った `_build_plan` の仕分け（生存worktreeに属さないDB／接続が残っているDB／
+  PIDが生存しているDB／作成から間もないDB。いずれもIssue #63で追加した保護）
 - 実 DB を使った `--apply` の有無による DROP の有無（`_apply_plan`）
 
 実 DB を使うテストは `test_conftest_db_cleanup.py` と同じ方針で、実運用の worktree
@@ -23,6 +25,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +36,7 @@ from sqlalchemy.engine import make_url
 
 from techradar.config import get_settings
 from tests.db_process_isolation import build_database_name, worktree_hash
-from tests.fake_worktree_roots import DEAD_PID, fake_worktree_path
+from tests.fake_worktree_roots import ANOTHER_DEAD_PID, DEAD_PID, fake_worktree_path
 
 # このテスト専用のダミー repo root。本番の掃除ロジックが使う worktree ハッシュとは
 # 別の名前空間になるため、実行中に他プロセスの掃除へ拾われることがない。実 worktree と
@@ -44,6 +47,30 @@ _FAKE_LIVE_REPO_ROOT = fake_worktree_path(
 _FAKE_ORPHANED_REPO_ROOT = fake_worktree_path(
     cleanup_module.BACKEND_ROOT.parent, "issue-51-orphaned", os.getpid()
 )
+# Issue #63 で追加した保護（PID生存・作成直後）専用のダミー repo root。
+_FAKE_ISSUE_63_REPO_ROOT = fake_worktree_path(
+    cleanup_module.BACKEND_ROOT.parent, "issue-63", os.getpid()
+)
+
+
+def _own_worktree_root() -> Path:
+    """このテストを実行している worktree 自身のルートパス。
+
+    Issue #63 で `_discover_live_worktree_paths` が「自分自身が生存worktree一覧に
+    含まれるはず」を検証するようになったため、porcelain 出力をモックするテストは
+    このパスを含めないと（本来の意図と無関係に）`WorktreeDiscoveryError` になる。
+    """
+    return cleanup_module.BACKEND_ROOT.parent.resolve()
+
+
+def _own_worktree_porcelain_block() -> str:
+    """自分自身の worktree を表す porcelain ブロック（末尾に空行区切りを含む）。"""
+    return (
+        f"worktree {_own_worktree_root()}\n"
+        "HEAD 0123456789abcdef0123456789abcdef01234567\n"
+        "branch refs/heads/main\n"
+        "\n"
+    )
 
 
 class _FakeCompletedProcess:
@@ -94,7 +121,7 @@ class TestDiscoverLiveWorktreePaths:
         prunable_path.mkdir()
 
         stdout = (
-            f"worktree {live_path}\n"
+            _own_worktree_porcelain_block() + f"worktree {live_path}\n"
             "HEAD 0123456789abcdef0123456789abcdef01234567\n"
             "branch refs/heads/main\n"
             "\n"
@@ -113,8 +140,8 @@ class TestDiscoverLiveWorktreePaths:
         # Act
         paths = cleanup_module._discover_live_worktree_paths()
 
-        # Assert — prunable側は除外され、通常のworktreeだけが残る
-        assert paths == [live_path.resolve()]
+        # Assert — prunable側は除外され、自分自身と通常のworktreeだけが残る
+        assert paths == [_own_worktree_root(), live_path.resolve()]
 
     def test_ignores_non_worktree_lines_without_breaking(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -123,7 +150,7 @@ class TestDiscoverLiveWorktreePaths:
         live_path = tmp_path / "locked-worktree"
         live_path.mkdir()
         stdout = (
-            f"worktree {live_path}\n"
+            _own_worktree_porcelain_block() + f"worktree {live_path}\n"
             "HEAD 0123456789abcdef0123456789abcdef01234567\n"
             "branch refs/heads/feature\n"
             "locked manually locked for testing\n"
@@ -139,7 +166,7 @@ class TestDiscoverLiveWorktreePaths:
         paths = cleanup_module._discover_live_worktree_paths()
 
         # Assert
-        assert paths == [live_path.resolve()]
+        assert paths == [_own_worktree_root(), live_path.resolve()]
 
     def test_excludes_worktree_when_path_does_not_exist(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -147,7 +174,9 @@ class TestDiscoverLiveWorktreePaths:
         # Arrange — prunable行は無いが、パス自体が実在しない（rm -rfされた等）
         removed_path = tmp_path / "removed-worktree"
         stdout = (
-            f"worktree {removed_path}\nHEAD 0123456789abcdef0123456789abcdef01234567\ndetached\n"
+            _own_worktree_porcelain_block() + f"worktree {removed_path}\n"
+            "HEAD 0123456789abcdef0123456789abcdef01234567\n"
+            "detached\n"
         )
         monkeypatch.setattr(cleanup_module.shutil, "which", lambda _name: "/usr/bin/git")
         monkeypatch.setattr(
@@ -159,8 +188,34 @@ class TestDiscoverLiveWorktreePaths:
         # Act
         paths = cleanup_module._discover_live_worktree_paths()
 
-        # Assert — 安全側（生存とみなさない）に倒す
-        assert paths == []
+        # Assert — 自分自身は残り、実在しないパスは安全側（生存とみなさない）に倒す
+        assert paths == [_own_worktree_root()]
+
+    def test_raises_when_own_worktree_is_missing_from_live_list(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """自分自身の worktree が生存一覧に含まれない場合、`WorktreeDiscoveryError`
+        を送出する（Issue #63）。`git worktree list` の結果が実態と乖離している
+        （壊れたメタデータ等）ことの兆候であり、他の worktree の生死も信用できない。
+        """
+        # Arrange — 自分自身を含まない出力
+        other_path = tmp_path / "some-other-worktree"
+        other_path.mkdir()
+        stdout = (
+            f"worktree {other_path}\n"
+            "HEAD 0123456789abcdef0123456789abcdef01234567\n"
+            "branch refs/heads/main\n"
+        )
+        monkeypatch.setattr(cleanup_module.shutil, "which", lambda _name: "/usr/bin/git")
+        monkeypatch.setattr(
+            cleanup_module.subprocess,
+            "run",
+            lambda *args, **kwargs: _FakeCompletedProcess(stdout=stdout),
+        )
+
+        # Act & Assert
+        with pytest.raises(cleanup_module.WorktreeDiscoveryError):
+            cleanup_module._discover_live_worktree_paths()
 
     def test_raises_when_git_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Arrange
@@ -272,9 +327,10 @@ class TestBuildPlan:
         orphaned_backend_root = _FAKE_ORPHANED_REPO_ROOT / "backend"
 
         live_db = build_database_name(live_backend_root, os.getpid())
-        candidate_no_conn_db = build_database_name(orphaned_backend_root, os.getpid())
-        # 自分の PID を足した値にすると、同時に走る別 pytest プロセスの実 PID と
-        # 一致して同名の DB を取り合う。実在しえない PID を使う（Issue #59）。
+        # 自分（テスト実行プロセス）の PID を使うと、Issue #63 で追加した
+        # PID生存保護に引っかかり `to_delete` に入らなくなる。実在しえない
+        # PID（Issue #59）を使い、PID保護ではなく接続の有無で仕分けさせる。
+        candidate_no_conn_db = build_database_name(orphaned_backend_root, ANOTHER_DEAD_PID)
         candidate_with_conn_db = build_database_name(orphaned_backend_root, DEAD_PID)
         names = [live_db, candidate_no_conn_db, candidate_with_conn_db]
 
@@ -289,8 +345,11 @@ class TestBuildPlan:
             assert _wait_until_has_active_connection(admin_engine, candidate_with_conn_db) is True
 
             # Act — live_backend_rootだけを生存worktreeとして渡す
+            # （作成直後DBの保護＝Issue #63分はこのテストの対象外のため無効化する）
             with admin_engine.connect() as connection:
-                plan = cleanup_module._build_plan(connection, [_FAKE_LIVE_REPO_ROOT])
+                plan = cleanup_module._build_plan(
+                    connection, [_FAKE_LIVE_REPO_ROOT], min_age_minutes=0
+                )
 
             # Assert
             assert live_db not in plan.candidates
@@ -302,21 +361,128 @@ class TestBuildPlan:
             target_engine.dispose()
 
 
+class TestBuildPlanPidProtection:
+    """PID生存保護（Issue #63）: DB名に埋め込まれたPIDが生存していれば削除しない。"""
+
+    def test_protects_database_whose_embedded_pid_is_alive(
+        self, admin_engine: Engine, cleanup_database_names: list[str]
+    ) -> None:
+        # Arrange — 自分自身（テスト実行中のプロセス）の PID を使う。
+        # 別セッションのpytestが今まさに使っているDBを模す。
+        backend_root = _FAKE_ISSUE_63_REPO_ROOT / "backend"
+        db_name = build_database_name(backend_root, os.getpid())
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{db_name}"'))
+        cleanup_database_names.append(db_name)
+
+        # Act — 生存worktreeを空にして必ず候補に挙げつつ、作成直後DBの保護
+        # （Issue #63の別項目）は無効化してPID保護だけを見る
+        with admin_engine.connect() as connection:
+            plan = cleanup_module._build_plan(connection, [], min_age_minutes=0)
+
+        # Assert
+        assert db_name in plan.candidates
+        assert db_name in plan.protected_by_alive_pid
+        assert db_name not in plan.to_delete
+
+
+class TestBuildPlanRecentCreationProtection:
+    """作成直後DBの保護（Issue #63）。"""
+
+    def test_protects_freshly_created_database_within_grace_period(
+        self, admin_engine: Engine, cleanup_database_names: list[str]
+    ) -> None:
+        # Arrange — PID保護に引っかからないよう実在しえないPID（Issue #59）を使う
+        backend_root = _FAKE_ISSUE_63_REPO_ROOT / "backend"
+        db_name = build_database_name(backend_root, DEAD_PID)
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{db_name}"'))
+        cleanup_database_names.append(db_name)
+
+        # Act — 既定の猶予期間（`DEFAULT_MIN_AGE_MINUTES`分）のまま呼ぶ。
+        # 作成直後なので、実際の pg_stat_file 経由の作成時刻でも保護されるはず。
+        with admin_engine.connect() as connection:
+            plan = cleanup_module._build_plan(connection, [])
+
+        # Assert
+        assert db_name in plan.candidates
+        assert db_name in plan.protected_by_recent_creation
+        assert db_name not in plan.to_delete
+
+    def test_deletes_database_older_than_grace_period(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        admin_engine: Engine,
+        cleanup_database_names: list[str],
+    ) -> None:
+        """猶予期間より古い作成時刻であれば、従来どおり削除対象になること。
+
+        実際に猶予期間分（既定10分）待つのは非現実的なため、`_database_creation_times`
+        （`pg_stat_file` 経由の一括取得）をモックして、猶予期間より古い時刻を返す。
+        """
+        # Arrange — PID保護に引っかからないよう実在しえないPIDを使う
+        backend_root = _FAKE_ISSUE_63_REPO_ROOT / "backend"
+        db_name = build_database_name(backend_root, ANOTHER_DEAD_PID)
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{db_name}"'))
+        cleanup_database_names.append(db_name)
+
+        old_creation_time = datetime.now(UTC) - timedelta(
+            minutes=cleanup_module.DEFAULT_MIN_AGE_MINUTES + 1
+        )
+        monkeypatch.setattr(
+            cleanup_module,
+            "_database_creation_times",
+            lambda _connection: {db_name: old_creation_time},
+        )
+
+        # Act
+        with admin_engine.connect() as connection:
+            plan = cleanup_module._build_plan(connection, [])
+
+        # Assert — 猶予期間より古いため、保護されず削除対象のまま
+        assert db_name in plan.to_delete
+        assert db_name not in plan.protected_by_recent_creation
+
+    def test_min_age_minutes_zero_disables_protection(
+        self, admin_engine: Engine, cleanup_database_names: list[str]
+    ) -> None:
+        """`--min-age-minutes 0`（`min_age_minutes=0`）相当では、作成直後でも
+        保護されずに削除対象になること。
+        """
+        # Arrange
+        backend_root = _FAKE_ISSUE_63_REPO_ROOT / "backend"
+        db_name = build_database_name(backend_root, ANOTHER_DEAD_PID)
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{db_name}"'))
+        cleanup_database_names.append(db_name)
+
+        # Act — 作成直後だが、猶予期間そのものを無効化して呼ぶ
+        with admin_engine.connect() as connection:
+            plan = cleanup_module._build_plan(connection, [], min_age_minutes=0)
+
+        # Assert
+        assert db_name in plan.to_delete
+        assert db_name not in plan.protected_by_recent_creation
+
+
 class TestApplyPlan:
     """`--apply`（`_apply_plan`）の実DBに対する振る舞い。"""
 
     def test_dry_run_does_not_drop(
         self, admin_engine: Engine, cleanup_database_names: list[str]
     ) -> None:
-        # Arrange
+        # Arrange — 自分の PID を使うとIssue #63のPID生存保護に引っかかるため
+        # 実在しえないPID（Issue #59）を使う。作成直後DBの保護（Issue #63）も
+        # このテストの対象外のため無効化する。
         orphaned_backend_root = _FAKE_ORPHANED_REPO_ROOT / "backend"
-        db_name = build_database_name(orphaned_backend_root, os.getpid())
+        db_name = build_database_name(orphaned_backend_root, DEAD_PID)
         with admin_engine.connect() as connection:
             connection.execute(text(f'CREATE DATABASE "{db_name}"'))
         cleanup_database_names.append(db_name)
 
         with admin_engine.connect() as connection:
-            plan = cleanup_module._build_plan(connection, [])
+            plan = cleanup_module._build_plan(connection, [], min_age_minutes=0)
         assert db_name in plan.to_delete
 
         # Act — dry-run: _apply_planを呼ばない（mainの--apply未指定時の経路と同じ）
@@ -331,15 +497,15 @@ class TestApplyPlan:
     def test_apply_drops_candidate(
         self, admin_engine: Engine, cleanup_database_names: list[str]
     ) -> None:
-        # Arrange
+        # Arrange — 理由はtest_dry_run_does_not_dropと同じ
         orphaned_backend_root = _FAKE_ORPHANED_REPO_ROOT / "backend"
-        db_name = build_database_name(orphaned_backend_root, os.getpid())
+        db_name = build_database_name(orphaned_backend_root, DEAD_PID)
         with admin_engine.connect() as connection:
             connection.execute(text(f'CREATE DATABASE "{db_name}"'))
         cleanup_database_names.append(db_name)
 
         with admin_engine.connect() as connection:
-            plan = cleanup_module._build_plan(connection, [])
+            plan = cleanup_module._build_plan(connection, [], min_age_minutes=0)
             assert db_name in plan.to_delete
 
             # Act
@@ -360,15 +526,15 @@ class TestApplyPlan:
         """TOCTOU対策: `_build_plan`時点では接続が無くても、DROP直前に接続が
         張られていれば削除せずスキップし、`protected_by_connection`へ回ること。
         """
-        # Arrange
+        # Arrange — 理由はtest_dry_run_does_not_dropと同じ
         orphaned_backend_root = _FAKE_ORPHANED_REPO_ROOT / "backend"
-        db_name = build_database_name(orphaned_backend_root, os.getpid())
+        db_name = build_database_name(orphaned_backend_root, DEAD_PID)
         with admin_engine.connect() as connection:
             connection.execute(text(f'CREATE DATABASE "{db_name}"'))
         cleanup_database_names.append(db_name)
 
         with admin_engine.connect() as connection:
-            plan = cleanup_module._build_plan(connection, [])
+            plan = cleanup_module._build_plan(connection, [], min_age_minutes=0)
         assert db_name in plan.to_delete
 
         # Act — plan確定後、DROP実行前に接続を張ることで競合状態を再現する
@@ -404,7 +570,7 @@ class TestFakeRepoRoots:
     def test_module_level_roots_vary_by_worktree_and_process(self) -> None:
         # Arrange / Act / Assert — 固定値ではなく実行中の worktree とプロセスから決まること
         real_repo_root = cleanup_module.BACKEND_ROOT.parent
-        for root in (_FAKE_LIVE_REPO_ROOT, _FAKE_ORPHANED_REPO_ROOT):
+        for root in (_FAKE_LIVE_REPO_ROOT, _FAKE_ORPHANED_REPO_ROOT, _FAKE_ISSUE_63_REPO_ROOT):
             assert root.parent == real_repo_root.parent
             assert real_repo_root.name in root.name
             assert str(os.getpid()) in root.name
@@ -414,6 +580,7 @@ class TestFakeRepoRoots:
         real_hash = worktree_hash(cleanup_module.BACKEND_ROOT)
         assert worktree_hash(_FAKE_LIVE_REPO_ROOT / "backend") != real_hash
         assert worktree_hash(_FAKE_ORPHANED_REPO_ROOT / "backend") != real_hash
+        assert worktree_hash(_FAKE_ISSUE_63_REPO_ROOT / "backend") != real_hash
         assert worktree_hash(_FAKE_LIVE_REPO_ROOT / "backend") != worktree_hash(
             _FAKE_ORPHANED_REPO_ROOT / "backend"
         )
