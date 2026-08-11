@@ -176,8 +176,19 @@ assert_docker_usable() {
 # docker デーモンへ到達できないまま先へ進めない場面で落とす。
 # 権限で弾かれるのは docker group が現在のシェルへ反映されていないときが多く、
 # 素の失敗メッセージからは切り分けられないため、対処まで示す。
+# 案内へそのまま載せてよい文字。英数字と `. _ / -` と半角空白だけを通す。
+#
+# 案内は `sg docker -c <コマンド>` の形で示すが、`sg` は受け取った文字列を
+# `/bin/sh -c` で実行する（man sg）。つまり引用をどれだけ正しく付けても、中身は
+# シェルへ渡ってから改めてコマンドとして解釈される。`;` や `$(...)` が混じっていれば、
+# 案内をコピーして実行した人の手元で docker group（root 相当）の権限のまま動く。
+#
+# 危険な文字を数え上げる方式は漏れがそのまま穴になるため、通す側を並べる。判定から
+# 漏れた文字は「案内を出さない」側へ倒れる（Issue #71）。
+_SAFE_COMMAND_HINT_PATTERN='^[A-Za-z0-9._/ -]+$'
+
 assert_docker_reachable() {
-  local error command_hint
+  local error command_hint retry_hint
   error="$(docker info 2>&1 >/dev/null)" && return 0
   # 案内をそのまま実行できるよう、呼び出し元スクリプトのパスと引数を使う。ここで
   # `${BASH_SOURCE[0]}` を見るとこのライブラリ自身のパスになってしまう。引数を
@@ -187,11 +198,15 @@ assert_docker_reachable() {
   [[ -n "${ENTRYPOINT_ARGS:-}" ]] && command_hint="${command_hint} ${ENTRYPOINT_ARGS}"
 
   if [[ "$error" == *"permission denied"* ]]; then
-    # 案内は `sg docker -c` へ渡す形で示す。渡した先は docker group（root 相当）で
-    # 動くため、引用が壊れたまま読み手がコピーして実行すると、案内の外へ出たものまで
-    # 動いてしまう。`${var@Q}` でシェル用に引用してから埋める。自前でダブルクォートを
-    # 付けていたときは、引数にダブルクォートや `$(...)` が入ると素通りした（Issue #71）。
-    fail "dockerへ接続できません — docker groupが現在のシェルに反映されていない可能性があります。newgrp dockerで入り直すか、sg docker -c ${command_hint@Q} のように実行してください（docker groupはroot相当の権限を持ちます）。dockerの出力: ${error}"
+    # そのまま実行できる一行を出せるのは、中身が上のパターンに収まるときだけ。
+    # `${var@Q}` で引用するのは、案内文を読むシェルが1語として受け取れるようにするため。
+    # 引用だけでは `sg` の内側でのコマンド解釈は止められないので、両方が要る。
+    if [[ "$command_hint" =~ $_SAFE_COMMAND_HINT_PATTERN ]]; then
+      retry_hint="sg docker -c ${command_hint@Q} のように実行してください"
+    else
+      retry_hint="sg docker で入り直してから元のコマンドを実行し直してください（引数に特殊な文字が含まれるため、そのまま実行できる形では示しません）"
+    fi
+    fail "dockerへ接続できません — docker groupが現在のシェルに反映されていない可能性があります。newgrp dockerで入り直すか、${retry_hint}（docker groupはroot相当の権限を持ちます）。dockerの出力: ${error}"
   fi
   fail "dockerへ接続できません — dockerの出力: ${error}"
 }

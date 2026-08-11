@@ -40,7 +40,9 @@ _LIB = _REPO_ROOT / "scripts" / "ai-harness" / "lib" / "postgres.sh"
 # `PATH` を空にするテストがあるため、シェル自身は絶対パスで起動する。
 _BASH = shutil.which("bash") or "/bin/bash"
 # 子シェルの `$0`。`ENTRYPOINT_SCRIPT` が無いとき案内文がここへ落ちる。
-_SHELL_ARGV0 = "テスト用シェル"
+# 案内へそのまま載せてよい文字だけで組む（`assert_docker_reachable` は非ASCIIを
+# 安全側へ倒して一行の案内を出さないため、日本語の名前にすると別の分岐を見てしまう）。
+_SHELL_ARGV0 = "./test-entrypoint"
 
 # docker group が現在のシェルへ反映されていないときに docker が返すエラー。
 # この文字列を含むかどうかで案内の出し分けが決まる（Issue #55）。
@@ -116,34 +118,45 @@ def _capture(call: str) -> str:
     return f'{call} >/dev/null\nprintf "[%s]" "$({call})"'
 
 
+_HINT_MARKER = "sg docker -c "
+_HINT_TAIL = " のように実行してください"
+
+
+def _hint_text(stderr: str) -> str:
+    """案内文のうち `sg docker -c` へ渡している部分を取り出す。
+
+    テストが渡す値にこの区切り文言そのものを含めないこと。含めると途中で切れる。
+    """
+    assert _HINT_MARKER in stderr, stderr
+    tail = stderr.split(_HINT_MARKER, 1)[1]
+    return tail.split(_HINT_TAIL, 1)[0]
+
+
 def _hint_words(stderr: str) -> list[str]:
-    """案内文のうち `sg docker -c` へ渡している部分を、シェルの語へ分解する。
+    """案内の引数部分を、シェルの語へ分解する。
 
     引用が閉じているかを目視ではなく機械で見るため。閉じていれば語は1つになり、
     閉じていなければ後続が引用の外へ出るぶん語が増える（引用が開いたままなら
     `shlex.split` が `ValueError` を投げる）。
     """
-    marker = "sg docker -c "
-    assert marker in stderr, stderr
-    tail = stderr.split(marker, 1)[1]
-    return shlex.split(tail.split(" のように実行してください", 1)[0])
+    return shlex.split(_hint_text(stderr))
 
 
-def _expand_hint(stderr: str) -> subprocess.CompletedProcess[str]:
-    """案内文の引数部分を、実際に bash へ解釈させる。
+def _simulate_sg(stderr: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """`sg docker -c <案内の中身>` が実際にやることを模す。
 
-    語の数だけでは、ダブルクォートの内側で起きる展開（`$(...)` やバッククォート）を
-    捕まえられない。コピーして実行したときに何が起きるかまで見る。テストが渡すのは
-    展開されたことが出力に現れるだけの無害な文字列に限る。
+    `sg` は受け取った文字列を `/bin/sh` で実行する（man sg）。案内をコピーして
+    実行したとき何が動くかは、案内文を読むシェルが引用を解く段と、`sg` の内側で
+    シェルが解釈する段の両方を通してしか分からない。引用が1語に収まっていることを
+    見るだけでは、`;` や `$(...)` が内側で効くことを捕まえられない（Issue #71）。
+
+    ここで実行するのは、テストが用意した無害なスクリプトだけに限る。
     """
-    marker = "sg docker -c "
-    assert marker in stderr, stderr
-    tail = stderr.split(marker, 1)[1]
-    hint = tail.split(" のように実行してください", 1)[0]
     return subprocess.run(  # noqa: S603
-        [_BASH, "-c", f"printf '%s' {hint}"],
+        [_BASH, "-c", f"sh -c {_hint_text(stderr)}"],
         capture_output=True,
         text=True,
+        cwd=str(cwd),
         check=False,
         timeout=10,
     )
@@ -728,16 +741,22 @@ class TestAssertDockerReachable:
             pytest.param("--stop$(echo broken)", id="コマンド置換"),
             pytest.param("--stop`echo broken`", id="バッククォート"),
             pytest.param("--stop ; echo broken", id="セミコロンで区切る"),
+            pytest.param("--stop && echo broken", id="ANDで繋ぐ"),
+            pytest.param("--stop | echo broken", id="パイプで繋ぐ"),
+            pytest.param("--stop\necho broken", id="改行で区切る"),
             pytest.param("--stop $HOME", id="変数展開"),
+            pytest.param("--stop *", id="グロブ"),
+            pytest.param("--停止", id="非ASCII"),
         ],
     )
-    def test_引数に何が入っても案内はひとつながりのまま(
+    def test_特殊な文字を含む引数は一行の案内に載せない(
         self, tmp_path: Path, fake_docker_bin: Path, hostile_args: str
     ) -> None:
-        """案内は `sg docker -c` へ渡され、docker group（root 相当）で実行される。
+        """`sg docker -c <文字列>` の文字列は `/bin/sh` で実行される（man sg）。
 
-        `ENTRYPOINT_ARGS` は `run.sh` の引数がそのまま入る。引用が壊れると、読んだ人が
-        コピーして実行したときに案内の外へ出たものまで動く（Issue #71）。
+        引用を正しく付けても、引用が解けた後の中身は改めてコマンドとして解釈される。
+        そのまま実行できる一行を示すのは、中身が安全な文字だけのときに限る
+        （Issue #71）。それ以外は入り直す手順だけを案内する。
         """
         result = self._run(
             tmp_path,
@@ -748,12 +767,48 @@ class TestAssertDockerReachable:
         )
 
         assert result.returncode == 1
-        # 引用が閉じていれば、案内は語ひとつ。
-        assert _hint_words(result.stderr) == [f"./run.sh {hostile_args}"]
-        # そのまま実行しても、展開も別コマンドの実行も起きない。
-        expanded = _expand_hint(result.stderr)
-        assert expanded.returncode == 0, expanded.stderr
-        assert expanded.stdout == f"./run.sh {hostile_args}"
+        assert _HINT_MARKER not in result.stderr
+        # 危険な値そのものを案内へ載せない（コピーされる余地を残さない）。
+        assert hostile_args not in result.stderr
+        assert "そのまま実行できる形では示しません" in result.stderr
+        # 入り直す手そのものは、いずれにせよ示す。
+        assert "newgrp docker" in result.stderr
+        assert "root相当" in result.stderr
+
+    def test_安全な引数の案内はそのまま実行しても余計なことをしない(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """案内を `sg` が実行するところまで通して、動くものが1つだけであることを見る。
+
+        引用が1語に収まっているかを見るだけでは、`sg` の内側でのコマンド解釈を
+        捕まえられない。ここでは案内文の中身を実際に `sh -c` へ渡し、呼び出し元の
+        スクリプトだけが動くことを確かめる（実行するのはこのテストが用意した
+        無害なスクリプト）。
+        """
+        entry = tmp_path / "entry.sh"
+        entry.write_text(
+            '#!/usr/bin/env bash\nprintf "entry:[%s]" "$*"\n',
+            encoding="utf-8",
+        )
+        entry.chmod(0o700)
+        marker = tmp_path / "injected"
+
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            docker_stderr=_PERMISSION_DENIED,
+            entrypoint_script="./entry.sh",
+            entrypoint_args="--stop",
+        )
+
+        assert result.returncode == 1
+        assert _hint_words(result.stderr) == ["./entry.sh --stop"]
+
+        executed = _simulate_sg(result.stderr, tmp_path)
+
+        assert executed.returncode == 0, executed.stderr
+        assert executed.stdout == "entry:[--stop]"
+        assert not marker.exists()
 
     def test_引数が無ければスクリプトだけを案内する(
         self, tmp_path: Path, fake_docker_bin: Path
