@@ -1137,6 +1137,33 @@ class TestSanitizeForMessage:
         assert result.returncode == 0, result.stderr
         assert result.stdout == f"[{value}]"
 
+    def test_多バイト文字の途中では切らない(self, tmp_path: Path) -> None:
+        """バイト単位で切ると日本語が壊れる。壊れた文字を出さず手前で止める。
+
+        C1 制御文字を落とさない判断（日本語を壊さないため）と揃える。ここで途中から
+        切ると、同じ理由で守ったものを打ち切りの側から壊すことになる。
+        """
+        limit = self._limit(tmp_path)
+        head = "x" * (limit - 1)
+        # 3バイト文字。切れ目がこの文字の内側へ落ちる。
+        value = f"{head}あ{'x' * 10}"
+
+        result = self._run(tmp_path, value)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"[{head}…（以下省略）]"
+
+    def test_多バイト文字がちょうど収まるなら残す(self, tmp_path: Path) -> None:
+        """手前へ戻すのは切れ目が文字の内側にあるときだけ。取りすぎない。"""
+        limit = self._limit(tmp_path)
+        head = "x" * (limit - 3)
+        value = f"{head}あ{'x' * 10}"
+
+        result = self._run(tmp_path, value)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"[{head}あ…（以下省略）]"
+
     def test_長さは制御文字を落とした後で数える(self, tmp_path: Path) -> None:
         """制御文字で嵩を増して、読める部分を追い出せないようにする。"""
         limit = self._limit(tmp_path)
