@@ -983,14 +983,19 @@ IPv6 private network
 
 ### 認証を置かない前提で守る対策
 
-認証は置かない（§18、[docs/decisions.md](docs/decisions.md)）。APIを守る境界はネットワーク側にあり、`run.sh` はbackendとfrontendをlocalhostで動かす前提で書かれている。この前提の上に、以下の歯止めを置く。いずれも部分的な対策であり、認証の代わりにはならない。
+認証は置かない（§18、[docs/decisions.md](docs/decisions.md)）。APIを守る境界はネットワーク側にある。ただし `run.sh` の起動先は揃っていない。
+
+* backend（uvicorn）は `--host` を渡していないため、既定の127.0.0.1だけをlistenする。APIを他の端末から直接叩くことはできない
+* frontend（`next dev`）は `-H` を渡していないため、全インターフェースにbindする。同一LANの別端末からUIへ到達でき、そこに描画されるデータも見える
+
+この上に、以下の歯止めを置く。いずれも部分的な対策であり、認証の代わりにはならない。
 
 * CORSの許可オリジンを設定で絞る（[backend/src/techradar/config.py](backend/src/techradar/config.py) の `CORS_ALLOW_ORIGINS`、[backend/src/techradar/main.py](backend/src/techradar/main.py)）。効くのはブラウザ経由の呼び出しだけで、curlのような直接アクセスは防げない
 * 推薦APIにレート制限を掛ける（[backend/src/techradar/api/rate_limit.py](backend/src/techradar/api/rate_limit.py)）。掛かっているのは推薦の2つのエンドポイントだけで、他のAPIには無い
 * 巡回ジョブの重複起動を防ぐ（[backend/src/techradar/api/crawl.py](backend/src/techradar/api/crawl.py)）
-* 一括登録にファイルサイズとURL件数の上限を置く（[backend/src/techradar/api/articles.py](backend/src/techradar/api/articles.py) の `MAX_BULK_IMPORT_FILE_BYTES` / `MAX_BULK_IMPORT_URL_COUNT`）
+* 一括登録にファイルサイズとURL件数の上限を置く（[backend/src/techradar/api/bulk_import.py](backend/src/techradar/api/bulk_import.py) の `MAX_BULK_IMPORT_FILE_BYTES` / `MAX_BULK_IMPORT_URL_COUNT`）
 
-記事の単体登録やソース登録には回数の上限が無い。localhost以外へ晒す構成にするなら、認証とあわせてこの節を見直す。
+記事の単体登録やソース登録には回数の上限が無い。意図的に外部へ晒す構成にするなら、認証とあわせてこの節を見直す。
 
 ### 可観測性
 
