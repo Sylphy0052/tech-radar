@@ -20,6 +20,8 @@
 : "${PG_READY_TIMEOUT_SECONDS:=60}"
 # 1 回の TCP 疎通確認に許す秒数。ローカルの localhost 相手なら一瞬で終わる。
 : "${PG_PORT_PROBE_TIMEOUT_SECONDS:=3}"
+# 設定ファイルの場所。呼び出し元はリポジトリルートで実行する前提。
+: "${ENV_FILE:=.env}"
 
 # PostgreSQL を使えるようにする。既に起動していれば何もしない。
 # `CI=true` のときは何もせず返す。CI では services が PostgreSQL を提供するため。
@@ -57,20 +59,55 @@ ensure_postgres() {
   log "PostgreSQL 起動完了"
 }
 
+# 期待する公開先を返す。環境にあればそれ、無ければ設定ファイルから拾う。
+#
+# `run.sh` は設定ファイルを読んでから呼ぶが、`check.sh` は読まない。環境変数だけを見ると、
+# 設定ファイルで広げている運用に対して `check.sh` から呼ぶたび食い違い扱いになり、
+# 正しい状態に警告が出続ける。両方から同じ値を見るためにここで拾う。
+expected_bind_host() {
+  local from_file=""
+  [[ -n "${BIND_HOST:-}" ]] && { printf '%s' "$BIND_HOST"; return 0; }
+  from_file="$(sed -n 's/^[[:space:]]*BIND_HOST[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" 2>/dev/null | tail -1)"
+  from_file="${from_file%\"}"
+  from_file="${from_file#\"}"
+  printf '%s' "${from_file:-127.0.0.1}"
+}
+
 # 起動中のコンテナが、いま設定している範囲へ公開されているかを見る（Issue #65）。
 #
 # `docker compose` の ports を変えても、既に動いているコンテナは作り直すまで古い範囲の
 # ままになる。閉じたつもりが LAN へ開いたまま、という状態に気付けないため警告を出す。
-# 判定できないときは黙って返す。ここは起動の可否とは無関係で、docker へ触れないシェル
-# や別の手段で立てた PostgreSQL を相手にしていることもある。
+#
+# 見られる範囲には限りがある。docker へ触れないシェルや、compose を通さず立てた
+# PostgreSQL、別のプロジェクト名で起動したコンテナは判定できない。確かめられなかった
+# ことも黙らず出す。「警告が出ない＝閉じている」と読まれると、この処理が無いときより
+# 危うくなるため。
 warn_if_published_host_differs() {
-  local expected="${BIND_HOST:-127.0.0.1}" published
-  docker_is_reachable || return 0
-  published="$(docker compose -f "$COMPOSE_FILE" ps --format '{{.Publishers}}' postgres 2>/dev/null)" || return 0
-  [[ -n "$published" ]] || return 0
-  [[ "$published" == *"$expected"* ]] && return 0
-  log "警告: 起動中の PostgreSQL の公開先が設定 (${expected}) と違います — ${published}"
-  log "  反映するには ./run.sh --stop でコンテナを作り直してください（Issue #65）"
+  local expected published entry
+  expected="$(expected_bind_host)"
+
+  if ! docker_is_reachable; then
+    log "PostgreSQL の公開先は確認できませんでした（dockerへ到達できないため）"
+    return 0
+  fi
+
+  # URL だけを1行ずつ取り出して完全一致で見る。まとめて部分一致にすると、
+  # 127.0.0.1 が 127.0.0.10 に一致するような取りこぼしが起きる。
+  published="$(docker compose -f "$COMPOSE_FILE" ps --format '{{range .Publishers}}{{.URL}}
+{{end}}' postgres 2>/dev/null)" || published=""
+
+  if [[ -z "${published//[[:space:]]/}" ]]; then
+    log "PostgreSQL の公開先は確認できませんでした（compose から取得できないため）"
+    return 0
+  fi
+
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    [[ "$entry" == "$expected" ]] && continue
+    log "警告: 起動中の PostgreSQL が ${entry} へ公開されています（設定は ${expected}）"
+    log "  ./run.sh --stop で落としてから ./run.sh で起動し直すと反映されます（Issue #65）"
+    return 0
+  done <<<"$published"
 }
 
 # 起動済みかどうかを判定する。

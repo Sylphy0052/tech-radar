@@ -987,7 +987,7 @@ IPv6 private network
 
 既定に任せると範囲が揃わない。uvicornは `--host` の既定が127.0.0.1だが、`next dev` は `--hostname` を渡さないと全インターフェースへbindし、同一LANの別端末からUIへ到達できてしまう。dockerもホスト側のアドレスを省略すると全インターフェースへ公開する。認証を置いていない以上、到達した時点で中身が見える。PostgreSQLの接続情報はローカル実行を前提にした弱い既定値のため、なおさら届く範囲を絞る。
 
-既に起動しているコンテナは、この設定を変えても作り直すまで公開範囲が変わらない。変更を反映するには `./run.sh --stop` で一度落としてから起動し直す。食い違っている間は起動確認の共通処理（[scripts/ai-harness/lib/postgres.sh](scripts/ai-harness/lib/postgres.sh)）が警告を出す。
+既に起動しているコンテナは、この設定を変えても作り直すまで公開範囲が変わらない。変更を反映するには `./run.sh --stop` で一度落としてから起動し直す。食い違っている間は起動確認の共通処理（[scripts/ai-harness/lib/postgres.sh](scripts/ai-harness/lib/postgres.sh)）が警告を出す。判定できるのはcomposeから見えるコンテナだけで、dockerへ到達できないシェルや、composeを通さず立てたPostgreSQLは対象外になる。その場合は確認できなかったこと自体を出す。
 
 PostgreSQLへ `BIND_HOST` が渡るのは `run.sh` から起動したときだけになる。`check.sh` は設定ファイルを読まないため、そちらが先にコンテナを作ると閉じた既定（127.0.0.1）で作られる。
 

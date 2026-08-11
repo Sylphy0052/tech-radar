@@ -37,7 +37,7 @@ cp .env.example .env   # 必要に応じて値を編集する
 
 listen するインターフェースは `.env` の `BIND_HOST`（既定 `127.0.0.1`）で変更できる。backend・frontend・PostgreSQL のすべてに効く。認証を置いていないため、`0.0.0.0` などへ広げると同じ LAN の誰でも API と UI に触れる状態になる。PostgreSQL も同じで、接続情報はローカル実行を前提にした弱い既定値のまま晒される。広げる前に [PROJECT_SPEC.md](PROJECT_SPEC.md) の §24「認証を置かない前提で守る対策」を読むこと。
 
-`BIND_HOST` を変えても、既に起動している PostgreSQL コンテナは作り直すまで公開範囲が変わらない。`./run.sh --stop` で一度落としてから起動し直す。食い違っている間は `run.sh` と `check.sh` が起動のたびに警告する。
+`BIND_HOST` を変えても、既に起動している PostgreSQL コンテナは作り直すまで公開範囲が変わらない。`./run.sh --stop` で一度落としてから起動し直す。食い違っている間は `run.sh` と `check.sh` が起動のたびに警告する。ただし docker へ到達できないシェルや、compose を通さず立てた PostgreSQL、別のプロジェクト名で起動したコンテナは判定できない。その場合は確認できなかった旨を出す。
 
 PostgreSQL へ `BIND_HOST` が渡るのは `run.sh` から起動したときだけ。`check.sh` は `.env` を読まないため、そちらが先にコンテナを作ると閉じた既定（`127.0.0.1`）になる。
 
