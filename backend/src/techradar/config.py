@@ -33,6 +33,77 @@ _DEFAULT_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 _DEFAULT_FRONTEND_ORIGIN = "http://localhost:13700"
 
 
+def _reject_origin_that_cannot_match(origin: str) -> None:
+    """ブラウザが送る `Origin` ヘッダと一致し得ない表記なら `ValueError` を送出する。
+
+    `CORSMiddleware` は許可リストと `Origin` ヘッダを完全一致で比較する。表記が
+    ずれていても起動自体は成功し、preflight だけが静かに落ちるため原因が追いにくい。
+    起動時に弾いて設定した本人へ知らせる。
+
+    ワイルドカードだけは事情が異なる。完全一致比較の下では単にマッチしないだけだが、
+    `allow_origin_regex` を併用する変更が入った途端に本物のワイルドカードとして働く。
+    `main.create_app` は `allow_credentials=True` を指定しているため、そのとき許可
+    範囲が一気に広がる（Issue #62）。
+    """
+    # 生の文字列を先に見る。`urlsplit` は解析前にタブと改行を取り除くため、
+    # 解析結果だけを検証すると制御文字入りの値が素通りして許可リストへ入る。
+    # 非 ASCII も同様で、ブラウザは IDN を Punycode へ変換して送るため一致しない。
+    if not origin.isascii() or not origin.isprintable() or " " in origin:
+        message = (
+            f"CORS_ALLOW_ORIGINS の値 '{origin}' は ASCII の印字可能文字で指定してください"
+            "（制御文字・空白・非 ASCII 文字は Origin ヘッダに現れないため一致しない）"
+        )
+        raise ValueError(message)
+    parsed = urlsplit(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        message = (
+            f"CORS_ALLOW_ORIGINS の値 '{origin}' は "
+            "http(s)://<host>[:<port>] の形式で指定してください"
+        )
+        raise ValueError(message)
+    if parsed.path or parsed.query or parsed.fragment:
+        message = (
+            f"CORS_ALLOW_ORIGINS の値 '{origin}' にパス・クエリは指定できません"
+            "（Origin ヘッダと文字列一致しないため末尾スラッシュも不可）"
+        )
+        raise ValueError(message)
+    # userinfo をワイルドカードより先に見る。逆順だとパスワードに `*` を含む値が
+    # 「ワイルドカードは指定できません」と報告され、本当の原因が分からなくなる。
+    if parsed.username is not None or parsed.password is not None:
+        message = (
+            f"CORS_ALLOW_ORIGINS の値 '{origin}' に認証情報は指定できません"
+            "（Origin ヘッダに userinfo は含まれないため一致しない）"
+        )
+        raise ValueError(message)
+    if "*" in parsed.netloc:
+        message = (
+            f"CORS_ALLOW_ORIGINS の値 '{origin}' にワイルドカードは指定できません"
+            "（許可リストは Origin ヘッダとの完全一致で判定するため、書けてもマッチしない）"
+        )
+        raise ValueError(message)
+    if not parsed.hostname:
+        message = f"CORS_ALLOW_ORIGINS の値 '{origin}' からホスト名を読み取れません"
+        raise ValueError(message)
+    try:
+        _ = parsed.port
+    except ValueError as error:
+        message = (
+            f"CORS_ALLOW_ORIGINS の値 '{origin}' のポート番号を読み取れません"
+            "（ポートは 0-65535 の整数で指定する）"
+        )
+        raise ValueError(message) from error
+    # 小文字へ正規化せず拒否する。正規化すると設定ミスに気付かないまま動いてしまい、
+    # 後から表記を直す動機が消える。path・query・fragment は上で空を確認済みなので、
+    # ここで比較しているのは実質スキームとホストだけになる。
+    if origin != origin.lower():
+        message = (
+            f"CORS_ALLOW_ORIGINS の値 '{origin}' は小文字で指定してください"
+            "（ブラウザはスキームとホストを小文字に正規化して Origin ヘッダを送るため、"
+            "大文字のままでは一致しない）"
+        )
+        raise ValueError(message)
+
+
 class Settings(BaseSettings):
     """環境変数から読み込むアプリケーション設定。"""
 
@@ -169,28 +240,13 @@ class Settings(BaseSettings):
         空にすると全オリジンが拒否され、frontend から一切呼べない状態を設定ミスで
         作れてしまう。CORS を無効化したい意図と区別が付かないため、値を必須にする。
 
-        表記を検証するのは、`CORSMiddleware` が `Origin` ヘッダと許可リストを
-        文字列比較するため。スキーム欠落や末尾スラッシュがあっても起動自体は
-        成功し、ブラウザからの preflight だけが静かに落ちる。原因が追いにくい
-        ため、起動時に弾く。
+        個々の表記の検証は `_reject_origin_that_cannot_match` が担う。
         """
         if not value:
             message = "CORS_ALLOW_ORIGINS には 1 つ以上のオリジンを指定してください"
             raise ValueError(message)
         for origin in value:
-            parsed = urlsplit(origin)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                message = (
-                    f"CORS_ALLOW_ORIGINS の値 '{origin}' は "
-                    "http(s)://<host>[:<port>] の形式で指定してください"
-                )
-                raise ValueError(message)
-            if parsed.path or parsed.query or parsed.fragment:
-                message = (
-                    f"CORS_ALLOW_ORIGINS の値 '{origin}' にパス・クエリは指定できません"
-                    "（Origin ヘッダと文字列一致しないため末尾スラッシュも不可）"
-                )
-                raise ValueError(message)
+            _reject_origin_that_cannot_match(origin)
         return value
 
     @property

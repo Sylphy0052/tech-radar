@@ -159,3 +159,63 @@ def test_caches_settings_singleton():
 
     # Assert
     assert first is second
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        # ワイルドカード様の表記。現状の `CORSMiddleware` は完全一致比較のため
+        # マッチしないが、`allow_origin_regex` を併用する変更が入った途端に
+        # 実際のワイルドカードとして機能する（`allow_credentials=True` と組む）
+        "http://*",
+        "https://*.evil.com",
+        "http://*.localhost:13700",
+        # 大文字を含む表記。ブラウザの `Origin` ヘッダはスキームとホストが
+        # 小文字に正規化されて届くため、設定しても一致せず preflight だけが落ちる
+        "HTTP://LOCALHOST:13700",
+        "http://LocalHost:13700",
+        "HTTPS://example.com",
+        # userinfo。`Origin` ヘッダには含まれないため一致しない
+        "http://user:pass@localhost:13700",
+        "http://user@localhost:13700",
+        # 小文字強制はホストの種類を問わない
+        "http://[::A]:13700",
+        # ホスト名として成立しない
+        "http://:13700",
+        # 制御文字。`urlsplit` はタブと改行を解析前に取り除くため、解析結果だけを
+        # 見ると素通りする。許可リストへ入るのは除去前の文字列で、`Origin` ヘッダ
+        # には現れない
+        "http://evil\t.com",
+        "http://evil\n.com",
+        "http://evil\r.com",
+        "http://evil\x00.com",
+        # 空白と非 ASCII。ブラウザは IDN を Punycode へ変換して送るため一致しない
+        "http://exa mple.com",
+        "http://ｅｘａｍｐｌｅ.com",
+        # ポート番号として読み取れない
+        "http://localhost:abc",
+        "http://localhost:99999",
+    ],
+)
+def test_rejects_cors_allow_origins_that_cannot_match_an_origin_header(configured: str):
+    # Arrange / Act / Assert
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, cors_allow_origins=configured)
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        "http://localhost:13700",
+        "https://example.com",
+        "http://127.0.0.1:13700",
+        "https://sub.example.co.jp",
+        "http://[::1]:13700",
+    ],
+)
+def test_accepts_cors_allow_origins_that_match_an_origin_header(configured: str):
+    # Arrange / Act — 検証を厳しくしても正常系を巻き込まないこと
+    settings = Settings(_env_file=None, cors_allow_origins=configured)
+
+    # Assert
+    assert settings.cors_allow_origins == [configured]
