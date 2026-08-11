@@ -29,12 +29,13 @@
 Issue起票を経ずに実装へ着手しない。以下の順序で進める (skillの実体はグローバル規約を参照。一括実行は `/gitlab-dev-cycle`)。
 
 1. **Issue作成** — `gitlab-issue` で起票する。着手対象のIssueが存在しない状態でコードを書き始めない
-2. **着手時のIssue更新** — ラベルを `Todo` → `InProgress` へ付け替え、実装計画 (受入基準・変更対象・想定リスク) をIssueにコメント追記する。ブランチ作成前後のどちらでもよいが、実装開始前に完了させる
-3. **ブランチ作成** — `gitlab-branch` でIssueを元に `<type>/<IID>/<slug>` を作成する (worktree隔離が既定)
-4. **実装** — `implement` (TDD: RED→GREEN→REFACTOR) → `gitlab-commit`
-5. **MR** — `gitlab-mr-flow` で MR作成 (Draft) → self review (`gitlab-mr-review` self) → 指摘修正 (`gitlab-mr-address`) → merge。マージ条件は下記「自己マージ許可」に従う
-6. **終了時の更新** — `gitlab-cleanup` で Issue を `Done` + close、`docs/mr/` `docs/issue/` の移動、ブランチ/worktree掃除まで実行する。親ロードマップIssue (`label=roadmap`) のチェック項目も `gitlab-roadmap update` で更新する
-7. **セッション終了の明示** — cleanup 完了後、以下3点を必ず出力してから応答を終える。黙って次の作業へ進まない
+2. **着手前の衝突確認** — `glab api "projects/:id/issues/<IID>/notes"` でIssueのコメント履歴を見る。実装計画のコメントが既にあれば別セッションが動いているので着手しない。ラベルは自分で付け替えるため判定に使えず、`git worktree list` とオープンMRは相手がまだ作っていなければ空を返す (Issue #69)
+3. **着手時のIssue更新** — ラベルを `Todo` → `InProgress` へ付け替え、実装計画 (受入基準・変更対象・想定リスク) をIssueにコメント追記する。ブランチ作成前後のどちらでもよいが、実装開始前に完了させる
+4. **ブランチ作成** — `gitlab-branch` でIssueを元に `<type>/<IID>/<slug>` を作成する (worktree隔離が既定)
+5. **実装** — `implement` (TDD: RED→GREEN→REFACTOR) → `gitlab-commit`
+6. **MR** — `gitlab-mr-flow` で MR作成 (Draft) → self review (`gitlab-mr-review` self) → 指摘修正 (`gitlab-mr-address`) → merge。マージ条件は下記「自己マージ許可」に従う
+7. **終了時の更新** — `gitlab-cleanup` で Issue を `Done` + close、`docs/mr/` `docs/issue/` の移動、ブランチ/worktree掃除まで実行する。親ロードマップIssue (`label=roadmap`) のチェック項目も `gitlab-roadmap update` で更新する
+8. **セッション終了の明示** — cleanup 完了後、以下3点を必ず出力してから応答を終える。黙って次の作業へ進まない
    - **セッション終了**であることを明示する (「1サイクル完了、セッション終了」と書く)
    - **次に着手するIssue**を提案する (`gitlab-roadmap next` の結果を根拠に、IID・タイトル・選定理由を1行ずつ)
    - 提案できるIssueが無い、または今回の作業で**新たな課題を検出した**場合は、`gitlab-issue` でIssueを新規作成してからその IID を次着手候補として提示する
