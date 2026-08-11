@@ -97,7 +97,15 @@ DBが増え続けないよう、セッション終了時に自分のDBを DROP �
 
 frontend の vitest も同じ理由で `coverage.reportsDirectory` を `coverage/<pid>` に分けてある ([frontend/vitest.config.mts](frontend/vitest.config.mts))。共有していた頃は同時実行すると片方が `Something removed the coverage directory` で落ちた。孤児ディレクトリの掃除は [frontend/vitest.global-setup.ts](frontend/vitest.global-setup.ts) が行う。
 
-worktree を削除すると、そのハッシュを持つテスト用DBはどのworktreeからも掃除されなくなる（他worktreeのDBには触らない設計のため）。溜まってきたら `./scripts/cleanup-test-databases.sh` で確認し、`--apply` を付けて消す。生存しているworktreeのDBと、接続が残っているDBには触らない。
+worktree を削除すると、そのハッシュを持つテスト用DBはどのworktreeからも掃除されなくなる（他worktreeのDBには触らない設計のため）。この掃除は `gitlab-cleanup` skill の worktree 削除ステップから呼ばれる（Issue #60）。cleanup を通せば毎回 dry-run で候補が提示されるので、掃除の機会がその都度できる。ただし下記の理由で見送ることがあり、その場合は残る。
+
+cleanup を経由せず worktree を消したときは `./scripts/cleanup-test-databases.sh` で確認し、`--apply` を付けて消す。生存しているworktreeのDBと、接続が残っているDBには触らない。
+
+掃除は main workspace から、対象の worktree を削除し終えた後に実行する。worktree の中から実行すると、その worktree は生存扱いのままで掃除対象に入らない（実測で確認）。
+
+**別セッションが同じリポジトリでテストを走らせている最中に `--apply` しない。** そのテストが使う一時DBが削除候補に混ざり、巻き込んで消すことがある（実測で2件消し、別の回では実行中のDB 4件が候補に並んだ）。dry-run に心当たりのないDB名が出たら、他セッションの実行が終わってから改めて実行する。
+
+これは Issue #59 の対応後も残る。掃除スクリプトは「生存している worktree のどれにも属さないDB」を候補にするが、[backend/tests/fake_worktree_roots.py](backend/tests/fake_worktree_roots.py) が返すのは実在しないダミーパスであり、生存 worktree のいずれとも一致しないため。テスト実行中でも、その瞬間に接続が張られていなければ候補に入る。
 
 ### テストに壁時計の絶対時間を書かない (Issue #61)
 
