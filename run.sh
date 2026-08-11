@@ -92,11 +92,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-log "backend を起動します (http://localhost:${BACKEND_PORT})"
+log "backend を起動します (http://${BIND_HOST}:${BACKEND_PORT})"
 (cd backend && uv run uvicorn techradar.main:app --reload --host "$BIND_HOST" --port "$BACKEND_PORT") &
 pids+=($!)
 
-log "frontend を起動します (http://localhost:${FRONTEND_PORT})"
+log "frontend を起動します (http://${BIND_HOST}:${FRONTEND_PORT})"
 (cd frontend && npm run dev -- --hostname "$BIND_HOST" --port "$FRONTEND_PORT") &
 pids+=($!)
 

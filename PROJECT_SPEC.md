@@ -983,7 +983,7 @@ IPv6 private network
 
 ### 認証を置かない前提で守る対策
 
-認証は置かない（§18、[docs/decisions.md](docs/decisions.md)）。APIとUIを守る境界はネットワーク側にある。`run.sh` はbackendとfrontendの両方を `BIND_HOST`（既定 127.0.0.1）へ明示的にbindする（Issue #64）。
+認証は置かない（§18、[docs/decisions.md](docs/decisions.md)）。APIとUIを守る境界はネットワーク側にある。`run.sh` はbackendとfrontendの両方を `BIND_HOST`（既定 127.0.0.1）へ明示的にbindする（Issue #64）。PostgreSQLのポート公開はこの境界の外にあり、[infra/docker-compose.yml](infra/docker-compose.yml) がホストの全インターフェースへ向けている（Issue #65で決める）。
 
 既定に任せると範囲が揃わない。uvicornは `--host` の既定が127.0.0.1だが、`next dev` は `-H` を渡さないと全インターフェースへbindし、同一LANの別端末からUIへ到達できてしまう。認証を置いていない以上、到達した時点で中身が見える。
 
