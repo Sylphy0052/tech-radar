@@ -39,8 +39,12 @@ _LIB = _REPO_ROOT / "scripts" / "ai-harness" / "lib" / "postgres.sh"
 
 # `PATH` を空にするテストがあるため、シェル自身は絶対パスで起動する。
 _BASH = shutil.which("bash") or "/bin/bash"
+# `sg` が案内文の中身を実行するときのシェル（man sg より `/bin/sh`）。
+_SH = shutil.which("sh") or "/bin/sh"
 # 子シェルの `$0`。`ENTRYPOINT_SCRIPT` が無いとき案内文がここへ落ちる。
-_SHELL_ARGV0 = "テスト用シェル"
+# 案内へそのまま載せてよい文字だけで組む（`assert_docker_reachable` は非ASCIIを
+# 安全側へ倒して一行の案内を出さないため、日本語の名前にすると別の分岐を見てしまう）。
+_SHELL_ARGV0 = "./test-entrypoint"
 
 # docker group が現在のシェルへ反映されていないときに docker が返すエラー。
 # この文字列を含むかどうかで案内の出し分けが決まる（Issue #55）。
@@ -71,6 +75,10 @@ _DROPPED_FROM_ENV = frozenset(
         "FAKE_DOCKER_STDERR",
         "FAKE_DOCKER_EXIT",
         "FAKE_DOCKER_CALLS",
+        "FAKE_DOCKER_ENV_DUMP",
+        # 実行中のシェルが export していると、ロケールを固定しているのか
+        # 引き継いだだけなのかが見分けられなくなる。
+        "LC_ALL",
         "ENTRYPOINT_SCRIPT",
         "ENTRYPOINT_ARGS",
     }
@@ -116,6 +124,50 @@ def _capture(call: str) -> str:
     return f'{call} >/dev/null\nprintf "[%s]" "$({call})"'
 
 
+_HINT_MARKER = "sg docker -c "
+_HINT_TAIL = " のように実行してください"
+
+
+def _hint_text(stderr: str) -> str:
+    """案内文のうち `sg docker -c` へ渡している部分を取り出す。
+
+    テストが渡す値にこの区切り文言そのものを含めないこと。含めると途中で切れる。
+    """
+    assert _HINT_MARKER in stderr, stderr
+    tail = stderr.split(_HINT_MARKER, 1)[1]
+    return tail.split(_HINT_TAIL, 1)[0]
+
+
+def _hint_words(stderr: str) -> list[str]:
+    """案内の引数部分を、シェルの語へ分解する。
+
+    引用が閉じているかを目視ではなく機械で見るため。閉じていれば語は1つになり、
+    閉じていなければ後続が引用の外へ出るぶん語が増える（引用が開いたままなら
+    `shlex.split` が `ValueError` を投げる）。
+    """
+    return shlex.split(_hint_text(stderr))
+
+
+def _simulate_sg(stderr: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """`sg docker -c <案内の中身>` が実際にやることを模す。
+
+    `sg` は受け取った文字列を `/bin/sh` で実行する（man sg）。案内をコピーして
+    実行したとき何が動くかは、案内文を読むシェルが引用を解く段と、`sg` の内側で
+    シェルが解釈する段の両方を通してしか分からない。引用が1語に収まっていることを
+    見るだけでは、`;` や `$(...)` が内側で効くことを捕まえられない（Issue #71）。
+
+    ここで実行するのは、テストが用意した無害なスクリプトだけに限る。
+    """
+    return subprocess.run(  # noqa: S603
+        [_BASH, "-c", f"{_SH} -c {_hint_text(stderr)}"],
+        capture_output=True,
+        text=True,
+        cwd=str(cwd),
+        check=False,
+        timeout=10,
+    )
+
+
 def _write_env_file(tmp_path: Path, content: str) -> Path:
     """設定ファイルを作る。`newline=""` で改行をそのまま書き、CRLF を再現する。"""
     path = tmp_path / "env-file"
@@ -142,6 +194,9 @@ def fake_docker_bin(tmp_path: Path) -> Path:
         'if [[ -n "${FAKE_DOCKER_CALLS:-}" ]]; then\n'
         '  printf "%s\\n" "$*" >>"$FAKE_DOCKER_CALLS"\n'
         "fi\n"
+        'if [[ -n "${FAKE_DOCKER_ENV_DUMP:-}" ]]; then\n'
+        '  printf "LC_ALL=%s\\n" "${LC_ALL:-unset}" >>"$FAKE_DOCKER_ENV_DUMP"\n'
+        "fi\n"
         'printf "%s" "${FAKE_DOCKER_PS_OUTPUT:-}"\n'
         'printf "%s" "${FAKE_DOCKER_STDERR:-}" >&2\n'
         'exit "${FAKE_DOCKER_EXIT:-0}"\n',
@@ -154,6 +209,24 @@ def fake_docker_bin(tmp_path: Path) -> Path:
 
 def _path_with(bin_dir: Path) -> str:
     return f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+
+class TestLibraryLoading:
+    """ライブラリの読み込みそのもの。"""
+
+    def test_同じシェルで二回読み込んでも落ちない(self, tmp_path: Path) -> None:
+        """定数を `readonly` にすると、2回目の読み込みで再代入に失敗して落ちる。
+
+        いまの呼び出し元は1プロセスにつき1回しか読み込まないが、読み込み順が変わったり
+        対話シェルから読み直したりしたときに静かに壊れないようにしておく（Issue #71）。
+        """
+        result = _run_lib(
+            f"source {shlex.quote(str(_LIB))}\nprintf 'ok'",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "ok"
 
 
 class TestTrimSpaces:
@@ -634,9 +707,10 @@ class TestAssertDockerReachable:
     案内したり（実行しても何も起きない）、`./run.sh --stop` が `./run.sh` になったり
     （停止のつもりで起動する）するため、文言ごと固定する（Issue #52 → #55、#70）。
 
-    ここで見るのは案内が壊れていないことだけで、埋め込む値の安全性は見ていない。
-    引用符を含む値を渡したときに案内の引用が保たれるかは Issue #71 で扱う。この
-    クラスが緑でも、その観点は担保されていない。
+    埋め込む値の安全性も、このクラスで見る。`sg` は受け取った文字列を `/bin/sh` で
+    実行するため、引用が1語に収まっていても中身は改めて解釈される。特殊な文字を
+    含むときに一行の案内を出さないことと、出すときはそれを実行しても呼び出し元の
+    スクリプトしか動かないことを固定する（Issue #71）。
     """
 
     def _run(
@@ -682,10 +756,147 @@ class TestAssertDockerReachable:
         assert "docker group" in result.stderr
         assert "newgrp docker" in result.stderr
         # 案内はそのまま実行される。引数まで含めて崩れていないことを見る。
-        assert 'sg docker -c "./run.sh --stop"' in result.stderr
+        assert "sg docker -c './run.sh --stop'" in result.stderr
         # docker group を勧める以上、それが何を意味するかも一緒に出す。
         assert "root相当" in result.stderr
         assert _PERMISSION_DENIED in result.stderr
+
+    @pytest.mark.parametrize(
+        "hostile_args",
+        [
+            pytest.param('--stop" ; echo broken ; :"', id="ダブルクォートで抜け出す"),
+            pytest.param("--stop' ; echo broken ; :'", id="シングルクォートで抜け出す"),
+            pytest.param("--stop$(echo broken)", id="コマンド置換"),
+            pytest.param("--stop`echo broken`", id="バッククォート"),
+            pytest.param("--stop ; echo broken", id="セミコロンで区切る"),
+            pytest.param("--stop && echo broken", id="ANDで繋ぐ"),
+            pytest.param("--stop | echo broken", id="パイプで繋ぐ"),
+            pytest.param("--stop\necho broken", id="改行で区切る"),
+            pytest.param("--stop $HOME", id="変数展開"),
+            pytest.param("--stop *", id="グロブ"),
+            pytest.param("--停止", id="非ASCII"),
+        ],
+    )
+    def test_特殊な文字を含む引数は一行の案内に載せない(
+        self, tmp_path: Path, fake_docker_bin: Path, hostile_args: str
+    ) -> None:
+        """`sg docker -c <文字列>` の文字列は `/bin/sh` で実行される（man sg）。
+
+        引用を正しく付けても、引用が解けた後の中身は改めてコマンドとして解釈される。
+        そのまま実行できる一行を示すのは、中身が安全な文字だけのときに限る
+        （Issue #71）。それ以外は入り直す手順だけを案内する。
+        """
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            docker_stderr=_PERMISSION_DENIED,
+            entrypoint_script="./run.sh",
+            entrypoint_args=hostile_args,
+        )
+
+        assert result.returncode == 1
+        assert _HINT_MARKER not in result.stderr
+        # 危険な値そのものを案内へ載せない（コピーされる余地を残さない）。
+        assert hostile_args not in result.stderr
+        assert "そのまま実行できる形では示しません" in result.stderr
+        # 入り直す手そのものは、いずれにせよ示す。
+        assert "newgrp docker" in result.stderr
+        assert "root相当" in result.stderr
+
+    def test_安全な引数の案内はそのまま実行しても余計なことをしない(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """案内を `sg` が実行するところまで通して、動くものが1つだけであることを見る。
+
+        引用が1語に収まっているかを見るだけでは、`sg` の内側でのコマンド解釈を
+        捕まえられない。ここでは案内文の中身を実際に `sh -c` へ渡し、呼び出し元の
+        スクリプトだけが動くことを確かめる（実行するのはこのテストが用意した
+        無害なスクリプト）。
+        """
+        entry = tmp_path / "entry.sh"
+        entry.write_text(
+            '#!/usr/bin/env bash\nprintf "entry:[%s]" "$*"\n',
+            encoding="utf-8",
+        )
+        entry.chmod(0o700)
+
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            docker_stderr=_PERMISSION_DENIED,
+            entrypoint_script="./entry.sh",
+            entrypoint_args="--stop",
+        )
+
+        assert result.returncode == 1
+        assert _hint_words(result.stderr) == ["./entry.sh --stop"]
+
+        executed = _simulate_sg(result.stderr, tmp_path)
+
+        assert executed.returncode == 0, executed.stderr
+        # 呼び出し元が1回、引数ひとつで動いただけ。別のコマンドは動いていない。
+        assert executed.stdout == "entry:[--stop]"
+
+    def test_dockerを呼ぶときはロケールを固定する(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """判定の安定のために `LC_ALL=C` を `docker` まで届ける。
+
+        許可文字の判定に使う文字クラスの範囲指定は照合順序に左右される。docker 側の
+        メッセージも英語で揃えば `permission denied` の判定が安定する。`local` だけでは
+        呼び出し元が export 済みのときしか子プロセスへ渡らないため、`-x` が要る
+        （実測で確認した）。ここでは実行中のシェルの `LC_ALL` を落としてから呼ぶ。
+        """
+        dump = tmp_path / "docker-env"
+
+        result = _run_lib(
+            "assert_docker_reachable || true",
+            cwd=tmp_path,
+            env={
+                "PATH": _path_with(fake_docker_bin),
+                "FAKE_DOCKER_EXIT": "0",
+                "FAKE_DOCKER_ENV_DUMP": str(dump),
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert dump.read_text(encoding="utf-8").splitlines() == ["LC_ALL=C"]
+
+    def test_ロケールの固定を関数の外へ残さない(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """固定は判定と docker の呼び出しの間だけ。呼び出し元の環境は変えない。"""
+        result = _run_lib(
+            'assert_docker_reachable || true\nprintf "[%s]" "${LC_ALL:-unset}"',
+            cwd=tmp_path,
+            env={
+                "PATH": _path_with(fake_docker_bin),
+                "FAKE_DOCKER_EXIT": "0",
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "[unset]"
+
+    def test_呼び出し元のパスに特殊な文字があっても一行の案内を出さない(
+        self, tmp_path: Path, fake_docker_bin: Path
+    ) -> None:
+        """特殊な文字が入るのは引数側とは限らない。
+
+        パス側だけが原因のときも、案内を出さない側へ倒れる。案内の文言も原因を
+        引数と決めつけない（読み手が自分の打った引数を疑って迷う）。
+        """
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            docker_stderr=_PERMISSION_DENIED,
+            entrypoint_script="./起動.sh",
+        )
+
+        assert result.returncode == 1
+        assert _HINT_MARKER not in result.stderr
+        assert "./起動.sh" not in result.stderr
+        assert "実行しようとしたコマンド" in result.stderr
 
     def test_引数が無ければスクリプトだけを案内する(
         self, tmp_path: Path, fake_docker_bin: Path
@@ -699,7 +910,7 @@ class TestAssertDockerReachable:
         )
 
         assert result.returncode == 1
-        assert 'sg docker -c "./scripts/ai-harness/check.sh"' in result.stderr
+        assert "sg docker -c './scripts/ai-harness/check.sh'" in result.stderr
 
     def test_スクリプトが無くても引数だけは案内へ残る(
         self, tmp_path: Path, fake_docker_bin: Path
@@ -718,7 +929,7 @@ class TestAssertDockerReachable:
         )
 
         assert result.returncode == 1
-        assert f'sg docker -c "{_SHELL_ARGV0} --stop"' in result.stderr
+        assert f"sg docker -c '{_SHELL_ARGV0} --stop'" in result.stderr
 
     def test_呼び出し元が分からなければシェル自身へ落ちる(
         self, tmp_path: Path, fake_docker_bin: Path
@@ -732,7 +943,7 @@ class TestAssertDockerReachable:
         result = self._run(tmp_path, fake_docker_bin, docker_stderr=_PERMISSION_DENIED)
 
         assert result.returncode == 1
-        assert f'sg docker -c "{_SHELL_ARGV0}"' in result.stderr
+        assert f"sg docker -c '{_SHELL_ARGV0}'" in result.stderr
         assert "postgres.sh" not in result.stderr
 
     def test_権限以外のエラーでは入り直しを勧めない(
