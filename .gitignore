@@ -17,6 +17,9 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .coverage
+# pytest を並列実行すると、ワーカーごとに .coverage.<host>.<pid>.<乱数> が出る
+# (Issue #61)。正常終了時は合算後に消えるが、中断すると残る。
+.coverage.*
 coverage.xml
 htmlcov/
 
