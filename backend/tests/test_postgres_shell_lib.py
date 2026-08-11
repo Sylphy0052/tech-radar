@@ -116,6 +116,39 @@ def _capture(call: str) -> str:
     return f'{call} >/dev/null\nprintf "[%s]" "$({call})"'
 
 
+def _hint_words(stderr: str) -> list[str]:
+    """案内文のうち `sg docker -c` へ渡している部分を、シェルの語へ分解する。
+
+    引用が閉じているかを目視ではなく機械で見るため。閉じていれば語は1つになり、
+    閉じていなければ後続が引用の外へ出るぶん語が増える（引用が開いたままなら
+    `shlex.split` が `ValueError` を投げる）。
+    """
+    marker = "sg docker -c "
+    assert marker in stderr, stderr
+    tail = stderr.split(marker, 1)[1]
+    return shlex.split(tail.split(" のように実行してください", 1)[0])
+
+
+def _expand_hint(stderr: str) -> subprocess.CompletedProcess[str]:
+    """案内文の引数部分を、実際に bash へ解釈させる。
+
+    語の数だけでは、ダブルクォートの内側で起きる展開（`$(...)` やバッククォート）を
+    捕まえられない。コピーして実行したときに何が起きるかまで見る。テストが渡すのは
+    展開されたことが出力に現れるだけの無害な文字列に限る。
+    """
+    marker = "sg docker -c "
+    assert marker in stderr, stderr
+    tail = stderr.split(marker, 1)[1]
+    hint = tail.split(" のように実行してください", 1)[0]
+    return subprocess.run(  # noqa: S603
+        [_BASH, "-c", f"printf '%s' {hint}"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+
 def _write_env_file(tmp_path: Path, content: str) -> Path:
     """設定ファイルを作る。`newline=""` で改行をそのまま書き、CRLF を再現する。"""
     path = tmp_path / "env-file"
@@ -682,10 +715,45 @@ class TestAssertDockerReachable:
         assert "docker group" in result.stderr
         assert "newgrp docker" in result.stderr
         # 案内はそのまま実行される。引数まで含めて崩れていないことを見る。
-        assert 'sg docker -c "./run.sh --stop"' in result.stderr
+        assert "sg docker -c './run.sh --stop'" in result.stderr
         # docker group を勧める以上、それが何を意味するかも一緒に出す。
         assert "root相当" in result.stderr
         assert _PERMISSION_DENIED in result.stderr
+
+    @pytest.mark.parametrize(
+        "hostile_args",
+        [
+            pytest.param('--stop" ; echo broken ; :"', id="ダブルクォートで抜け出す"),
+            pytest.param("--stop' ; echo broken ; :'", id="シングルクォートで抜け出す"),
+            pytest.param("--stop$(echo broken)", id="コマンド置換"),
+            pytest.param("--stop`echo broken`", id="バッククォート"),
+            pytest.param("--stop ; echo broken", id="セミコロンで区切る"),
+            pytest.param("--stop $HOME", id="変数展開"),
+        ],
+    )
+    def test_引数に何が入っても案内はひとつながりのまま(
+        self, tmp_path: Path, fake_docker_bin: Path, hostile_args: str
+    ) -> None:
+        """案内は `sg docker -c` へ渡され、docker group（root 相当）で実行される。
+
+        `ENTRYPOINT_ARGS` は `run.sh` の引数がそのまま入る。引用が壊れると、読んだ人が
+        コピーして実行したときに案内の外へ出たものまで動く（Issue #71）。
+        """
+        result = self._run(
+            tmp_path,
+            fake_docker_bin,
+            docker_stderr=_PERMISSION_DENIED,
+            entrypoint_script="./run.sh",
+            entrypoint_args=hostile_args,
+        )
+
+        assert result.returncode == 1
+        # 引用が閉じていれば、案内は語ひとつ。
+        assert _hint_words(result.stderr) == [f"./run.sh {hostile_args}"]
+        # そのまま実行しても、展開も別コマンドの実行も起きない。
+        expanded = _expand_hint(result.stderr)
+        assert expanded.returncode == 0, expanded.stderr
+        assert expanded.stdout == f"./run.sh {hostile_args}"
 
     def test_引数が無ければスクリプトだけを案内する(
         self, tmp_path: Path, fake_docker_bin: Path
@@ -699,7 +767,7 @@ class TestAssertDockerReachable:
         )
 
         assert result.returncode == 1
-        assert 'sg docker -c "./scripts/ai-harness/check.sh"' in result.stderr
+        assert "sg docker -c './scripts/ai-harness/check.sh'" in result.stderr
 
     def test_スクリプトが無くても引数だけは案内へ残る(
         self, tmp_path: Path, fake_docker_bin: Path
@@ -718,7 +786,7 @@ class TestAssertDockerReachable:
         )
 
         assert result.returncode == 1
-        assert f'sg docker -c "{_SHELL_ARGV0} --stop"' in result.stderr
+        assert f"sg docker -c '{_SHELL_ARGV0} --stop'" in result.stderr
 
     def test_呼び出し元が分からなければシェル自身へ落ちる(
         self, tmp_path: Path, fake_docker_bin: Path
@@ -732,7 +800,7 @@ class TestAssertDockerReachable:
         result = self._run(tmp_path, fake_docker_bin, docker_stderr=_PERMISSION_DENIED)
 
         assert result.returncode == 1
-        assert f'sg docker -c "{_SHELL_ARGV0}"' in result.stderr
+        assert f"sg docker -c '{_SHELL_ARGV0}'" in result.stderr
         assert "postgres.sh" not in result.stderr
 
     def test_権限以外のエラーでは入り直しを勧めない(

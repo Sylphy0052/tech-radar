@@ -187,7 +187,11 @@ assert_docker_reachable() {
   [[ -n "${ENTRYPOINT_ARGS:-}" ]] && command_hint="${command_hint} ${ENTRYPOINT_ARGS}"
 
   if [[ "$error" == *"permission denied"* ]]; then
-    fail "dockerへ接続できません — docker groupが現在のシェルに反映されていない可能性があります。newgrp dockerで入り直すか、sg docker -c \"${command_hint}\" のように実行してください（docker groupはroot相当の権限を持ちます）。dockerの出力: ${error}"
+    # 案内は `sg docker -c` へ渡す形で示す。渡した先は docker group（root 相当）で
+    # 動くため、引用が壊れたまま読み手がコピーして実行すると、案内の外へ出たものまで
+    # 動いてしまう。`${var@Q}` でシェル用に引用してから埋める。自前でダブルクォートを
+    # 付けていたときは、引数にダブルクォートや `$(...)` が入ると素通りした（Issue #71）。
+    fail "dockerへ接続できません — docker groupが現在のシェルに反映されていない可能性があります。newgrp dockerで入り直すか、sg docker -c ${command_hint@Q} のように実行してください（docker groupはroot相当の権限を持ちます）。dockerの出力: ${error}"
   fi
   fail "dockerへ接続できません — dockerの出力: ${error}"
 }
