@@ -20,6 +20,8 @@
 : "${PG_READY_TIMEOUT_SECONDS:=60}"
 # 1 回の TCP 疎通確認に許す秒数。ローカルの localhost 相手なら一瞬で終わる。
 : "${PG_PORT_PROBE_TIMEOUT_SECONDS:=3}"
+# 設定ファイルの場所。呼び出し元はリポジトリルートで実行する前提。
+: "${ENV_FILE:=.env}"
 
 # PostgreSQL を使えるようにする。既に起動していれば何もしない。
 # `CI=true` のときは何もせず返す。CI では services が PostgreSQL を提供するため。
@@ -35,6 +37,7 @@ ensure_postgres() {
   local host="${POSTGRES_HOST:-localhost}" port="${POSTGRES_PORT:-5432}"
 
   if postgres_looks_available "$host" "$port"; then
+    warn_if_published_host_differs
     return 0
   fi
 
@@ -56,6 +59,85 @@ ensure_postgres() {
   log "PostgreSQL 起動完了"
 }
 
+# 前後の空白を落とす。
+trim_spaces() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+# 設定ファイルから `BIND_HOST` の値だけを拾う。読めなければ空を返す。
+#
+# `source` せずに拾うのは、呼び出し元の環境を書き換えないため。ファイルが無い場合に
+# ここで落ちないよう、失敗はすべて空として扱う（worktree を作った直後は設定ファイルが
+# まだ無く、`set -e` の下でそのまま落とすと起動確認どころではなくなる）。
+#
+# 読めるのは 1 行 1 代入の `BIND_HOST=<値>` だけ。`export` 付き・前後のクォート・
+# 空白を挟んだ行末コメント・CRLF は落とす。`FOO=bar; BIND_HOST=...` のように 1 行へ
+# 詰めた形は読まない（既定値へ落ちる）。`docker compose` の解決結果を使わないのは、
+# compose が読むのは `infra/` 側の設定であり、`run.sh` が渡す値とは別物になるため。
+read_bind_host_from_env_file() {
+  local raw=""
+  [[ -f "$ENV_FILE" ]] || return 0
+  raw="$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?BIND_HOST[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" 2>/dev/null | tail -1)" || return 0
+  raw="${raw%%#*}"
+  raw="${raw%$'\r'}"
+  raw="$(trim_spaces "$raw")"
+  raw="${raw#[\"\']}"
+  raw="${raw%[\"\']}"
+  trim_spaces "$raw"
+}
+
+# 期待する公開先を返す。環境にあればそれ、無ければ設定ファイルから拾う。
+#
+# `run.sh` は設定ファイルを読んでから呼ぶが、`check.sh` は読まない。環境変数だけを見ると、
+# 設定ファイルで広げている運用に対して `check.sh` から呼ぶたび食い違い扱いになり、
+# 正しい状態に警告が出続ける。両方から同じ値を見るためにここで拾う。
+expected_bind_host() {
+  local value="${BIND_HOST:-}"
+  [[ "$value" =~ [^[:space:]] ]] || value="$(read_bind_host_from_env_file)"
+  [[ "$value" =~ [^[:space:]] ]] || value="127.0.0.1"
+  trim_spaces "$value"
+}
+
+# 起動中のコンテナが、いま設定している範囲へ公開されているかを見る（Issue #65）。
+#
+# `docker compose` の ports を変えても、既に動いているコンテナは作り直すまで古い範囲の
+# ままになる。閉じたつもりが LAN へ開いたまま、という状態に気付けないため警告を出す。
+#
+# 見られる範囲には限りがある。docker へ触れないシェルや、compose を通さず立てた
+# PostgreSQL、別のプロジェクト名で起動したコンテナは判定できない。確かめられなかった
+# ことも黙らず出す。「警告が出ない＝閉じている」と読まれると、この処理が無いときより
+# 危うくなるため。
+warn_if_published_host_differs() {
+  local expected published entry
+  expected="$(expected_bind_host)"
+
+  if ! docker_is_reachable; then
+    log "PostgreSQL の公開先は確認できませんでした（dockerへ到達できないため）"
+    return 0
+  fi
+
+  # URL だけを1行ずつ取り出して完全一致で見る。まとめて部分一致にすると、
+  # 127.0.0.1 が 127.0.0.10 に一致するような取りこぼしが起きる。
+  published="$(docker compose -f "$COMPOSE_FILE" ps --format '{{range .Publishers}}{{.URL}}
+{{end}}' postgres 2>/dev/null)" || published=""
+
+  if [[ -z "${published//[[:space:]]/}" ]]; then
+    log "PostgreSQL の公開先は確認できませんでした（compose から取得できないため）"
+    return 0
+  fi
+
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    [[ "$entry" == "$expected" ]] && continue
+    log "警告: 起動中の PostgreSQL が ${entry} へ公開されています（設定は ${expected}）"
+    log "  ./run.sh --stop で落としてから ./run.sh で起動し直すと反映されます（Issue #65）"
+    return 0
+  done <<<"$published"
+}
+
 # 起動済みかどうかを判定する。
 # docker が使えるならコンテナ内の pg_isready まで見る。5432 は取り合いになりやすいポートで、
 # 別プロセスが掴んでいても TCP は通ってしまうため、確かめられるなら確かめる。
@@ -68,8 +150,19 @@ postgres_looks_available() {
   postgres_is_ready "$host" "$port"
 }
 
+# 一度確かめたら覚えておく。起動確認の経路で複数回聞かれるが、`docker info` は
+# 100ms 程度かかるうえ、同じプロセスの中で到達性が変わることはない。
 docker_is_reachable() {
-  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+  case "${_DOCKER_REACHABLE:-}" in
+    yes) return 0 ;;
+    no) return 1 ;;
+  esac
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    _DOCKER_REACHABLE=yes
+    return 0
+  fi
+  _DOCKER_REACHABLE=no
+  return 1
 }
 
 # docker が無いと先へ進めない場面で、未インストールと到達不可をまとめて判定する。
