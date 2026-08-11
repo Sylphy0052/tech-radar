@@ -19,6 +19,12 @@ PID 付き孤児（`find_orphaned_database_names`）と PID 無し旧形式
 分けている。前者は「PID が死んでいること」を生存シグナルにできるが、後者は
 PID を持たないため worktree ハッシュの一致までしか判定できず、最終的な削除可否
 （接続が残っていないか）は呼び出し側が別途確認する。
+
+さらに worktree そのものが削除された場合、そのハッシュを持つ DB は上記どちらの
+掃除経路にも掛からず恒久的に残ってしまう（Issue #51）。`git worktree list` 等で
+得られる「現存する worktree の一覧」を唯一の判定材料にする
+`find_database_names_without_live_worktree` を別途用意し、
+`backend/scripts/cleanup_test_databases.py` から使う。
 """
 
 from __future__ import annotations
@@ -173,3 +179,45 @@ def find_own_worktree_legacy_database_names(
     """
     own_hash = worktree_hash(backend_root)
     return [name for name in existing_names if parse_legacy_database_name(name) == own_hash]
+
+
+def find_database_names_without_live_worktree(
+    existing_names: Iterable[str],
+    *,
+    live_backend_roots: Iterable[Path],
+) -> list[str]:
+    """`existing_names` のうち、生存している worktree のどれにも属さない DB 名を返す（Issue #51）。
+
+    `find_orphaned_database_names`（PID の生死で判定）も
+    `find_own_worktree_legacy_database_names`（自分の worktree のハッシュのみ判定）も、
+    判定の軸は「worktree は存在し続ける」ことを前提にしている。worktree そのものが
+    `git worktree remove` 等で削除されると、そのハッシュを持つ DB はどちらの掃除経路にも
+    掛からず、次に同じ worktree が作られない限り恒久的に残ってしまう。
+
+    この関数は「そのハッシュを持つ worktree が現在ひとつも存在しない」ことだけを
+    判定軸にする点で、上記 2 つとは判定軸が異なる別関数として用意する
+    （`worktree_hash` と各 `parse_*` 関数は再利用する）。新形式
+    （`techradar_test_<hash8>_<pid>`）・旧形式（`techradar_test_<hash8>`）の両方を
+    対象にし、`live_backend_roots` のいずれかの worktree ハッシュに一致する DB は
+    対象から除く。PID の生死は見ない（standalone のスクリプトから使う想定で、
+    対象 worktree 上で動くプロセスの生死を確認する手段が無いため）。
+
+    名前が新形式・旧形式のいずれの形にも解釈できない場合（ハッシュ部分の長さ・
+    文字種が一致しない等）は対象に含めない（安全側＝消さない側に倒す）。
+
+    実際に削除してよいかの最終判断（その DB への接続が残っていないこと）は、
+    呼び出し側が DROP する直前に別途確認すること。
+    """
+    live_hashes = {worktree_hash(root) for root in live_backend_roots}
+    orphaned: list[str] = []
+    for name in existing_names:
+        parsed = parse_database_name(name)
+        if parsed is not None:
+            db_hash, _pid = parsed
+            if db_hash not in live_hashes:
+                orphaned.append(name)
+            continue
+        legacy_hash = parse_legacy_database_name(name)
+        if legacy_hash is not None and legacy_hash not in live_hashes:
+            orphaned.append(name)
+    return orphaned
