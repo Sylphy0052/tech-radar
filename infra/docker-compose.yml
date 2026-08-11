@@ -8,7 +8,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-techradar}
       POSTGRES_DB: ${POSTGRES_DB:-techradar}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # ホスト側のアドレスを省略すると全インターフェースへ公開される。認証情報は
+      # ローカル実行を前提にした弱い既定値のため、届く範囲を backend / frontend と
+      # 揃えて閉じる（Issue #65）。値は run.sh が設定ファイルから渡す。check.sh から
+      # 起動したときは環境に無く、ここの既定値が効く。
+      - "${BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init:/docker-entrypoint-initdb.d:ro

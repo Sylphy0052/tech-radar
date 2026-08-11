@@ -35,7 +35,9 @@ cp .env.example .env   # 必要に応じて値を編集する
 
 ポートは `.env` の `BACKEND_PORT` / `FRONTEND_PORT` で変更できる。変更する場合は CORS 許可オリジン（`CORS_ALLOW_ORIGINS`）と frontend の API ベース URL（`NEXT_PUBLIC_API_BASE_URL`）も揃える。
 
-listen するインターフェースは `.env` の `BIND_HOST`（既定 `127.0.0.1`）で変更できる。認証を置いていないため、`0.0.0.0` などへ広げると同じ LAN の誰でも API と UI に触れる状態になる。広げる前に [PROJECT_SPEC.md](PROJECT_SPEC.md) の §24「認証を置かない前提で守る対策」を読むこと。
+listen するインターフェースは `.env` の `BIND_HOST`（既定 `127.0.0.1`）で変更できる。backend・frontend・PostgreSQL のすべてに効く。認証を置いていないため、`0.0.0.0` などへ広げると同じ LAN の誰でも API と UI に触れる状態になる。広げる前に [PROJECT_SPEC.md](PROJECT_SPEC.md) の §24「認証を置かない前提で守る対策」を読むこと。
+
+`BIND_HOST` を変えても、既に起動している PostgreSQL コンテナは作り直すまで公開範囲が変わらない。`./run.sh --stop` で一度落としてから起動し直す。
 
 別の端末のブラウザから UI を開くつもりなら `NEXT_PUBLIC_API_BASE_URL` も揃える。この値は画面上の JavaScript が API を呼ぶ宛先で、既定の `http://localhost:18700` のままだと、その端末自身の localhost を見にいって失敗する。
 

@@ -983,9 +983,11 @@ IPv6 private network
 
 ### 認証を置かない前提で守る対策
 
-認証は置かない（§18、[docs/decisions.md](docs/decisions.md)）。APIとUIを守る境界はネットワーク側にある。`run.sh` はbackendとfrontendの両方を `BIND_HOST`（既定 127.0.0.1）へ明示的にbindする（Issue #64）。PostgreSQLのポート公開はこの境界の外にあり、[infra/docker-compose.yml](infra/docker-compose.yml) がホストの全インターフェースへ向けている（Issue #65で決める）。
+認証は置かない（§18、[docs/decisions.md](docs/decisions.md)）。APIとUIを守る境界はネットワーク側にある。backend・frontend・PostgreSQLのいずれも `BIND_HOST`（既定 127.0.0.1）へ明示的にbindする（Issue #64、#65）。`run.sh` がプロセスへ渡し、[infra/docker-compose.yml](infra/docker-compose.yml) がホスト側の公開アドレスとして使う。
 
-既定に任せると範囲が揃わない。uvicornは `--host` の既定が127.0.0.1だが、`next dev` は `-H` を渡さないと全インターフェースへbindし、同一LANの別端末からUIへ到達できてしまう。認証を置いていない以上、到達した時点で中身が見える。
+既定に任せると範囲が揃わない。uvicornは `--host` の既定が127.0.0.1だが、`next dev` は `--hostname` を渡さないと全インターフェースへbindし、同一LANの別端末からUIへ到達できてしまう。dockerもホスト側のアドレスを省略すると全インターフェースへ公開する。認証を置いていない以上、到達した時点で中身が見える。PostgreSQLの接続情報はローカル実行を前提にした弱い既定値のため、なおさら届く範囲を絞る。
+
+既に起動しているコンテナは、この設定を変えても作り直すまで公開範囲が変わらない。変更を反映するには `./run.sh --stop` で一度落としてから起動し直す。
 
 この上に、以下の歯止めを置く。いずれも部分的な対策であり、認証の代わりにはならない。
 
