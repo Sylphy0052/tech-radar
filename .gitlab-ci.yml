@@ -1,0 +1,101 @@
+stages: [lint, typecheck, test]
+
+variables:
+  UV_LINK_MODE: copy
+
+workflow:
+  rules:
+    # CI を一時停止している。復帰するときはこの 1 行を削除し、あわせて
+    # プロジェクト設定の jobs_enabled を true に戻す。
+    - when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ---- backend (Python / uv) ----
+.backend:
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  cache:
+    key: { files: [backend/uv.lock] }
+    paths: [backend/.venv/, .cache/uv/]
+  before_script:
+    - export UV_CACHE_DIR="${CI_PROJECT_DIR}/.cache/uv"
+    - cd backend
+    - uv sync --extra dev --frozen
+  rules:
+    - changes: [backend/**/*, .gitlab-ci.yml]
+
+backend:ruff-check:
+  extends: .backend
+  stage: lint
+  script: [uv run ruff check .]
+
+backend:ruff-format:
+  extends: .backend
+  stage: lint
+  script: [uv run ruff format --check .]
+
+backend:ty-check:
+  extends: .backend
+  stage: typecheck
+  script: [uv run ty check]
+
+backend:pytest:
+  extends: .backend
+  stage: test
+  # 結合テストは pgvector 入りの PostgreSQL を必要とする。
+  services:
+    - name: pgvector/pgvector:pg17
+      alias: postgres
+  variables:
+    # このジョブ内のサービスコンテナだけで完結する使い捨ての資格情報。
+    # 外部からは到達できず、実運用の DB とは無関係。
+    # 実運用の資格情報を使う必要が生じた場合は、ここに書かず
+    # GitLab の CI/CD Variables (masked) へ移すこと。
+    POSTGRES_USER: techradar
+    POSTGRES_PASSWORD: techradar
+    POSTGRES_DB: techradar
+    POSTGRES_HOST: postgres
+    # 値の二重管理を避けるため上の変数から組み立てる。ホスト名は service alias。
+    DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}"
+  script:
+    - uv run pytest --junitxml=pytest.xml --cov-report=xml
+  coverage: '/^TOTAL.*\s+(\d+(?:\.\d+)?%)$/'
+  artifacts:
+    when: always
+    reports:
+      junit: backend/pytest.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: backend/coverage.xml
+    expire_in: 1 week
+
+# ---- frontend (TypeScript / npm) ----
+.frontend:
+  image: node:22-bookworm-slim
+  cache:
+    key: { files: [frontend/package-lock.json] }
+    paths: [frontend/node_modules/]
+  before_script:
+    - cd frontend
+    - npm ci
+  rules:
+    - changes: [frontend/**/*, .gitlab-ci.yml]
+
+frontend:eslint:
+  extends: .frontend
+  stage: lint
+  script: [npm run lint]
+
+frontend:tsc:
+  extends: .frontend
+  stage: typecheck
+  script: [npm run typecheck]
+
+frontend:vitest:
+  extends: .frontend
+  stage: test
+  script: [npm test]
+  artifacts:
+    when: always
+    paths: [frontend/coverage/]
+    expire_in: 1 week

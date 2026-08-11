@@ -1,0 +1,2520 @@
+{
+  "components": {
+    "schemas": {
+      "ArticleFeedbackCreate": {
+        "additionalProperties": false,
+        "description": "フィードバック登録リクエスト。",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/FeedbackAction"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BadReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "ArticleFeedbackCreate",
+        "type": "object"
+      },
+      "ArticleFeedbackResponse": {
+        "description": "フィードバックの公開表現。\n\n`action` / `reason` は enum 型にする。`str` のままだと OpenAPI に enum が出ず、\n生成される `frontend/src/lib/api-schema.d.ts` でも単なる `string` になり、\nフロント側の文字列リテラル比較が型で守られない（Issue #13 自己レビュー B）。\nDB の `action` / `reason` 列は text 型だが、`from_attributes=True` により\npydantic がその文字列値から enum メンバーへ変換する。",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/FeedbackAction"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BadReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "reason",
+          "created_at"
+        ],
+        "title": "ArticleFeedbackResponse",
+        "type": "object"
+      },
+      "ArticleOrigin": {
+        "description": "関心記事に追加された経路（`PROJECT_SPEC.md` §7.1 の重み表に対応）。",
+        "enum": [
+          "manual",
+          "good",
+          "saved",
+          "read_full",
+          "clicked"
+        ],
+        "title": "ArticleOrigin",
+        "type": "string"
+      },
+      "ArticleRecommendationsResponse": {
+        "description": "記事起点推薦（`POST /api/articles/{article_id}/recommendations`）のレスポンス。",
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RecommendationItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "mode",
+          "generated_at",
+          "items"
+        ],
+        "title": "ArticleRecommendationsResponse",
+        "type": "object"
+      },
+      "ArticleRegistrationCreate": {
+        "additionalProperties": false,
+        "description": "URL 登録リクエスト。\n\nSSRF 対策そのもの（内部アドレスの拒否等）は実際に取得する\n`techradar.fetcher` 側の責務のため、ここではスキームと長さの形式検証に\n留める（`crawl.py` の `CrawlRunCreate` と同じ方針）。",
+        "properties": {
+          "url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "ArticleRegistrationCreate",
+        "type": "object"
+      },
+      "ArticleRegistrationResponse": {
+        "description": "登録の公開表現。\n\n`normalized_url` と `user_id` は含めない。内部の正規化結果やユーザー識別子を\n無用に露出させないため（`jobs.py` の `JobResponse` と同じ方針）。",
+        "properties": {
+          "article_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Article Id"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Reason"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "status",
+          "article_id",
+          "error_reason",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ArticleRegistrationResponse",
+        "type": "object"
+      },
+      "BadReason": {
+        "description": "Bad の理由（`PROJECT_SPEC.md` §7.2）。任意項目。",
+        "enum": [
+          "not_interested",
+          "too_shallow",
+          "already_known",
+          "promotional",
+          "untrusted_source",
+          "too_repetitive"
+        ],
+        "title": "BadReason",
+        "type": "string"
+      },
+      "Body_bulk_import_article_registrations_api_articles_bulk_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "description": "URLリストファイル（.md / .txt、UTF-8）",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_bulk_import_article_registrations_api_articles_bulk_post",
+        "type": "object"
+      },
+      "BulkArticleImportResponse": {
+        "description": "URL リストファイルの一括登録結果（`POST /api/articles/bulk`）。",
+        "properties": {
+          "created": {
+            "items": {
+              "$ref": "#/components/schemas/ArticleRegistrationResponse"
+            },
+            "title": "Created",
+            "type": "array"
+          },
+          "created_count": {
+            "title": "Created Count",
+            "type": "integer"
+          },
+          "duplicate_count": {
+            "title": "Duplicate Count",
+            "type": "integer"
+          },
+          "error_count": {
+            "title": "Error Count",
+            "type": "integer"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/BulkImportErrorItem"
+            },
+            "title": "Errors",
+            "type": "array"
+          }
+        },
+        "required": [
+          "created",
+          "created_count",
+          "duplicate_count",
+          "error_count",
+          "errors"
+        ],
+        "title": "BulkArticleImportResponse",
+        "type": "object"
+      },
+      "BulkImportErrorItem": {
+        "description": "一括登録でエラーとして扱った行の情報。",
+        "properties": {
+          "line": {
+            "title": "Line",
+            "type": "string"
+          },
+          "line_number": {
+            "title": "Line Number",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "line_number",
+          "line",
+          "reason"
+        ],
+        "title": "BulkImportErrorItem",
+        "type": "object"
+      },
+      "CrawlRunCreate": {
+        "additionalProperties": false,
+        "description": "巡回ジョブの起動リクエスト。省略可能。",
+        "properties": {
+          "source_domain": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Domain"
+          }
+        },
+        "title": "CrawlRunCreate",
+        "type": "object"
+      },
+      "CrawlRunResponse": {
+        "description": "巡回ジョブの起動結果。",
+        "properties": {
+          "job_id": {
+            "format": "uuid",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "status"
+        ],
+        "title": "CrawlRunResponse",
+        "type": "object"
+      },
+      "FeedResponse": {
+        "description": "Discover フィード（`GET /api/feed`）のレスポンス。",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RecommendationItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "FeedResponse",
+        "type": "object"
+      },
+      "FeedbackAction": {
+        "description": "記事へのフィードバック種別。",
+        "enum": [
+          "good",
+          "bad",
+          "save"
+        ],
+        "title": "FeedbackAction",
+        "type": "string"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "description": "ヘルスチェックのレスポンス。",
+        "properties": {
+          "brave_search_enabled": {
+            "title": "Brave Search Enabled",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "version",
+          "brave_search_enabled"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "InterestArticleItem": {
+        "description": "関心記事一覧（`GET /api/articles`）1 件のレスポンス（`PROJECT_SPEC.md` §6.3）。",
+        "properties": {
+          "article_id": {
+            "format": "uuid",
+            "title": "Article Id",
+            "type": "string"
+          },
+          "canonical_url": {
+            "title": "Canonical Url",
+            "type": "string"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "is_primary_source": {
+            "title": "Is Primary Source",
+            "type": "boolean"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/ArticleOrigin"
+          },
+          "original_url": {
+            "title": "Original Url",
+            "type": "string"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "registered_at": {
+            "format": "date-time",
+            "title": "Registered At",
+            "type": "string"
+          },
+          "source_domain": {
+            "title": "Source Domain",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topics": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "translated_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Translated Title"
+          }
+        },
+        "required": [
+          "article_id",
+          "origin",
+          "registered_at",
+          "title",
+          "translated_title",
+          "canonical_url",
+          "original_url",
+          "source_domain",
+          "language",
+          "topics",
+          "domain",
+          "category",
+          "content_type",
+          "is_primary_source",
+          "published_at"
+        ],
+        "title": "InterestArticleItem",
+        "type": "object"
+      },
+      "InterestArticleListResponse": {
+        "description": "関心記事一覧のレスポンス。",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InterestArticleItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "InterestArticleListResponse",
+        "type": "object"
+      },
+      "InterestClusterItem": {
+        "description": "関心クラスタ 1 件のレスポンス。\n\n`centroid_embedding` は 1024 次元でレスポンスが肥大化するため返さない\n（閲覧用途では不要な内部表現のため）。",
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "topics": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "weight": {
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "label",
+          "weight",
+          "topics",
+          "updated_at"
+        ],
+        "title": "InterestClusterItem",
+        "type": "object"
+      },
+      "InterestClusterListResponse": {
+        "description": "`GET /api/interests/clusters` のレスポンス。",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InterestClusterItem"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "InterestClusterListResponse",
+        "type": "object"
+      },
+      "InterestContentTypeItem": {
+        "description": "記事の性質（`articles.content_type`）別の件数 1 件。",
+        "properties": {
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "content_type",
+          "count"
+        ],
+        "title": "InterestContentTypeItem",
+        "type": "object"
+      },
+      "InterestDifficultyItem": {
+        "description": "難易度（`articles.difficulty`）別の件数 1 件。",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "difficulty": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Difficulty"
+          }
+        },
+        "required": [
+          "difficulty",
+          "count"
+        ],
+        "title": "InterestDifficultyItem",
+        "type": "object"
+      },
+      "InterestFeedbackRatio": {
+        "description": "action 別のフィードバック件数（`GET /api/interests/summary` 用）。",
+        "properties": {
+          "bad_count": {
+            "title": "Bad Count",
+            "type": "integer"
+          },
+          "good_count": {
+            "title": "Good Count",
+            "type": "integer"
+          },
+          "save_count": {
+            "title": "Save Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "good_count",
+          "bad_count",
+          "save_count"
+        ],
+        "title": "InterestFeedbackRatio",
+        "type": "object"
+      },
+      "InterestGenreItem": {
+        "description": "ジャンル（`articles.domain`）単位の関心度 1 件。\n\n他の内容分布系（technologies / content_types / difficulties）と異なり\ngood/save に絞らず、`negative_count`（Bad の件数）も併せて返す。「抑制中の\nジャンル」（`suppressed_topics`、topic 粒度）とは別軸で、domain 粒度でも\nGood/Bad の傾向を見たいという要求に応えるため（Issue #16）。",
+        "properties": {
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "negative_count": {
+            "title": "Negative Count",
+            "type": "integer"
+          },
+          "positive_count": {
+            "title": "Positive Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "domain",
+          "positive_count",
+          "negative_count"
+        ],
+        "title": "InterestGenreItem",
+        "type": "object"
+      },
+      "InterestPrimarySourceRatio": {
+        "description": "一次情報比率（`articles.is_primary_source`）。",
+        "properties": {
+          "primary_count": {
+            "title": "Primary Count",
+            "type": "integer"
+          },
+          "secondary_count": {
+            "title": "Secondary Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "primary_count",
+          "secondary_count"
+        ],
+        "title": "InterestPrimarySourceRatio",
+        "type": "object"
+      },
+      "InterestSummaryResponse": {
+        "description": "`GET /api/interests/summary` のレスポンス（関心分析画面向け、Issue #16）。",
+        "properties": {
+          "content_types": {
+            "items": {
+              "$ref": "#/components/schemas/InterestContentTypeItem"
+            },
+            "title": "Content Types",
+            "type": "array"
+          },
+          "difficulties": {
+            "items": {
+              "$ref": "#/components/schemas/InterestDifficultyItem"
+            },
+            "title": "Difficulties",
+            "type": "array"
+          },
+          "feedback_ratio": {
+            "$ref": "#/components/schemas/InterestFeedbackRatio"
+          },
+          "genres": {
+            "items": {
+              "$ref": "#/components/schemas/InterestGenreItem"
+            },
+            "title": "Genres",
+            "type": "array"
+          },
+          "primary_source_ratio": {
+            "$ref": "#/components/schemas/InterestPrimarySourceRatio"
+          },
+          "suppressed_topics": {
+            "items": {
+              "$ref": "#/components/schemas/SuppressedTopicItem"
+            },
+            "title": "Suppressed Topics",
+            "type": "array"
+          },
+          "technologies": {
+            "items": {
+              "$ref": "#/components/schemas/InterestTechnologyItem"
+            },
+            "title": "Technologies",
+            "type": "array"
+          }
+        },
+        "required": [
+          "genres",
+          "feedback_ratio",
+          "technologies",
+          "primary_source_ratio",
+          "content_types",
+          "difficulties",
+          "suppressed_topics"
+        ],
+        "title": "InterestSummaryResponse",
+        "type": "object"
+      },
+      "InterestTechnologyItem": {
+        "description": "技術タグ（`articles.technologies`）単位の関心記事件数 1 件。",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "technology": {
+            "title": "Technology",
+            "type": "string"
+          }
+        },
+        "required": [
+          "technology",
+          "count"
+        ],
+        "title": "InterestTechnologyItem",
+        "type": "object"
+      },
+      "InterestTimelineBucket": {
+        "description": "タイムラインの 1 週バケット。",
+        "properties": {
+          "interest_article_count": {
+            "title": "Interest Article Count",
+            "type": "integer"
+          },
+          "topics": {
+            "items": {
+              "$ref": "#/components/schemas/InterestTimelineTopicStats"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "week_start": {
+            "format": "date-time",
+            "title": "Week Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "week_start",
+          "interest_article_count",
+          "topics"
+        ],
+        "title": "InterestTimelineBucket",
+        "type": "object"
+      },
+      "InterestTimelineResponse": {
+        "description": "`GET /api/interests/timeline` のレスポンス。",
+        "properties": {
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/InterestTimelineBucket"
+            },
+            "title": "Buckets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "buckets"
+        ],
+        "title": "InterestTimelineResponse",
+        "type": "object"
+      },
+      "InterestTimelineTopicStats": {
+        "description": "タイムラインの 1 週バケット内、1 トピックぶんの集計。",
+        "properties": {
+          "negative_count": {
+            "title": "Negative Count",
+            "type": "integer"
+          },
+          "positive_count": {
+            "title": "Positive Count",
+            "type": "integer"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "positive_count",
+          "negative_count"
+        ],
+        "title": "InterestTimelineTopicStats",
+        "type": "object"
+      },
+      "InterestTopicItem": {
+        "description": "トピック単位の関心 1 件（`user_topic_preferences` 1 行）のレスポンス。",
+        "properties": {
+          "effective_weight": {
+            "title": "Effective Weight",
+            "type": "number"
+          },
+          "negative_weight": {
+            "title": "Negative Weight",
+            "type": "number"
+          },
+          "positive_weight": {
+            "title": "Positive Weight",
+            "type": "number"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "positive_weight",
+          "negative_weight",
+          "effective_weight",
+          "updated_at"
+        ],
+        "title": "InterestTopicItem",
+        "type": "object"
+      },
+      "InterestTopicListResponse": {
+        "description": "`GET /api/interests` のレスポンス。",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InterestTopicItem"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "InterestTopicListResponse",
+        "type": "object"
+      },
+      "JobResponse": {
+        "description": "ジョブ 1 件の進捗レスポンス。\n\n`payload` は含めない。ジョブの投入内容には将来 URL など内部情報が\n入りうるため、進捗確認 API で無条件に露出させない。\n\n`last_error` も同様の理由で含めない。失敗理由は例外メッセージそのものであり、\n今後 fetch_article などが外部 HTTP を叩くハンドラを持つと、アクセス先 URL や\nクエリパラメータ（API キーを含みうる）がそのまま入りうる。この進捗確認 API は\n無認証で叩けるため、ここで露出させると内部情報の漏洩経路になる。失敗理由は\n`operation_logs.error_reason`（非公開経路）に別途記録される。",
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "available_at": {
+            "format": "date-time",
+            "title": "Available At",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "status",
+          "attempts",
+          "created_at",
+          "available_at",
+          "started_at",
+          "finished_at"
+        ],
+        "title": "JobResponse",
+        "type": "object"
+      },
+      "RateLimitedResponse": {
+        "description": "429 のレスポンスボディ（`HTTPException` の既定形）。",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "RateLimitedResponse",
+        "type": "object"
+      },
+      "RecommendationItem": {
+        "description": "推薦結果 1 件のレスポンス。\n\n記事本文（`Article.body`）は含めない（ADR 0001、外部には表示しない）。",
+        "properties": {
+          "article_id": {
+            "format": "uuid",
+            "title": "Article Id",
+            "type": "string"
+          },
+          "canonical_url": {
+            "title": "Canonical Url",
+            "type": "string"
+          },
+          "feedback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArticleFeedbackResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "is_primary_source": {
+            "title": "Is Primary Source",
+            "type": "boolean"
+          },
+          "is_read": {
+            "title": "Is Read",
+            "type": "boolean"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "original_url": {
+            "title": "Original Url",
+            "type": "string"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "rank": {
+            "title": "Rank",
+            "type": "integer"
+          },
+          "reasons": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "title": "Reasons",
+            "type": "object"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "source_domain": {
+            "title": "Source Domain",
+            "type": "string"
+          },
+          "summary_ja": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Ja"
+          },
+          "technologies": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Technologies",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topics": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "translated_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Translated Title"
+          }
+        },
+        "required": [
+          "article_id",
+          "canonical_url",
+          "original_url",
+          "title",
+          "translated_title",
+          "summary_ja",
+          "source_domain",
+          "language",
+          "published_at",
+          "is_primary_source",
+          "topics",
+          "technologies",
+          "score",
+          "rank",
+          "reasons",
+          "is_read",
+          "feedback"
+        ],
+        "title": "RecommendationItem",
+        "type": "object"
+      },
+      "SourceCreate": {
+        "additionalProperties": false,
+        "description": "レジストリの新規登録。",
+        "properties": {
+          "authority_score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Authority Score",
+            "type": "number"
+          },
+          "domain": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Domain",
+            "type": "string"
+          },
+          "entity_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Entity Name",
+            "type": "string"
+          },
+          "github_org": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Github Org"
+          },
+          "path_pattern": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Pattern"
+          },
+          "source_type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "verified": {
+            "default": true,
+            "title": "Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "entity_name",
+          "domain",
+          "source_type",
+          "authority_score"
+        ],
+        "title": "SourceCreate",
+        "type": "object"
+      },
+      "SourceResponse": {
+        "description": "レジストリ 1 件のレスポンス。",
+        "properties": {
+          "authority_score": {
+            "title": "Authority Score",
+            "type": "number"
+          },
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "entity_name": {
+            "title": "Entity Name",
+            "type": "string"
+          },
+          "github_org": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Github Org"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "path_pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Pattern"
+          },
+          "source_type": {
+            "title": "Source Type",
+            "type": "string"
+          },
+          "verified": {
+            "title": "Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "entity_name",
+          "domain",
+          "path_pattern",
+          "github_org",
+          "source_type",
+          "authority_score",
+          "verified"
+        ],
+        "title": "SourceResponse",
+        "type": "object"
+      },
+      "SourceType": {
+        "description": "情報源の種別（`PROJECT_SPEC.md` §10 の Tier 分類に対応）。",
+        "enum": [
+          "official_documentation",
+          "api_specification",
+          "standard_specification",
+          "official_release_notes",
+          "official_blog",
+          "official_research",
+          "original_paper",
+          "official_github_release",
+          "company_tech_blog",
+          "maintainer_article",
+          "personal_article",
+          "tech_media",
+          "news_repost",
+          "summary_repost",
+          "unknown"
+        ],
+        "title": "SourceType",
+        "type": "string"
+      },
+      "SourceUpdate": {
+        "additionalProperties": false,
+        "description": "レジストリの部分更新。\n\n省略した項目は変更しない。`domain`・`path_pattern`・`github_org` は一意制約\n`uq_source_registry_domain` を構成するキーであり、`service._rule_key` の\n同一性判定にも使われるため変更させない（別のパターンにしたい場合は新規登録\nする）。ここを変更可能にすると、PATCH で行のキーを変えた後にシーダーを\n走らせたとき、変更前のキーに一致する config 側の原ルールが「存在しない」と\n判定されて別行として再投入され、手直しした行と矛盾する形で併存してしまう。",
+        "properties": {
+          "authority_score": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authority Score"
+          },
+          "entity_name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Name"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceType"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verified": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified"
+          }
+        },
+        "title": "SourceUpdate",
+        "type": "object"
+      },
+      "SuppressedTopicItem": {
+        "description": "抑制中のトピック 1 件（`user_topic_preferences.negative_weight > 0`）。\n\n抑制ロジック（`interest/topics.py` の `compute_negative_weight`）は\ndomain ではなく topic 粒度で動くため、ここも topic 粒度で返す。",
+        "properties": {
+          "effective_weight": {
+            "title": "Effective Weight",
+            "type": "number"
+          },
+          "negative_weight": {
+            "title": "Negative Weight",
+            "type": "number"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "negative_weight",
+          "effective_weight"
+        ],
+        "title": "SuppressedTopicItem",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "TechRadar API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/articles": {
+      "get": {
+        "description": "関心記事一覧を返す（`PROJECT_SPEC.md` §6.3）。\n\n手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）\n降順で返す。タイブレークに `user_articles.id` を使い、cursor はこの2つの組から作る。",
+        "operationId": "list_interest_articles_api_articles_get",
+        "parameters": [
+          {
+            "description": "登録方法。複数指定可",
+            "in": "query",
+            "name": "origin",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/ArticleOrigin"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "登録方法。複数指定可",
+              "title": "Origin"
+            }
+          },
+          {
+            "description": "ジャンル大分類",
+            "in": "query",
+            "name": "domain",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ジャンル大分類",
+              "title": "Domain"
+            }
+          },
+          {
+            "description": "ジャンル中分類",
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ジャンル中分類",
+              "title": "Category"
+            }
+          },
+          {
+            "description": "情報源",
+            "in": "query",
+            "name": "source_domain",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "情報源",
+              "title": "Source Domain"
+            }
+          },
+          {
+            "description": "言語",
+            "in": "query",
+            "name": "language",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "言語",
+              "title": "Language"
+            }
+          },
+          {
+            "description": "登録日時の期間（下限、含む）",
+            "in": "query",
+            "name": "registered_from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "登録日時の期間（下限、含む）",
+              "title": "Registered From"
+            }
+          },
+          {
+            "description": "登録日時の期間（上限、含む）",
+            "in": "query",
+            "name": "registered_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "登録日時の期間（上限、含む）",
+              "title": "Registered To"
+            }
+          },
+          {
+            "description": "公式 / 非公式",
+            "in": "query",
+            "name": "is_primary_source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "公式 / 非公式",
+              "title": "Is Primary Source"
+            }
+          },
+          {
+            "description": "前回レスポンスの next_cursor をそのまま渡す",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "前回レスポンスの next_cursor をそのまま渡す",
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterestArticleListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Interest Articles",
+        "tags": [
+          "articles"
+        ]
+      },
+      "post": {
+        "description": "URL を登録し、記事取得ジョブを積む。\n\n同じ URL（正規化後）を何度も登録しても fetch ジョブを積み増さないよう、\n既存登録があればそれをそのまま返す。",
+        "operationId": "create_article_registration_api_articles_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArticleRegistrationCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleRegistrationResponse"
+                }
+              }
+            },
+            "description": "同一 URL の登録が既に存在するため、新規作成せず既存の登録を返した。"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleRegistrationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Article Registration",
+        "tags": [
+          "articles"
+        ]
+      }
+    },
+    "/api/articles/bulk": {
+      "post": {
+        "description": "URL リストファイルをアップロードし、行ごとに URL を抽出して一括登録する（Issue #39）。\n\n1件でも不正な行があっても全体を拒否せず、抽出できた URL をファイル内の出現順に\n処理する。ファイルサイズ・抽出後の URL 件数が上限を超える場合は DB を一切\n変更せず 413 を返す（`_read_upload_within_limit` / 抽出後件数チェックのどちらも、\n行ごとの DB 処理を始める前に完了させることで担保する）。",
+        "operationId": "bulk_import_article_registrations_api_articles_bulk_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_bulk_import_article_registrations_api_articles_bulk_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkArticleImportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bulk Import Article Registrations",
+        "tags": [
+          "articles"
+        ]
+      }
+    },
+    "/api/articles/registrations/{registration_id}": {
+      "get": {
+        "description": "登録の状態を取得する。\n\n作成側と同じく `user_id` で絞る。絞らないままにすると、認証を導入した際に\nこのエンドポイントだけ他ユーザーの登録を返してしまう。",
+        "operationId": "get_article_registration_api_articles_registrations__registration_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "registration_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Registration Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleRegistrationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Article Registration",
+        "tags": [
+          "articles"
+        ]
+      }
+    },
+    "/api/articles/{article_id}/feedback": {
+      "delete": {
+        "description": "記事へのフィードバックを取り消す。\n\nGood / 保存に由来する `user_articles` 行も合わせて削除する\n（手動登録由来の行は残す）。関心記事の構成が変わりうるため、関心クラスタの\n再構築ジョブも積む。\n\nトピック単位の選好（`user_topic_preferences`）は、取り消し後の直近\nフィードバック集合から `negative_weight` を再計算する\n（`recompute_topic_preferences_after_removal`、Issue #15 自己レビュー 1）。\n`update_topic_preferences`（POST 側）が使う増加方向のみの更新関数は\n取り消しには使わない（「上がった分を差し引く」処理を持たないため）。\n\n呼び出し順序が重要: `session.delete(feedback)` の後に\n`session.flush()` で DELETE を確定させてから\n`recompute_topic_preferences_after_removal` を呼ぶ。先に確定させないと、\n再計算が読む「直近フィードバック」に削除対象自身が残ったままになり、\n取り消したはずのフィードバックが再計算結果に混入してしまう\n（`recompute_topic_preferences_after_removal` の docstring 参照）。",
+        "operationId": "delete_article_feedback_api_articles__article_id__feedback_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "article_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Article Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Article Feedback",
+        "tags": [
+          "feedback"
+        ]
+      },
+      "post": {
+        "description": "記事へ Good / Bad / 保存を記録する（`PROJECT_SPEC.md` §7）。\n\n合わせてトピック単位の選好（`user_topic_preferences`）を同期更新し\n（`update_topic_preferences`）、関心クラスタの再構築ジョブを積む\n（`_enqueue_interest_cluster_rebuild`、Issue #15）。",
+        "operationId": "create_article_feedback_api_articles__article_id__feedback_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "article_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Article Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArticleFeedbackCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleFeedbackResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Article Feedback",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/articles/{article_id}/interest": {
+      "delete": {
+        "description": "記事を関心記事一覧から除外する。\n\n`user_articles` の該当行を削除するだけで、`article_feedback` には触れない\n（Bad フィードバックも付けない）。「興味がない」（Bad）と「間違って登録した」\n（一覧からの除外）は別の意思表示のため区別する（Issue #14 ヒアリング済み決定事項）。",
+        "operationId": "delete_interest_article_api_articles__article_id__interest_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "article_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Article Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Interest Article",
+        "tags": [
+          "articles"
+        ]
+      }
+    },
+    "/api/articles/{article_id}/recommendations": {
+      "post": {
+        "description": "指定記事に近い記事を推薦する（`PROJECT_SPEC.md` §13.1）。\n\n構成比は適用せず、`rank_candidates` の上位をそのまま rank 昇順で返す\n（`recommendation/service.py` の ARTICLE_BASED モード）。",
+        "operationId": "create_article_recommendations_api_articles__article_id__recommendations_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "article_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Article Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleRecommendationsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitedResponse"
+                }
+              }
+            },
+            "description": "単位時間あたりのリクエスト数が上限を超えた。`Retry-After` ヘッダに再試行までの待機秒数が入る。",
+            "headers": {
+              "Retry-After": {
+                "description": "再試行までの待機秒数（整数へ切り上げ）。",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Create Article Recommendations",
+        "tags": [
+          "recommendations"
+        ]
+      }
+    },
+    "/api/crawl/runs": {
+      "post": {
+        "description": "巡回ジョブを enqueue する。\n\nUI のボタン連打などで重複起動されると、`crawl_sources` 1件ごとに発生する\n検索 API / LLM 呼び出しが無制限に積み上がり、追加課金ゼロという前提に\n直接影響する。pending または実行中 status の `crawl_sources` ジョブが既に\n存在する場合は新規作成せず、その job_id を 200 OK で返す。存在しなければ\n従来どおり新規に enqueue して 201 Created を返す。\n\n事前確認と INSERT の間には別リクエストが割り込みうる（TOCTOU）。SELECT 時点で\n対象の行が無い以上、行ロックでは塞げないため、最終的な排他は部分ユニーク\nインデックス `ux_jobs_active_crawl_sources` に任せ、ここではその違反を\n「相手が先に積んだ」ものとして扱う。",
+        "operationId": "create_crawl_run_api_crawl_runs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CrawlRunCreate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CrawlRunResponse"
+                }
+              }
+            },
+            "description": "pending または実行中の crawl_sources ジョブが既に存在するため、新規作成せず既存ジョブを返した。"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CrawlRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Crawl Run",
+        "tags": [
+          "crawl"
+        ]
+      }
+    },
+    "/api/feed": {
+      "get": {
+        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。\n\n`cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ\n新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。\n`cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、\nページ間で重複が出ないようにする（受入基準）。\n\n`next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で\ncursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が\n非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで\n終端と判断せず、`next_cursor` が null になるまで辿ること。\n\n古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を\n削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。",
+        "operationId": "get_feed_api_feed_get",
+        "parameters": [
+          {
+            "description": "前回レスポンスの next_cursor をそのまま渡す",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "前回レスポンスの next_cursor をそのまま渡す",
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitedResponse"
+                }
+              }
+            },
+            "description": "単位時間あたりのリクエスト数が上限を超えた。`Retry-After` ヘッダに再試行までの待機秒数が入る。",
+            "headers": {
+              "Retry-After": {
+                "description": "再試行までの待機秒数（整数へ切り上げ）。",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get Feed",
+        "tags": [
+          "recommendations"
+        ]
+      }
+    },
+    "/api/health": {
+      "get": {
+        "description": "アプリケーションの稼働状態を返す。",
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/api/interests": {
+      "get": {
+        "description": "トピック単位の関心一覧を返す（`PROJECT_SPEC.md` §7.1, §7.2）。\n\n`effective_weight` 降順（同値は `topic` 昇順）で返す。並び順を安定させる\nためにタイブレークを必ず付ける（`recommendation/service.py` の他の並び順と\n同じ方針）。件数はトピックの語彙数に比例し高々数百件程度に収まる見込み\nのため、`cursor` ではなく単純な `offset`/`limit` にする（`api/articles.py`\nの関心記事一覧のような無限スクロール想定の cursor ページングは過剰）。",
+        "operationId": "list_interest_topics_api_interests_get",
+        "parameters": [
+          {
+            "description": "取得件数",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "description": "取得件数",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "スキップする件数",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "スキップする件数",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterestTopicListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Interest Topics",
+        "tags": [
+          "interests"
+        ]
+      }
+    },
+    "/api/interests/clusters": {
+      "get": {
+        "description": "関心クラスタ一覧を返す（`PROJECT_SPEC.md` §8）。\n\n`weight` 降順（同値は `label` 昇順）で返す。クラスタ数は\n`config/scoring.yaml` の `clustering.max_clusters` で上限が付いており\n（既定 8）小規模なため、ページングは設けない。",
+        "operationId": "list_interest_clusters_api_interests_clusters_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterestClusterListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Interest Clusters",
+        "tags": [
+          "interests"
+        ]
+      }
+    },
+    "/api/interests/summary": {
+      "get": {
+        "description": "関心分析画面向けのサマリーを返す（`PROJECT_SPEC.md` §7, §8, Issue #16）。\n\n集計元は `article_feedback JOIN articles`（`user_articles` は使わない）。\nGood/Bad 比率は action 別の件数をそのまま返すが、内容分布系（技術・一次\n情報比率・content_type・難易度）は `af.action IN ('good', 'save')` に\n絞って集計する（Bad を付けた記事の属性まで「関心」として数えると実態と\nずれるため）。ジャンル別関心度だけは例外で、good/save の positive_count に\n加えて bad の negative_count も返す（`InterestGenreItem` docstring 参照）。\n\n抑制中のトピックは `user_topic_preferences.negative_weight > 0` の行を返す。\n抑制ロジック（`interest/topics.py`）が domain ではなく topic 粒度で動くため、\nここも topic 粒度で返す（`GET /api/interests` と同じ ORM クエリ）。\n\n集計は SQL 側で完結させ、Python へ全件ロードしない（`/timeline` と同じ方針）。\nデータが 1 件も無いときは各リストが空配列、`feedback_ratio` /\n`primary_source_ratio` は全項目 0 になる（GROUP BY 無しの集約クエリは\n行が無くても必ず 1 行返るため、例外にはならない）。",
+        "operationId": "get_interest_summary_api_interests_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterestSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Interest Summary",
+        "tags": [
+          "interests"
+        ]
+      }
+    },
+    "/api/interests/timeline": {
+      "get": {
+        "description": "関心の推移を週単位のバケットへ集計して返す。\n\n履歴テーブルは新設せず、`user_articles.created_at` と\n`article_feedback.created_at` を集計元にする。`weeks` は `now` から\n`weeks * 7日` 遡った時刻以降を対象にする目安であり、境界週は部分週に\nなりうる（ちょうど週の途中から `since` が始まるため）。\n\nデータが1件も無い週はバケットを作らない（0 件のバケットを並べても\n情報量が無いため）。トピック別集計とは独立に、関心記事の追加件数\n（`user_articles`）も同じ週バケットへ載せて返す。",
+        "operationId": "get_interest_timeline_api_interests_timeline_get",
+        "parameters": [
+          {
+            "description": "遡って集計する週数",
+            "in": "query",
+            "name": "weeks",
+            "required": false,
+            "schema": {
+              "default": 12,
+              "description": "遡って集計する週数",
+              "maximum": 52,
+              "minimum": 1,
+              "title": "Weeks",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterestTimelineResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Interest Timeline",
+        "tags": [
+          "interests"
+        ]
+      }
+    },
+    "/api/jobs/{job_id}": {
+      "get": {
+        "description": "ジョブの進捗を取得する。",
+        "operationId": "get_job_api_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/sources": {
+      "get": {
+        "description": "登録済みの情報源を一覧する。",
+        "operationId": "list_sources_api_sources_get",
+        "parameters": [
+          {
+            "description": "ドメインの部分一致で絞り込む",
+            "in": "query",
+            "name": "domain",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ドメインの部分一致で絞り込む",
+              "title": "Domain"
+            }
+          },
+          {
+            "description": "企業・OSS 名の部分一致で絞り込む",
+            "in": "query",
+            "name": "entity_name",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "企業・OSS 名の部分一致で絞り込む",
+              "title": "Entity Name"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SourceResponse"
+                  },
+                  "title": "Response List Sources Api Sources Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Sources",
+        "tags": [
+          "sources"
+        ]
+      },
+      "post": {
+        "description": "情報源を登録する。",
+        "operationId": "create_source_api_sources_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Source",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/sources/{source_id}": {
+      "patch": {
+        "description": "情報源を部分更新する。\n\n更新した行は手動確認済みとして扱う（`verified` を明示指定した場合はそれに従う）。",
+        "operationId": "update_source_api_sources__source_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Source",
+        "tags": [
+          "sources"
+        ]
+      }
+    }
+  }
+}
