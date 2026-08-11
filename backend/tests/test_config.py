@@ -178,8 +178,23 @@ def test_caches_settings_singleton():
         # userinfo。`Origin` ヘッダには含まれないため一致しない
         "http://user:pass@localhost:13700",
         "http://user@localhost:13700",
+        # 小文字強制はホストの種類を問わない
+        "http://[::A]:13700",
         # ホスト名として成立しない
         "http://:13700",
+        # 制御文字。`urlsplit` はタブと改行を解析前に取り除くため、解析結果だけを
+        # 見ると素通りする。許可リストへ入るのは除去前の文字列で、`Origin` ヘッダ
+        # には現れない
+        "http://evil\t.com",
+        "http://evil\n.com",
+        "http://evil\r.com",
+        "http://evil\x00.com",
+        # 空白と非 ASCII。ブラウザは IDN を Punycode へ変換して送るため一致しない
+        "http://exa mple.com",
+        "http://ｅｘａｍｐｌｅ.com",
+        # ポート番号として読み取れない
+        "http://localhost:abc",
+        "http://localhost:99999",
     ],
 )
 def test_rejects_cors_allow_origins_that_cannot_match_an_origin_header(configured: str):
