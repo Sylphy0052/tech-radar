@@ -10,10 +10,12 @@ from techradar.llm.errors import (
     LLMError,
     LLMInvalidResponseError,
     LLMInvocationError,
+    LLMManagedPolicyDetectedError,
     LLMTimeoutError,
     LLMToolUseDetectedError,
 )
 from techradar.llm.fake import FakeLLMProvider
+from techradar.llm.managed_policy import assert_no_managed_policy
 from techradar.llm.prompt import (
     SYSTEM_PROMPT,
     UNTRUSTED_CLOSE_TAG,
@@ -34,10 +36,12 @@ __all__ = [
     "LLMError",
     "LLMInvalidResponseError",
     "LLMInvocationError",
+    "LLMManagedPolicyDetectedError",
     "LLMProvider",
     "LLMTimeoutError",
     "LLMToolUseDetectedError",
     "LLMUsage",
+    "assert_no_managed_policy",
     "build_user_prompt",
     "complete_json_with_retry",
     "neutralize_delimiters",

@@ -18,10 +18,14 @@ from sqlalchemy.orm import Session
 from techradar.config import Settings, get_settings
 from techradar.db import OperationLog
 from techradar.llm.base import LLMCompletion, LLMProvider
-from techradar.llm.errors import LLMError, LLMToolUseDetectedError
+from techradar.llm.errors import (
+    LLMError,
+    LLMManagedPolicyDetectedError,
+    LLMToolUseDetectedError,
+)
 
 # 再試行しても解消しない失敗。
-NON_RETRYABLE = (LLMToolUseDetectedError,)
+NON_RETRYABLE = (LLMToolUseDetectedError, LLMManagedPolicyDetectedError)
 
 logger = logging.getLogger(__name__)
 

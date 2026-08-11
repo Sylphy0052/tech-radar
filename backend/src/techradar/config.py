@@ -127,6 +127,10 @@ class Settings(BaseSettings):
     llm_max_retries: int = Field(default=3, ge=0)
     # 指数バックオフの基準秒数（n 回目の待機は base * 2^n）。
     llm_retry_backoff_seconds: float = Field(default=1.0, ge=0)
+    # 管理者ポリシーが配布されたホストでも CLI を起動する。既定では起動しない。
+    # ポリシー配下では CLI 側の隔離がほとんど機能しないため（`llm.managed_policy`）、
+    # 中身を確認して無害だと判断できたときだけ真にする。
+    allow_managed_policy: bool = False
 
     # ---- Embedding (ローカル実行) ----
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"

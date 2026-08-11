@@ -38,3 +38,13 @@ class LLMToolUseDetectedError(LLMError):
     """
 
     reason = "llm_tool_use_detected"
+
+
+class LLMManagedPolicyDetectedError(LLMError):
+    """実行ホストに管理者ポリシーが配布されている。
+
+    ポリシー配下では CLI 側の隔離がほとんど機能しない（`llm.managed_policy` の
+    説明を参照）。CLI を起動せずに失敗させる。再試行しても状況は変わらない。
+    """
+
+    reason = "llm_managed_policy_detected"
