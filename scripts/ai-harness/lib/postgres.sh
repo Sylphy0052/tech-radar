@@ -72,6 +72,11 @@ trim_spaces() {
 # `source` せずに拾うのは、呼び出し元の環境を書き換えないため。ファイルが無い場合に
 # ここで落ちないよう、失敗はすべて空として扱う（worktree を作った直後は設定ファイルが
 # まだ無く、`set -e` の下でそのまま落とすと起動確認どころではなくなる）。
+#
+# 読めるのは 1 行 1 代入の `BIND_HOST=<値>` だけ。`export` 付き・前後のクォート・
+# 空白を挟んだ行末コメント・CRLF は落とす。`FOO=bar; BIND_HOST=...` のように 1 行へ
+# 詰めた形は読まない（既定値へ落ちる）。`docker compose` の解決結果を使わないのは、
+# compose が読むのは `infra/` 側の設定であり、`run.sh` が渡す値とは別物になるため。
 read_bind_host_from_env_file() {
   local raw=""
   [[ -f "$ENV_FILE" ]] || return 0
