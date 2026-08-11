@@ -60,6 +60,10 @@ set -a
 source .env
 set +a
 
+# 設定ファイルを読んだ後に確かめる。空のまま渡すと next dev が既定へ落ちて全
+# インターフェースへ開くため、既定値へ戻さず止める（Issue #64）。
+[[ -n "${BIND_HOST// /}" ]] || fail "BIND_HOSTが空です（閉じた既定は 127.0.0.1）"
+
 # docker は PostgreSQL を実際に起動するときだけ要る。既に動いていれば触らない。
 command -v uv >/dev/null 2>&1 || fail "uv未インストール — https://astral.sh/uv"
 command -v npm >/dev/null 2>&1 || fail "npm未インストール"

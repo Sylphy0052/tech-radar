@@ -994,7 +994,7 @@ IPv6 private network
 * 巡回ジョブの重複起動を防ぐ（[backend/src/techradar/api/crawl.py](backend/src/techradar/api/crawl.py)）
 * 一括登録にファイルサイズとURL件数の上限を置く（[backend/src/techradar/api/bulk_import.py](backend/src/techradar/api/bulk_import.py) の `MAX_BULK_IMPORT_FILE_BYTES` / `MAX_BULK_IMPORT_URL_COUNT`）
 
-記事の単体登録やソース登録には回数の上限が無い。`BIND_HOST` を変えて意図的に外部へ晒す構成にするなら、認証とあわせてこの節を見直す。
+記事の単体登録やソース登録には回数の上限が無い。`BIND_HOST` を変えて意図的に外部へ晒す構成にするなら、認証とあわせてこの節を見直す。なお `BIND_HOST` だけを広げても、画面上のJavaScriptは既定で自分自身の `localhost` へAPIを呼ぶため、UIを他の端末で使うには `NEXT_PUBLIC_API_BASE_URL` も変える必要がある。APIへの直接の到達は `BIND_HOST` だけで開く。
 
 ### 可観測性
 
