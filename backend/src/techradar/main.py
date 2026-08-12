@@ -127,6 +127,23 @@ async def _check_embedding_health(settings: Settings) -> None:
     `asyncio.create_task` で切り離して呼ぶため、ここで例外を握り潰さないと
     「Task exception was never retrieved」として警告されるだけで誰にも
     観測されなくなる。
+
+    **背景実行にしても起動が完全な非ブロックになるわけではない。** 同じ
+    `lifespan` の中で `create_default_registry` が `QwenEmbeddingProvider` を
+    構築し、その `__init__` が `resolve_device` 経由で torch を同期 import する
+    （`embedding/qwen.py`）。実測では起動処理そのものに 1.9 秒かかり、その時点で
+    torch は読み込み済みになる。背景実行で外せたのは残りの分（主に
+    sentence_transformers の import）で、同期実行していたときの 8.3 / 20.3 /
+    8.3 秒（3 回測定）から 1.9 秒へ縮んだ。torch の import まで起動から外すには
+    `QwenEmbeddingProvider` 側を遅延評価にする必要があり、そこはこの Issue の
+    範囲外とする。
+
+    プロセスの終了についても同じ注意がある。`lifespan` の `finally` は
+    `cancel()` してすぐ戻るが、`asyncio.to_thread` が使う既定の
+    `ThreadPoolExecutor` は CPython の `atexit` でワーカースレッドの完了を待つ。
+    検査の途中でインタプリタが正常終了すると、asyncio 層は塞がなくても
+    プロセスの終了自体は検査が終わるまで延びうる（`run.sh` は 5 秒の猶予後に
+    SIGKILL へ倒すため、最終的には解消する）。
     """
     try:
         result = await asyncio.to_thread(check_embedding_health, settings.embedding_device)

@@ -163,7 +163,18 @@ def _create_app_with_stub_worker(monkeypatch: pytest.MonkeyPatch, **settings_kwa
 
     `TestEmbeddingHealthCheckInLifespan` のテストと、lifespan を直接呼ぶ
     非同期テストの両方から使う共通ヘルパー。
+
+    呼び出す前に `check_embedding_health` を差し替えておくこと。忘れると本物の
+    torch と sentence_transformers を読み込み、テストが 8〜20 秒（実測）遅くなる。
+    実行時間が延びるだけでテストは通ってしまい気付けないため、ここで止める。
     """
+    if getattr(main_module.check_embedding_health, "__module__", "") != __name__:
+        message = (
+            "check_embedding_health を差し替えてからこのヘルパーを呼ぶこと"
+            "（本物を読み込むとテストが 8〜20 秒遅くなる）"
+        )
+        raise AssertionError(message)
+
     _StubJobWorker.instances = []
     monkeypatch.setattr("techradar.main.JobWorker", _StubJobWorker)
     return create_app(Settings(_env_file=None, worker_enabled=True, **settings_kwargs))
