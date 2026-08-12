@@ -15,6 +15,13 @@
 Embedding が動かなくても記事登録やフィード表示は成立するため、検査の
 失敗を理由に起動を止めると無関係な機能まで使えなくなる。呼び出し側
 （`main.lifespan`）は検査結果に応じてログを出すだけで、起動は続ける。
+
+この検査自体にかかる時間は 8.3 / 20.3 / 8.3 秒だった（3 回実測）。
+`torch` と `sentence_transformers` のコールド import が支配的で、
+モデルの実ロードを省いてもこれだけかかる。そのため `main.lifespan` は
+この検査を `asyncio.to_thread` でワーカースレッドへ逃がしたうえで
+`asyncio.create_task` により起動処理から切り離し、アプリの起動をこの
+秒数ぶん遅らせないようにしている（Issue #78 self review）。
 """
 
 from __future__ import annotations
@@ -40,12 +47,12 @@ class EmbeddingHealthCheckResult:
     error_message: str | None = None
 
 
-def _import_torch() -> None:
+def _import_torch() -> None:  # pragma: no cover - DIで常に差し替わり未実行
     """`torch` を import できるかだけを確かめる。"""
     import torch  # noqa: F401
 
 
-def _import_sentence_transformers() -> None:
+def _import_sentence_transformers() -> None:  # pragma: no cover - DIで常に差し替わり未実行
     """`sentence_transformers` を import できるかだけを確かめる。"""
     import sentence_transformers  # noqa: F401
 
