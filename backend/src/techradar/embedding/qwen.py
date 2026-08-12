@@ -133,13 +133,23 @@ class QwenEmbeddingProvider:
         """実際に使用するデバイス。
 
         最初に参照された時点で `resolve_device` を呼んで解決し、以降は
-        `functools.cached_property` がインスタンスへキャッシュした値を返す
-        （プロセス内で一度だけ、を「そのインスタンスで一度だけ」に閉じ込める。
-        `__init__` は元々インスタンスごとに一度しか呼ばれないため、これは
-        従来の解決回数と変わらない）。`__init__` で解決すると、ジョブハンドラの
-        登録（`create_default_registry`）だけで `resolve_device` 経由の
+        `functools.cached_property` がインスタンスへキャッシュした値を返す。
+        `__init__` で解決すると、ジョブハンドラの登録
+        （`create_default_registry`）だけで `resolve_device` 経由の
         `import torch` が走ってしまうため、実際に必要になるまで遅延させる
         （Issue #80）。
+
+        **同時アクセス時は `resolve_device` が複数回走りうる。** Python 3.12 の
+        `cached_property` は排他制御を持たず（3.10 系にあった `RLock` は撤去
+        された）、ワーカーは `worker_concurrency` ぶんのジョブをそれぞれ別スレッド
+        （`asyncio.to_thread`）で処理する一方、`make_embed_article_handler` は
+        プロバイダーを 1 個だけ作って使い回す。2 件の `embed_article` がほぼ同時に
+        走ると、両方のスレッドが初回参照に入りうる。
+
+        ロックは入れない。`resolve_device` は決定的で副作用が無く、内部の
+        `import torch` も CPython のモジュール単位のロックで直列化されるため、
+        どちらのスレッドが書いても同じ値になる。排他を足しても防げるのは
+        「二度計算すること」だけで、それに見合わない。
         """
         return resolve_device(self._settings.embedding_device)
 
