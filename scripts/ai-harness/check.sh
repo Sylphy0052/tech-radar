@@ -142,8 +142,16 @@ backend_audit() {
   # `uv audit` は uv 0.12 時点で experimental のため、明示しないと毎回警告が出る。
   # 参照先は OSV なのでネットワークが要る（Issue #83）。応答が返らないまま
   # 待ち続けると wait_jobs ごと止まるため、timeout で頭を押さえる。
-  timeout "$AUDIT_TIMEOUT_SECONDS" uv audit --preview-features audit-command \
-    || fail "backend: uv audit失敗（依存に既知脆弱性があるか、OSVへ到達できません）"
+  #
+  # 打ち切り（timeout の 124）と脆弱性の検出を別のメッセージにする。timeout は既定で
+  # 何も言わずに殺すため、まとめて扱うと出力からどちらか分からない。
+  local rc=0
+  timeout "$AUDIT_TIMEOUT_SECONDS" uv audit --preview-features audit-command || rc=$?
+  if ((rc == 124)); then
+    fail "backend: uv auditが${AUDIT_TIMEOUT_SECONDS}秒で応答せず打ち切りました（OSVへ到達できません）"
+  elif ((rc != 0)); then
+    fail "backend: uv audit失敗（依存に既知脆弱性があるか、OSVへ到達できません）"
+  fi
 }
 
 backend_openapi_freshness() {
@@ -187,8 +195,13 @@ frontend_audit() {
   log "frontend: npm audit"
   # high 未満は日常的に出入りするため止めない。閾値を下げるなら、まず既存の
   # moderate/low を解消してからにする（Issue #83）。
-  timeout "$AUDIT_TIMEOUT_SECONDS" npm audit --audit-level=high \
-    || fail "frontend: npm audit失敗（依存にhigh以上の既知脆弱性があるか、registryへ到達できません）"
+  local rc=0
+  timeout "$AUDIT_TIMEOUT_SECONDS" npm audit --audit-level=high || rc=$?
+  if ((rc == 124)); then
+    fail "frontend: npm auditが${AUDIT_TIMEOUT_SECONDS}秒で応答せず打ち切りました（registryへ到達できません）"
+  elif ((rc != 0)); then
+    fail "frontend: npm audit失敗（依存にhigh以上の既知脆弱性があるか、registryへ到達できません）"
+  fi
 }
 
 frontend_api_schema_freshness() {
@@ -225,6 +238,17 @@ secret_scan() {
 }
 
 # ---- 依存の用意（並列ジョブの前提になるため直列で済ませる） ----
+# secret検知はリポジトリ全体が対象なので backend / frontend のどちらのブロックにも
+# 属さないが、実体（detect-secrets）は backend の dev 依存なので backend が無ければ
+# 走らせようがない。そのときに黙って省略すると「全チェック緑」が「secretを検査した」
+# を意味しなくなるため、省略ではなく落とす。
+#
+# この判定をここへ置くのは、ジョブを1つも起動していない時点だからである。並列ジョブの
+# 起動後に fail すると EXIT trap の cleanup_jobs が走り、起動済みのジョブを出力ごと
+# 消してしまう（wait_jobs は全ジョブの出力を出し切ってから落ちる設計）。
+[[ -f backend/pyproject.toml ]] \
+  || fail "secret検知: backend/pyproject.tomlが無く、detect-secretsを実行できません"
+
 if [[ -f backend/pyproject.toml ]]; then
   command -v uv >/dev/null 2>&1 || fail "uv未インストール — https://astral.sh/uv"
   ensure_postgres
@@ -258,15 +282,9 @@ if [[ -f frontend/package.json ]]; then
   start_job "frontend: api-schema.d.tsの鮮度" frontend_api_schema_freshness
 fi
 
-# secret検知だけはリポジトリ全体を対象にするため、backend / frontend のどちらの
-# ブロックにも入れない。実体 (detect-secrets) は backend の dev 依存なので backend
-# が無ければ走らせようがないが、そのときに黙って省略すると「全チェック緑」が
-# 「secretを検査した」を意味しなくなる。省略ではなく失敗させる。
-if [[ -f backend/pyproject.toml ]]; then
-  start_job "secret検知" secret_scan
-else
-  fail "secret検知: backend/pyproject.tomlが無く、detect-secretsを実行できません"
-fi
+# secret検知はリポジトリ全体が対象なので、backend / frontend のどちらのブロックにも
+# 入れない。backend が無い場合は上の依存の用意の時点で落としてある。
+start_job "secret検知" secret_scan
 
 log "${#JOB_PIDS[@]}件のチェックを並列実行します（出力は完了後にまとめて表示します）"
 wait_jobs

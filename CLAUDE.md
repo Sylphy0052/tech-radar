@@ -46,7 +46,7 @@
 | `backend: uv audit` | `uv audit` (OSV を参照) | 約2秒 |
 | `frontend: npm audit` | `npm audit --audit-level=high` | 約1秒 |
 
-いずれも並列ジョブなので、壁時計の支配項である pytest より短い限り `check.sh` 全体の所要時間は変わらない。3つを追加した状態での実測は 1分32秒 と 1分46秒 (いずれも依存を取得済みの状態) だった。
+いずれも並列ジョブなので、壁時計の支配項である pytest より短い限り `check.sh` 全体の所要時間は変わらない。3つを追加した状態での実測は 1分32秒 から 2分2秒 (依存を取得済みの状態) で、機械の混み具合で振れる。
 
 **audit の2つはネットワークを使う。** `uv audit` は OSV へ、`npm audit` は npm registry へ問い合わせる。オフラインでは失敗するため、機内などで作業するときは `check.sh` が通らないことがある。ネットワーク起因の失敗と、実際に脆弱性が見つかった失敗は、出力を読んで区別する。
 
@@ -89,6 +89,7 @@ git add .secrets.baseline
 - **git の履歴**。`check.sh` が見るのは現在のツリーだけで、過去のコミットで足して後から消した secret は検知できない。導入時 (2026-08-12) に一度だけ全履歴を点検してある。全 blob 1192件を展開して走査し、検出78件はすべて現在のツリーにあるものと同じ顔ぶれ (alembic のリビジョンID、テストのダミー、CI の `POSTGRES_PASSWORD: techradar`、`.env.example` のプレースホルダ) で、過去にだけ存在した secret は無かった。**この点検はこの一回きりである。**以降に混入したものは現ツリーに残っている限り検知できるが、足して消せば通り抜ける
 - **コンテナのベースイメージ**。`uv audit` と `npm audit` が見るのは Python と npm の依存だけで、`infra/docker-compose.yml` が使う `pgvector/pgvector:pg17` は対象外
 - **コードの脆弱性そのもの** (SAST)。導入していない
+- **`# pragma: allowlist secret` を書いた行**。detect-secrets は行単位の除外指示を解釈するため、この注釈を付けた行は baseline を経ずに検知をすり抜ける。誤検知を1行だけ黙らせたいときの逃げ道だが、本物へ付けても止まらない
 
 ## CI は使わない (Issue #82)
 
