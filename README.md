@@ -51,7 +51,7 @@ PostgreSQL へ `BIND_HOST` が渡るのは `run.sh` から起動したときだ�
 
 ## 開発
 
-lint・整形・型チェック・テストを一括実行する。commit 前に必ず緑にする。
+lint・整形・型チェック・テストを一括実行する。手動で実行する（2026-08-12 に commit 前の自動実行を廃止した）。MR を作る前に一度は緑にする。
 
 ```bash
 bash scripts/ai-harness/check.sh
