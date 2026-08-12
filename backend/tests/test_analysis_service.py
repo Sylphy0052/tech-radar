@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from techradar.analysis import analyze_article, needs_analysis
 from techradar.analysis.schema import ArticleAnalysis
+from techradar.analysis.service import MAX_ANALYSIS_BODY_CHARACTERS
 from techradar.db import Article, OperationLog
 from techradar.db.enums import ContentType, Difficulty, JobStatus
 from techradar.llm import FakeLLMProvider
@@ -275,6 +276,53 @@ class TestUntrustedContent:
         # Assert
         assert "外部由来のタイトル" in provider.calls[0]["untrusted_content"]
         assert "外部由来のタイトル" not in provider.calls[0]["instruction"]
+
+
+class TestBodyLengthLimit:
+    """LLM へ渡す本文の長さの上限を固定する。
+
+    上限は `MAX_ANALYSIS_BODY_CHARACTERS`（12000）で、値の根拠は ADR 0004 にある。
+    実測では応答時間が本文長にほぼ依存せず、切り捨てによる解析結果の差も実行ごとの
+    ばらつきに埋もれたため、この値を維持している。上限そのものの妥当性はテストでは
+    決められないため、ここでは切る位置がずれないことだけを固定する。
+    """
+
+    @staticmethod
+    def _english_filler(length: int) -> str:
+        """指定の長さの英文を作る。
+
+        同じ文字の繰り返しにすると言語判定が本来と違う経路へ入りうるため、
+        実際の記事に近い英文を並べて埋める。
+        """
+        unit = ENGLISH_BODY + " "
+        return (unit * (length // len(unit) + 1))[:length]
+
+    def test_truncates_a_body_longer_than_the_limit(self, db_session: Session):
+        # Arrange — 上限を超えた分は LLM へ渡らない
+        body = self._english_filler(MAX_ANALYSIS_BODY_CHARACTERS) + "TAIL"
+        article = make_article(db_session, body=body)
+        provider = FakeLLMProvider([VALID_ANALYSIS])
+
+        # Act
+        analyze_article(db_session, provider, article, sleep=no_sleep)
+
+        # Assert
+        content = provider.calls[0]["untrusted_content"]
+        assert self._english_filler(MAX_ANALYSIS_BODY_CHARACTERS) in content
+        assert "TAIL" not in content
+
+    def test_keeps_a_body_of_exactly_the_limit(self, db_session: Session):
+        # Arrange — ちょうど上限の本文は1文字も失われない（切るのは上限を超えた分だけ）
+        body = self._english_filler(MAX_ANALYSIS_BODY_CHARACTERS - 4) + "TAIL"
+        article = make_article(db_session, body=body)
+        provider = FakeLLMProvider([VALID_ANALYSIS])
+
+        # Act
+        analyze_article(db_session, provider, article, sleep=no_sleep)
+
+        # Assert
+        assert len(body) == MAX_ANALYSIS_BODY_CHARACTERS
+        assert "TAIL" in provider.calls[0]["untrusted_content"]
 
 
 class TestSchemaValidation:
