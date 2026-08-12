@@ -55,6 +55,31 @@ _REPORT_ERROR_PREVIEW_LENGTH = 200
 # 明示的に--max-requeueを引き上げて「意図した大量操作である」ことを示す運用にする。
 DEFAULT_MAX_REQUEUE = 50
 
+# `--error-contains`をLIKE（`Column.contains`）へ渡す際のエスケープ文字。
+# LIKEでは`%`（任意の0文字以上）と`_`（任意の1文字）がワイルドカードとして働く。
+# 運用者が失敗メッセージの一部をコピーして渡す前提のスクリプトだが、失敗メッセージと
+# Pythonのモジュール名が表記として一致しない場合がある。実際にIssue #79の復旧対象の
+# 失敗メッセージは「sentence-transformersが利用できません」（ハイフン）だが、
+# 対応するPythonのモジュール名は`sentence_transformers`（アンダースコア）である。
+# 運用者がどちらの表記で渡すかは状況次第で、`_`を含む文字列をエスケープせずに渡すと
+# ワイルドカードとして働き、意図した以外の行まで一括UPDATEの対象に入ってしまう。
+# そのため`%`・`_`・エスケープ文字自体をエスケープしたうえで、`contains(escape=...)`へ
+# 明示的なエスケープ文字を渡す。
+_LIKE_ESCAPE_CHAR = "\\"
+
+
+def _escape_like_wildcards(value: str) -> str:
+    """LIKE演算子のワイルドカード（`%`・`_`）をリテラル文字として扱うためにエスケープする。
+
+    エスケープ文字自体（`\\`）が値に含まれている場合、それを先にエスケープしておかないと
+    後段の置換で二重にエスケープされてしまうため、最初に処理する。
+    """
+    return (
+        value.replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR * 2)
+        .replace("%", _LIKE_ESCAPE_CHAR + "%")
+        .replace("_", _LIKE_ESCAPE_CHAR + "_")
+    )
+
 
 class TooManyRequeueTargetsError(RuntimeError):
     """`--apply`時の対象件数が`--max-requeue`を超えたことを表す。
@@ -109,13 +134,16 @@ def _build_plan(
     実行中へ変わる経路はワーカー側に存在しない。
 
     `error_contains`はLIKEによる部分一致（`Column.contains`）で、`%`・`_`は
-    エスケープしない。運用者が手で叩く前提のスクリプトであり、失敗理由の
-    文字列にこれらの記号が混ざる状況は現状想定していないため、ここでは簡潔さを
-    優先している。
+    `_escape_like_wildcards`でエスケープしたうえでリテラルとして扱う（理由は
+    `_LIKE_ESCAPE_CHAR`のコメント参照）。
     """
     stmt = select(Job).where(Job.status == JobStatus.FAILED.value, Job.type == job_type.value)
     if error_contains:
-        stmt = stmt.where(Job.last_error.contains(error_contains))
+        stmt = stmt.where(
+            Job.last_error.contains(
+                _escape_like_wildcards(error_contains), escape=_LIKE_ESCAPE_CHAR
+            )
+        )
     stmt = stmt.order_by(Job.created_at)
     jobs = session.scalars(stmt).all()
     return RequeuePlan(
@@ -218,6 +246,15 @@ def _print_report(plan: RequeuePlan, *, applied: bool, max_requeue: int) -> None
         filter_desc += f", error_contains={plan.error_contains!r}"
     print(f"[requeue-failed-jobs] 絞り込み条件: {filter_desc}")
     print(f"[requeue-failed-jobs] 対象（failedかつ条件に一致）: {len(plan.candidates)}件")
+
+    if max_requeue <= 0:
+        # 0は「上限なし」を意味する（`_check_max_requeue`参照）。破壊的操作の
+        # サーキットブレーカーが働かない状態であることに気付けるよう、dry-run・
+        # --apply実行時のどちらでも明示する。
+        print(
+            "[requeue-failed-jobs][WARN] --max-requeueが0のため、件数の上限なし"
+            "（サーキットブレーカーが働かない状態）で実行します。"
+        )
 
     if not plan.candidates:
         print("[requeue-failed-jobs] 対象なし")
