@@ -8,7 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from techradar import __version__
+from techradar import main as main_module
 from techradar.config import Settings
+from techradar.embedding.health import EmbeddingHealthCheckResult
 from techradar.jobs.registry import JobHandlerRegistry
 from techradar.main import create_app
 
@@ -130,9 +132,17 @@ class _StubJobWorker:
 def test_starts_and_stops_the_job_worker_when_worker_enabled_is_true(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    # Arrange
+    # Arrange — Embedding 実行環境の検査（Issue #78）は worker_enabled と同じ場所で
+    # 実行される。実物の torch / sentence_transformers を読み込むと初回 import だけで
+    # 数十秒かかる（実測）ため、このテストの本題（ワーカーの起動・停止）とは無関係な
+    # コストを避けてスタブへ差し替える。
     _StubJobWorker.instances = []
     monkeypatch.setattr("techradar.main.JobWorker", _StubJobWorker)
+    monkeypatch.setattr(
+        main_module,
+        "check_embedding_health",
+        lambda *_a, **_k: EmbeddingHealthCheckResult(ok=True, device="cpu"),
+    )
     app = create_app(Settings(_env_file=None, worker_enabled=True))
 
     # Act
@@ -145,3 +155,108 @@ def test_starts_and_stops_the_job_worker_when_worker_enabled_is_true(
 
     # Assert — コンテキスト終了（lifespan のシャットダウン）で stop() 済みであること
     assert worker.stopped is True
+
+
+class TestEmbeddingHealthCheckInLifespan:
+    """起動時の Embedding 実行環境検査を固定する（Issue #78）。
+
+    2026-08-12、venv のインストールが不完全なまま起動し `embed_article`
+    ジョブ 194 件が全滅した。検査に失敗しても、また検査関数自体が想定外の
+    例外を投げても、記事登録やフィード表示に使うアプリの起動は続くことを
+    固定する。ログの検証は `caplog` ではなく `techradar.main.logger` を直接
+    差し替える。並列実行のワーカーでは `caplog` がハンドラを拾えず、実装が
+    正しくても落ちることがある（`test_llm_managed_policy.py` / `test_jobs_worker.py`
+    と同じ理由）。
+    """
+
+    def _create_app_with_stub_worker(
+        self, monkeypatch: pytest.MonkeyPatch, **settings_kwargs: Any
+    ) -> Any:
+        _StubJobWorker.instances = []
+        monkeypatch.setattr("techradar.main.JobWorker", _StubJobWorker)
+        return create_app(Settings(_env_file=None, worker_enabled=True, **settings_kwargs))
+
+    def test_検査に失敗しても起動が続く(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Arrange
+        monkeypatch.setattr(
+            main_module,
+            "check_embedding_health",
+            lambda *_a, **_k: EmbeddingHealthCheckResult(
+                ok=False,
+                error_type="ModuleNotFoundError",
+                error_message="No module named 'torch'",
+            ),
+        )
+        app = self._create_app_with_stub_worker(monkeypatch)
+
+        # Act
+        with TestClient(app) as client:
+            response = client.get("/api/health")
+
+        # Assert — 検査が失敗してもヘルスチェックには応答し続ける
+        assert response.status_code == 200
+
+    def test_検査関数が想定外の例外を投げても起動が続く(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        def _raise(*_args: object, **_kwargs: object) -> EmbeddingHealthCheckResult:
+            message = "unexpected failure"
+            raise RuntimeError(message)
+
+        monkeypatch.setattr(main_module, "check_embedding_health", _raise)
+        app = self._create_app_with_stub_worker(monkeypatch)
+
+        # Act
+        with TestClient(app) as client:
+            response = client.get("/api/health")
+
+        # Assert
+        assert response.status_code == 200
+
+    def test_成功時はデバイスを含むINFOログが出る(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Arrange
+        monkeypatch.setattr(
+            main_module,
+            "check_embedding_health",
+            lambda *_a, **_k: EmbeddingHealthCheckResult(ok=True, device="xpu"),
+        )
+        info_calls: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(
+            main_module.logger, "info", lambda *args, **_kwargs: info_calls.append(args)
+        )
+        app = self._create_app_with_stub_worker(monkeypatch)
+
+        # Act
+        with TestClient(app):
+            pass
+
+        # Assert
+        assert any("xpu" in call for call in info_calls)
+
+    def test_失敗時は原因を含むERRORログが出る(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Arrange
+        monkeypatch.setattr(
+            main_module,
+            "check_embedding_health",
+            lambda *_a, **_k: EmbeddingHealthCheckResult(
+                ok=False,
+                error_type="ModuleNotFoundError",
+                error_message="No module named 'torch'",
+            ),
+        )
+        error_calls: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(
+            main_module.logger, "error", lambda *args, **_kwargs: error_calls.append(args)
+        )
+        app = self._create_app_with_stub_worker(monkeypatch)
+
+        # Act
+        with TestClient(app):
+            pass
+
+        # Assert — 例外の型とメッセージが読み取れること
+        assert any(
+            "ModuleNotFoundError" in call and "No module named 'torch'" in call
+            for call in error_calls
+        )
