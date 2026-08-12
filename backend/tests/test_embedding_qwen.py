@@ -156,6 +156,67 @@ class TestProviderConfiguration:
         assert provider.embed_documents([]) == []
 
 
+class TestLazyDeviceResolution:
+    """Issue #80: デバイス解決（`resolve_device` 経由の `import torch`）を、
+    構築時ではなく `device` プロパティの初回参照まで遅延させることを固定する。
+
+    `sys.modules` に `torch` が入るかどうかを直接見る方式は、同じテスト
+    セッション内で実モデルを読み込むテスト（`TECHRADAR_RUN_MODEL_TESTS=1`）が
+    先に走っていると汚染されて信頼できない。判定関数（`resolve_device`）を
+    スパイして呼び出し回数を数える方式に統一する
+    （`is_cuda_available` / `is_xpu_available` と同じ、DI で torch 依存を
+    切り離す流儀に倣う）。
+    """
+
+    def test_constructing_the_provider_does_not_resolve_the_device(self, monkeypatch):
+        # Arrange
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "techradar.embedding.qwen.resolve_device",
+            lambda configured, **_kwargs: calls.append(configured) or configured,
+        )
+
+        # Act
+        QwenEmbeddingProvider(Settings(_env_file=None, embedding_device="cpu"))
+
+        # Assert — __init__ の時点では resolve_device は呼ばれない
+        assert calls == []
+
+    def test_device_resolves_on_first_access(self, monkeypatch):
+        # Arrange
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "techradar.embedding.qwen.resolve_device",
+            lambda configured, **_kwargs: calls.append(configured) or configured,
+        )
+        provider = QwenEmbeddingProvider(Settings(_env_file=None, embedding_device="cpu"))
+        assert calls == []
+
+        # Act
+        result = provider.device
+
+        # Assert
+        assert result == "cpu"
+        assert calls == ["cpu"]
+
+    def test_device_is_resolved_only_once(self, monkeypatch):
+        # Arrange
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "techradar.embedding.qwen.resolve_device",
+            lambda configured, **_kwargs: calls.append(configured) or configured,
+        )
+        provider = QwenEmbeddingProvider(Settings(_env_file=None, embedding_device="cpu"))
+
+        # Act — 2 回参照する
+        first = provider.device
+        second = provider.device
+
+        # Assert — 解決は 1 回だけ、値も同じ
+        assert calls == ["cpu"]
+        assert first == second == "cpu"
+
+
 @requires_model
 class TestRealModel:
     """実モデルを読み込む検証。既定では実行しない。"""
