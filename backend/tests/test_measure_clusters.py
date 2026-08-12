@@ -11,6 +11,8 @@ KMeans は各点を最も近い centroid へ割り当てるため、同じ距離
 
 from __future__ import annotations
 
+import pytest
+
 from techradar.interest.clusters import ClusterSource, InterestCluster
 from techradar.measure.clusters import (
     ClusterStats,
@@ -44,6 +46,18 @@ class TestAssignSourcesToClusters:
         clusters = [_cluster("left", (0.0,)), _cluster("right", (2.0,))]
 
         assert assign_sources_to_clusters(sources, clusters) == (0,)
+
+    def test_rejects_mismatched_dimensions(self) -> None:
+        """embedding と centroid の次元が食い違えば失敗させる。
+
+        KMeans の centroid は入力と同じ次元になるため実行時には起こらないが、
+        埋め込みモデルを差し替える移行期に混ざると、短い方へ切り詰めた距離で
+        黙って別のクラスタへ割り当ててしまう。
+        """
+        with pytest.raises(ValueError, match="zip"):
+            assign_sources_to_clusters(
+                [_source((0.0, 0.0), ("a",), 1.0)], [_cluster("one-dimension", (0.0,))]
+            )
 
     def test_returns_empty_without_clusters(self) -> None:
         """クラスタが無ければ割り当ても無い。記事があっても失敗させない。"""
