@@ -24,6 +24,19 @@
   - 互いに独立したチェックは並列で走る (Issue #61)。出力は混ざらないよう、全ジョブの完了後にまとめて表示する
   - pytest と vitest のワーカー数は `PYTEST_WORKERS` / `VITEST_WORKERS` で変えられる。既定はコア数の半分と 8 の小さい方 (22コア機なら 8、8コア機なら 4)。22コア機での実測では 8 + 8 が最速だった。`PYTEST_WORKERS=1` で pytest の並列化を切れる
 
+## 品質チェックは手動運用 (Issue #76)
+
+グローバル規約と本リポジトリの両方に効く。2026-08-12 に、commit 前の `check.sh` 自動実行を廃止した (グローバル hook `pre-bash-guard.sh` から削除。全プロジェクト対象)。commit のたびに 73〜100秒待つコストが、1名運用における検知の利得を上回るという判断による。
+
+**lint / format / 型チェック / テストを自動で回す仕組みは、現在どこにも無い。** CI も停止中のため、壊れたことに気付くのは次に手で `check.sh` を回したときになる。
+
+- 品質チェックは `scripts/ai-harness/check.sh` を**手動で実行する**
+- MR を作る前に一度は全緑を確認する (推奨。機械強制はしない)
+- 完了報告の Evidence には、手動実行した `check.sh` の PASS ログを使う
+- commit のたびに回すかは変更内容で判断してよい (ドキュメントのみの変更など、明らかに影響しない場合は省略可)
+
+CI を再開する場合は [.gitlab-ci.yml](.gitlab-ci.yml) の `- when: never` を削除し、あわせてプロジェクト設定の `jobs_enabled` を true へ戻す。
+
 ## 開発フロー (強制)
 
 Issue起票を経ずに実装へ着手しない。以下の順序で進める (skillの実体はグローバル規約を参照。一括実行は `/gitlab-dev-cycle`)。
@@ -50,7 +63,7 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 | --- | --- |
 | `gitlab-issue` | Issue の起票 / 本文整頓 / 別問題の切り出し |
 | `gitlab-branch` | Issue から `<type>/<IID>/<slug>` ブランチ + worktree 作成、`InProgress` 遷移 |
-| `gitlab-commit` | `scripts/ai-harness/check.sh` 実行 + Conventional Commits でcommit |
+| `gitlab-commit` | Conventional Commits でcommit (`check.sh` は手動実行。hook 強制は廃止済み) |
 | `gitlab-mr-flow` | MR作成 (Draft) → self review → 修正 → ready 化 |
 | `gitlab-mr-review` | MR diff の並列レビュー (self / other モード、先祖返り検出) |
 | `gitlab-cleanup` | マージ後の整理 (Issue close、docs移動、branch/worktree掃除、roadmap更新) |
@@ -79,7 +92,7 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 - self-merge 前の24時間待機・翌日見直し (`~/.claude/docs/gitlab/README.md` L98)
 - **CI pipeline の完了待ち** — そもそも CI を停止しているため待つ対象が無い ([.gitlab-ci.yml](.gitlab-ci.yml) の workflow rules に `- when: never` が入っている)。pipeline が pending / running のままでもマージしてよい (`glab mr merge <IID> --remove-source-branch`)。ただし CI を再開した後に **失敗** していると判明した場合は、原因を潰すまでマージしない
 
-  以前はここの根拠を「commit 前に check.sh が全緑であることを hook が強制済み」としていたが、2026-08-12 にその強制を廃止した (Issue #76)。現在の担保は下記「品質チェックは手動運用」のとおり、マージ前の self review と手動の `check.sh` だけである
+  以前はここの根拠を「commit 前に check.sh が全緑であることを hook が強制済み」としていたが、2026-08-12 にその強制を廃止した (Issue #76)。現在の担保は上記「品質チェックは手動運用」のとおり、マージ前の self review と手動の `check.sh` だけである
 
 ### 維持する項目 (緩和禁止)
 
@@ -91,18 +104,6 @@ override はマージ主体と承認要件のみ。以下は**引き続き強制
 - `git commit --no-verify` / `-n` 禁止 (グローバル hook が機械拒否する。check.sh の自動実行は廃止したが、将来 pre-commit hook を置いたときの迂回を防ぐため禁止自体は維持する)
 - MR作成後の `gitlab-mr-review` 実行そのもの (self モードでよいが、スキップは不可)
 - `glab` CLI 使用 (`gh` 禁止)
-
-### 品質チェックは手動運用 (Issue #76)
-
-2026-08-12 に、commit 前の `check.sh` 自動実行を廃止した (グローバル hook `pre-bash-guard.sh` から削除。全プロジェクト対象)。commit のたびに 73〜100秒待つコストが、1名運用における検知の利得を上回るという判断による。
-
-**lint / format / 型チェック / テストを自動で回す仕組みは、現在どこにも無い。** CI も停止中のため、壊れたことに気付くのは次に手で `check.sh` を回したときになる。
-
-- 品質チェックは `scripts/ai-harness/check.sh` を**手動で実行する**
-- MR を作る前に一度は全緑を確認する (推奨。機械強制はしない)
-- 完了報告の Evidence には、手動実行した `check.sh` の PASS ログを使う
-
-CI を再開する場合は [.gitlab-ci.yml](.gitlab-ci.yml) の `- when: never` を削除し、あわせてプロジェクト設定の `jobs_enabled` を true へ戻す。
 
 ## 注意点 (Gotcha)
 
