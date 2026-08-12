@@ -112,8 +112,39 @@ ADR 0003 が記録した RTX 4050 での実測（長文 8 件 2433ms）とは入
 
 - **統合GPU はメインメモリを共有する。** WSL への割当が 13GB のため、バッチサイズを上げすぎるとホスト側と食い合う。ADR 0003 の RTX 4050 は専用 VRAM 6GB を持っていたので、この制約は新しい
 - **`triton-xpu` を直接依存として宣言する必要がある。** torch の XPU ビルドが要求する推移依存だが PyPI には無く XPU インデックスにしか置かれていない。`explicit = true` のインデックスは直接依存しか解決しないため、宣言しないと `uv sync` が「no version of triton-xpu==3.7.2」で失敗する（ADR 0003 の torch と同じ理由）
+- **`uv.lock` に torch の sha256 が記録されない（残余リスクとして受容する）。** 下記「ハッシュ検証が効かない」を参照
 - **NVIDIA 機と Intel 機を同時には満たせない。** uv のインデックス指定はプラットフォーム条件で分岐できないため、`pyproject.toml` はどちらか一方を選ぶ。移る際は手で差し替える。コード側の `resolve_device` は両方に対応しているので、差し替えだけで動く
 - 実行時に `Can't initialize Level Zero Sysman` の警告が出る。電力や温度を取る管理 API が使えないだけで、計算には影響しない
+
+### ハッシュ検証が効かない（残余リスク）
+
+XPU ビルドへ切り替えたことで、**`uv.lock` の torch のエントリから sha256 が消えた**。
+
+```text
+# 新（xpu）— url と upload-time のみ
+{ url = "https://download-r2.pytorch.org/whl/xpu/torch-2.13.0%2Bxpu-cp312-cp312-manylinux_2_28_x86_64.whl", upload-time = "..." }
+
+# 旧（cu128）— sha256 が付いていた
+{ url = "https://download-r2.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:7cb4018f...", upload-time = "..." }
+```
+
+`uv.lock` 全体でハッシュが欠けているのは torch の 10 エントリのみで、cu128 時代は欠落ゼロだった。
+
+原因は **PyTorch の XPU インデックスが torch の wheel に `#sha256=` を publish していない**ことである。同じインデックスの `triton-xpu` には付いている。
+
+```text
+$ curl -s "https://download.pytorch.org/whl/xpu/torch/" | grep -o 'torch-2.13.0%2Bxpu-cp312-cp312-manylinux_2_28_x86_64.whl[^"]*'
+torch-2.13.0%2Bxpu-cp312-cp312-manylinux_2_28_x86_64.whl          ← ハッシュなし
+
+$ curl -s "https://download.pytorch.org/whl/xpu/triton-xpu/" | grep -o 'triton_xpu-3.7.2-cp312[^"]*'
+triton_xpu-3.7.2-...whl#sha256=17e881c2dba2944508c4d7befabe5590b5b459faa8a37c57740f85b2d0b62d4f
+```
+
+配布元の問題であり、こちらの lock 生成やコードでは解決できない。**受容する**。
+
+- 影響: 配布物が差し替えられても uv は検出できず、TLS だけが防衛線になる。torch はモデル実行時にネイティブコードを動かすため、依存グラフの中で最も権限が強い
+- 緩和として効いているもの: `explicit = true` によるインデックス限定（依存混同は防げる）、`==` によるバージョン固定、URL が PyTorch 公式ドメインであること。ただしこれらはハッシュ検証の代わりにはならない
+- 将来 PyTorch 側が sha256 を publish したら、`uv lock` をやり直せば解消する。torch のバージョンを上げる際にこの点を確認する
 
 ### 前提が変わった場合
 

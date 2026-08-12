@@ -14,7 +14,7 @@ from collections.abc import Sequence
 
 import pytest
 
-from techradar.config import Settings
+from techradar.config import EmbeddingDevice, Settings
 from techradar.db import EMBEDDING_DIMENSIONS
 from techradar.embedding.base import assert_dimensions
 from techradar.embedding.errors import EmbeddingDimensionMismatchError
@@ -24,6 +24,16 @@ requires_model = pytest.mark.skipif(
     os.environ.get("TECHRADAR_RUN_MODEL_TESTS") != "1",
     reason="実モデルを読み込むテスト。TECHRADAR_RUN_MODEL_TESTS=1 で実行する",
 )
+
+# CUDA (専用 VRAM) の上限。RTX 4050 の 6GB に対し 1GB の余裕を見ている。
+_CUDA_MEMORY_BUDGET_GIB = 5.0
+
+# XPU (統合GPU、メインメモリ共有) の上限。CUDA の専用 VRAM とは前提が異なり、
+# 固定の VRAM 容量に対する余裕ではなく「バッチサイズが暴走してホスト側の
+# メインメモリと食い合っていないか」を検知する目的の閾値（ADR 0005）。
+# 実測値は 4 件のバッチで 1.75GiB（Core Ultra 7 165H 統合GPU、2026-08-12）。
+# 桁で余裕を持たせつつ異常な増加は検知できる水準として 4.0 を置く。
+_XPU_MEMORY_BUDGET_GIB = 4.0
 
 
 def cosine(left: Sequence[float], right: Sequence[float]) -> float:
@@ -85,6 +95,26 @@ class TestIsXpuAvailable:
         # Act / Assert
         assert is_xpu_available() is False
 
+    def test_returns_true_when_torch_reports_xpu_available(self, monkeypatch):
+        # Arrange — torch.xpu が存在し is_available() が True を返す場合
+        import types
+
+        fake_torch = types.SimpleNamespace(xpu=types.SimpleNamespace(is_available=lambda: True))
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        # Act / Assert
+        assert is_xpu_available() is True
+
+    def test_returns_false_when_torch_reports_xpu_unavailable(self, monkeypatch):
+        # Arrange — torch.xpu は存在するが is_available() が False を返す場合
+        import types
+
+        fake_torch = types.SimpleNamespace(xpu=types.SimpleNamespace(is_available=lambda: False))
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        # Act / Assert
+        assert is_xpu_available() is False
+
 
 class TestDimensionGuard:
     def test_accepts_vectors_of_the_expected_dimension(self):
@@ -110,12 +140,13 @@ class TestProviderConfiguration:
         # Assert
         assert provider.dimensions == EMBEDDING_DIMENSIONS
 
-    def test_uses_the_configured_device(self):
-        # Arrange / Act
-        provider = QwenEmbeddingProvider(Settings(_env_file=None, embedding_device="cpu"))
+    @pytest.mark.parametrize("configured", ["cpu", "cuda", "xpu"])
+    def test_uses_the_configured_device(self, configured: EmbeddingDevice):
+        # Arrange / Act — xpu の明示指定（本 Issue の主目的）も含めて固定する
+        provider = QwenEmbeddingProvider(Settings(_env_file=None, embedding_device=configured))
 
         # Assert
-        assert provider.device == "cpu"
+        assert provider.device == configured
 
     def test_does_not_load_the_model_for_empty_input(self):
         # Arrange — 空入力でモデルを読み込むと無駄に数秒かかる
@@ -168,16 +199,24 @@ class TestRealModel:
         assert cosine(document, related) > cosine(document, unrelated)
 
     def test_fits_within_the_gpu_memory_budget(self, provider):
-        # Arrange
+        # Arrange — CUDA (専用 VRAM) と XPU (統合GPU、メインメモリ共有) の
+        # 両方でメモリ計測 API が使える（torch.xpu.max_memory_allocated 等は
+        # PyTorch 2.5 以降の XPU ビルドに存在する。ADR 0005）。
         import torch
 
-        if provider.device != "cuda":
-            pytest.skip("CUDA が使えない環境")
-        torch.cuda.reset_peak_memory_stats()
+        if provider.device == "cuda":
+            memory_api = torch.cuda
+            budget_gib = _CUDA_MEMORY_BUDGET_GIB
+        elif provider.device == "xpu":
+            memory_api = torch.xpu
+            budget_gib = _XPU_MEMORY_BUDGET_GIB
+        else:
+            pytest.skip("CUDA/XPU が使えない環境")
+        memory_api.reset_peak_memory_stats()
 
         # Act — 記事相当の長さを複数件まとめて処理する
         provider.embed_documents(["技術記事の本文です。" * 200] * 4)
 
-        # Assert — RTX 4050 の 6GB に収まること
-        peak_gib = torch.cuda.max_memory_allocated() / 1024**3
-        assert peak_gib < 5.0, f"VRAM 使用量が想定を超えました: {peak_gib:.2f} GiB"
+        # Assert
+        peak_gib = memory_api.max_memory_allocated() / 1024**3
+        assert peak_gib < budget_gib, f"GPU メモリ使用量が想定を超えました: {peak_gib:.2f} GiB"
