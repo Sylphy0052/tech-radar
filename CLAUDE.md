@@ -46,26 +46,49 @@
 | `backend: uv audit` | `uv audit` (OSV を参照) | 約2秒 |
 | `frontend: npm audit` | `npm audit --audit-level=high` | 約1秒 |
 
-いずれも並列ジョブなので、壁時計の支配項である pytest より短い限り `check.sh` 全体の所要時間は変わらない。3つを追加した状態での実測は 1分46秒 (依存を取得済みの状態) だった。
+いずれも並列ジョブなので、壁時計の支配項である pytest より短い限り `check.sh` 全体の所要時間は変わらない。3つを追加した状態での実測は 1分32秒 と 1分46秒 (いずれも依存を取得済みの状態) だった。
 
 **audit の2つはネットワークを使う。** `uv audit` は OSV へ、`npm audit` は npm registry へ問い合わせる。オフラインでは失敗するため、機内などで作業するときは `check.sh` が通らないことがある。ネットワーク起因の失敗と、実際に脆弱性が見つかった失敗は、出力を読んで区別する。
 
+**secret検知はネットワークを使わない。** detect-secrets は既定で、検出した候補を発行元のAPIへ投げて生きている資格情報かどうかを確かめる (Slack / Stripe / Mailchimp / Telegram などのプラグインが `requests` で実際にリクエストを送る)。本物の secret を踏んだ瞬間にその値が外部サービスへ渡ることになるため、`-n` を付けてこの挙動を切ってある。**このオプションを外さないこと。** 副作用として、外部で無効と確認できたはずの候補も検出として残るが、その分は baseline で扱う。
+
+`check.sh` の呼び出しには他に `--no-run-if-empty` と `--` が付いている。前者は対象が0件のときに何も走査せず緑になるのを防ぎ、後者は `-h` のような名前のファイルが追跡下に入ったときにオプションとして解釈されて走査そのものが飛ぶのを防ぐ。いずれも外さない。
+
 **`uv audit` は uv 0.12 時点で experimental である。** `--preview-features audit-command` を付けて警告を抑えている。uv の更新でオプションや出力が変わる可能性がある。
 
-### secret の誤検知が出たとき
+### secret が検出されたとき
 
 `detect-secrets` の走査対象は git の追跡下にあるファイルだけで、`.secrets.baseline` に載っている検出は既知として無視される。baseline に無い検出が出ると `check.sh` が落ちる。
+
+**まず、それが本物かどうかを見る。** 落ちた検出には「誤検知」と「本物の secret を commit してしまった」の両方があり得る。このリポジトリは commit 前のフックも CI も無く、`check.sh` は手動実行なので、気付いた時点で既に push 済みのことがある。
+
+本物だったときは baseline に入れない。次の順で対応する。
+
+1. 該当する資格情報を直ちに失効・再発行する (漏れた値は git から消しても無効化されない)
+2. 影響範囲を確認する (どこへ push したか、誰が読めたか)
+3. 必要なら履歴から除去する。ただし1を済ませてからでよい
 
 誤検知だと確認できたら、baseline を作り直して差分を commit する。
 
 ```bash
 cd <リポジトリルート>
-./backend/.venv/bin/detect-secrets scan > .secrets.baseline
+uv run --project backend --no-sync detect-secrets scan -n --baseline .secrets.baseline
+git add .secrets.baseline
 ```
+
+`git add` まで済ませること。`detect-secrets-hook` は baseline が unstaged だと `Your baseline file (.secrets.baseline) is unstaged.` と言って落ちる (baseline だけこっそり書き換えて検知を黙らせる操作を防ぐため)。更新した直後に `check.sh` を回すと、この理由で赤くなる。
+
+`--baseline` へ渡すと、そのファイルを直接書き換える形で更新される。**`scan > .secrets.baseline` のようにリダイレクトで作り直さないこと。** その形だと `.secrets.baseline` 自身が走査対象に入り、中の `hashed_secret` (40桁の hex) が高エントロピー文字列として検出されて、再生成のたびに自己参照のノイズが増える (実測で28件)。`--baseline` 経由なら detect-secrets が baseline 自身を除外する。`-n` を付ける理由は上記のとおり。
 
 作り直す前に、**検出された箇所を1件ずつ目で見て、本物の secret が混ざっていないことを確かめる**。baseline はハッシュしか持たないため、一度取り込むと中身の再確認ができない。
 
 現在 baseline に入っている17件は、いずれも実害が無いことを確認済みである。内訳は alembic のリビジョンID 9件 (高エントロピー文字列として誤検知)、テストのダミー資格情報 4件、テスト関数名の誤検知 2件 (長い識別子が GitHub Token パターンに当たる)、CI の使い捨て資格情報 1件、環境変数テンプレートの接続文字列 1件。
+
+### この監査が見ないもの
+
+- **git の履歴**。`check.sh` が見るのは現在のツリーだけで、過去のコミットで足して後から消した secret は検知できない。導入時 (2026-08-12) に一度だけ全履歴を点検してある。全 blob 1192件を展開して走査し、検出78件はすべて現在のツリーにあるものと同じ顔ぶれ (alembic のリビジョンID、テストのダミー、CI の `POSTGRES_PASSWORD: techradar`、`.env.example` のプレースホルダ) で、過去にだけ存在した secret は無かった。**この点検はこの一回きりである。**以降に混入したものは現ツリーに残っている限り検知できるが、足して消せば通り抜ける
+- **コンテナのベースイメージ**。`uv audit` と `npm audit` が見るのは Python と npm の依存だけで、`infra/docker-compose.yml` が使う `pgvector/pgvector:pg17` は対象外
+- **コードの脆弱性そのもの** (SAST)。導入していない
 
 ## CI は使わない (Issue #82)
 

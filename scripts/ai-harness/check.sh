@@ -44,6 +44,11 @@ _default_workers() {
 PYTEST_WORKERS="${PYTEST_WORKERS:-$(_default_workers)}"
 VITEST_WORKERS="${VITEST_WORKERS:-$(_default_workers)}"
 
+# 依存脆弱性監査の上限時間。実測は uv audit が約2秒、npm audit が約1秒なので、
+# ここへ到達するのは相手側 (OSV / npm registry) が応答を返さないときだけである。
+# 上限が無いと wait_jobs が待ち続け、check.sh 全体が終わらなくなる（Issue #83）。
+AUDIT_TIMEOUT_SECONDS="${AUDIT_TIMEOUT_SECONDS:-120}"
+
 # 並列実行するジョブを、ラベル・PID・出力先の3つの並びで管理する。
 JOB_LABELS=()
 JOB_PIDS=()
@@ -135,8 +140,9 @@ backend_audit() {
   cd "$REPO_ROOT/backend"
   log "backend: uv audit"
   # `uv audit` は uv 0.12 時点で experimental のため、明示しないと毎回警告が出る。
-  # 参照先は OSV なのでネットワークが要る（Issue #83）。
-  uv audit --preview-features audit-command \
+  # 参照先は OSV なのでネットワークが要る（Issue #83）。応答が返らないまま
+  # 待ち続けると wait_jobs ごと止まるため、timeout で頭を押さえる。
+  timeout "$AUDIT_TIMEOUT_SECONDS" uv audit --preview-features audit-command \
     || fail "backend: uv audit失敗（依存に既知脆弱性があるか、OSVへ到達できません）"
 }
 
@@ -181,7 +187,7 @@ frontend_audit() {
   log "frontend: npm audit"
   # high 未満は日常的に出入りするため止めない。閾値を下げるなら、まず既存の
   # moderate/low を解消してからにする（Issue #83）。
-  npm audit --audit-level=high \
+  timeout "$AUDIT_TIMEOUT_SECONDS" npm audit --audit-level=high \
     || fail "frontend: npm audit失敗（依存にhigh以上の既知脆弱性があるか、registryへ到達できません）"
 }
 
@@ -205,8 +211,16 @@ secret_scan() {
   # 同じだが、対象を git 側で決めておけば .venv や node_modules を掴む心配がない。
   # baseline に載っている検出は既知として無視され、それ以外が出たときだけ落ちる。
   # baseline の更新手順は CLAUDE.md の「secret検知と依存脆弱性監査」節にある。
+  #
+  # オプションはどれも外さないこと。
+  #   -n  検出した候補を発行元のAPIへ投げて生死を確かめる挙動 (既定で有効) を切る。
+  #       付けないと、本物のsecretを踏んだ瞬間にその値が外部サービスへ送られる。
+  #   --no-run-if-empty  対象が0件のときに引数無しで起動して緑になるのを防ぐ。
+  #   --  以降を全てファイル名として扱わせる。`-h` のような名前のファイルが
+  #       追跡下に入るとオプションとして解釈され、走査せず成功してしまう。
   git ls-files -z \
-    | xargs -0 uv run --project backend --no-sync detect-secrets-hook --baseline .secrets.baseline \
+    | xargs -0 --no-run-if-empty \
+        uv run --project backend --no-sync detect-secrets-hook --baseline .secrets.baseline -n -- \
     || fail "secret検知: baselineに無いsecretを検出しました（誤検知ならCLAUDE.mdの手順でbaselineを更新してください）"
 }
 
@@ -234,9 +248,6 @@ if [[ -f backend/pyproject.toml ]]; then
   start_job "backend: pytest" backend_pytest
   start_job "backend: uv audit" backend_audit
   start_job "backend: openapi.jsonの鮮度" backend_openapi_freshness
-  # detect-secrets は backend の dev 依存として入るため、backend があることを
-  # 条件にする。走査対象はリポジトリ全体で、backend だけを見るわけではない。
-  start_job "secret検知" secret_scan
 fi
 
 if [[ -f frontend/package.json ]]; then
@@ -245,6 +256,16 @@ if [[ -f frontend/package.json ]]; then
   start_job "frontend: vitest" frontend_vitest
   start_job "frontend: npm audit" frontend_audit
   start_job "frontend: api-schema.d.tsの鮮度" frontend_api_schema_freshness
+fi
+
+# secret検知だけはリポジトリ全体を対象にするため、backend / frontend のどちらの
+# ブロックにも入れない。実体 (detect-secrets) は backend の dev 依存なので backend
+# が無ければ走らせようがないが、そのときに黙って省略すると「全チェック緑」が
+# 「secretを検査した」を意味しなくなる。省略ではなく失敗させる。
+if [[ -f backend/pyproject.toml ]]; then
+  start_job "secret検知" secret_scan
+else
+  fail "secret検知: backend/pyproject.tomlが無く、detect-secretsを実行できません"
 fi
 
 log "${#JOB_PIDS[@]}件のチェックを並列実行します（出力は完了後にまとめて表示します）"
