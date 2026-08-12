@@ -28,14 +28,14 @@
 
 グローバル規約と本リポジトリの両方に効く。2026-08-12 に、commit 前の `check.sh` 自動実行を廃止した (グローバル hook `pre-bash-guard.sh` から削除。全プロジェクト対象)。commit のたびに 73〜100秒待つコストが、1名運用における検知の利得を上回るという判断による。
 
-**lint / format / 型チェック / テストを自動で回す仕組みは、現在どこにも無い。** CI も停止中のため、壊れたことに気付くのは次に手で `check.sh` を回したときになる。
+**commit の単位では、lint / format / 型チェック / テストを自動で回す仕組みは無い。** 壊れたことに気付くのは、次に手で `check.sh` を回すか、MR を作って CI が走ったときになる。
 
 - 品質チェックは `scripts/ai-harness/check.sh` を**手動で実行する**
 - MR を作る前に一度は全緑を確認する (推奨。機械強制はしない)
 - 完了報告の Evidence には、手動実行した `check.sh` の PASS ログを使う
 - commit のたびに回すかは変更内容で判断してよい (ドキュメントのみの変更など、明らかに影響しない場合は省略可)
 
-CI を再開する場合は [.gitlab-ci.yml](.gitlab-ci.yml) の `- when: never` を削除し、あわせてプロジェクト設定の `jobs_enabled` を true へ戻す。
+CI は 2026-08-12 に再開した (Issue #81)。merge request イベントと、デフォルトブランチへの push で pipeline が走る。停止する場合は [.gitlab-ci.yml](.gitlab-ci.yml) の workflow rules へ `- when: never` を戻し、あわせてプロジェクト設定の `builds_access_level` を `disabled` にする。
 
 ## 開発フロー (強制)
 
@@ -90,9 +90,9 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 - reviewer への承認依頼 (`gitlab-mr-flow` の「reviewer依頼note投稿」ステップは不要)
 - reviewer または権限保有者による merge 実行 (`~/.claude/skills/gitlab-mr-flow/SKILL.md` L112, L134)
 - self-merge 前の24時間待機・翌日見直し (`~/.claude/docs/gitlab/README.md` L98)
-- **CI pipeline の完了待ち** — そもそも CI を停止しているため待つ対象が無い ([.gitlab-ci.yml](.gitlab-ci.yml) の workflow rules に `- when: never` が入っている)。pipeline が pending / running のままでもマージしてよい (`glab mr merge <IID> --remove-source-branch`)。ただし CI を再開した後に **失敗** していると判明した場合は、原因を潰すまでマージしない
+- **CI pipeline の完了待ち** — MR 前に手動の `check.sh` を全緑にしており、CI は同じ検証を走らせる。同じものを待ち直さないため、pipeline が pending / running のままでもマージしてよい (`glab mr merge <IID> --remove-source-branch`)。ただし **失敗** していると判明した場合は、原因を潰すまでマージしない
 
-  以前はここの根拠を「commit 前に check.sh が全緑であることを hook が強制済み」としていたが、2026-08-12 にその強制を廃止した (Issue #76)。現在の担保は上記「品質チェックは手動運用」のとおり、マージ前の self review と手動の `check.sh` だけである
+  この根拠は 2 度変わっている。当初は「commit 前に check.sh が全緑であることを hook が強制済み」だったが、2026-08-12 にその強制を廃止した (Issue #76)。廃止直後は CI も停止しており待つ対象が無かったが、同日 CI を再開した (Issue #81)。現在の担保は、マージ前の self review と手動の `check.sh`、そして事後に走る CI である
 
 ### 維持する項目 (緩和禁止)
 

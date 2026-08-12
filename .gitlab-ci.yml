@@ -5,9 +5,6 @@ variables:
 
 workflow:
   rules:
-    # CI を一時停止している。復帰するときはこの 1 行を削除し、あわせて
-    # プロジェクト設定の jobs_enabled を true に戻す。
-    - when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
@@ -58,6 +55,10 @@ backend:pytest:
     # 値の二重管理を避けるため上の変数から組み立てる。ホスト名は service alias。
     DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}"
   script:
+    # tests/test_app_processes_shell_lib.py は run.sh のプロセス管理 (`ps` によるコマンドライン照合) を
+    # 検証するため ps を必要とする。bookworm-slim には入っておらず、入れないと 6 件が
+    # FileNotFoundError: '/bin/ps' で落ちる (CI 再開時に実測、Issue #81)。
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends procps
     - uv run pytest --junitxml=pytest.xml --cov-report=xml
   coverage: '/^TOTAL.*\s+(\d+(?:\.\d+)?%)$/'
   artifacts:
