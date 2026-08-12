@@ -42,19 +42,47 @@ def is_cuda_available() -> bool:
     return bool(torch.cuda.is_available())
 
 
+def is_xpu_available() -> bool:
+    """Intel GPU（XPU）が使えるかを返す。
+
+    `torch.xpu` は PyTorch 2.5 以降で追加されたモジュールで、古い torch や
+    XPU ビルドでない torch には存在しない。属性の有無を確認してから呼び出し、
+    無ければ例外を投げず False を返す。
+    is_cuda_available と同様に torch の import をこの関数に閉じ込め、
+    呼び出し側とテストが torch へ直接依存せずに済むようにする。
+    """
+    try:
+        import torch
+    except ImportError:  # pragma: no cover - torch は必須依存
+        return False
+
+    xpu = getattr(torch, "xpu", None)
+    if xpu is None:
+        return False
+    return bool(xpu.is_available())
+
+
 def resolve_device(
     configured: str,
     *,
     cuda_available: Callable[[], bool] = is_cuda_available,
+    xpu_available: Callable[[], bool] = is_xpu_available,
 ) -> str:
     """使用するデバイスを決める。
 
-    `auto` のときは CUDA が使えれば CUDA、なければ CPU を選ぶ。
+    `auto` のときは CUDA → XPU → CPU の順で使えるものを選ぶ。NVIDIA の
+    単体GPU（dGPU）がある環境では、Intel の統合GPU（XPU）より高速なため
+    CUDA を優先する。現行の開発機は NVIDIA GPU を持たず Intel Arc
+    Graphics（Core Ultra 7 165H の統合GPU）のみを持つため、実際には CUDA
+    判定が False になり XPU が選ばれる。NVIDIA GPU を積んだ機体へ戻した
+    ときに備え、判定の順序自体は CUDA を先に見る形を維持する。
     判定は引数で差し替えられるようにし、テストが torch を読み込まずに済むようにする。
     """
     if configured != "auto":
         return configured
-    return "cuda" if cuda_available() else "cpu"
+    if cuda_available():
+        return "cuda"
+    return "xpu" if xpu_available() else "cpu"
 
 
 @lru_cache(maxsize=1)
@@ -72,6 +100,11 @@ def load_model(
     try:
         model = SentenceTransformer(
             model_name,
+            # SentenceTransformer はデバイス省略時に cuda / mps / cpu しか
+            # 自動選択せず、xpu は対象外（明示指定が必須）。ここで
+            # resolve_device の結果を明示的に渡しているからこそ XPU で動く。
+            # 将来 device 引数を省略する変更を入れると、XPU 環境では黙って
+            # CPU へ落ちるため注意する。
             device=device,
             revision=revision,
             # モデルリポジトリ側のコードを実行しない。

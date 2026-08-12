@@ -22,7 +22,7 @@ scripts/    開発用スクリプト (check.sh)
 | Node.js 22 以上 / npm | frontend のビルドと実行 |
 | Docker / Docker Compose | PostgreSQL + pgvector |
 | [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) | 要約・分類・翻訳・推薦理由の生成 |
-| NVIDIA GPU（任意） | Embedding のローカル実行。無い場合は CPU にフォールバックする |
+| GPU（任意、NVIDIA または Intel Arc） | Embedding のローカル実行。無い場合は CPU にフォールバックする。GPU ベンダーに応じて `backend/pyproject.toml` の PyTorch インデックスを手で切り替える必要がある（uv のインデックス指定はプラットフォーム条件で分岐できないため）。詳細は [docs/adr/0005-embedding-on-intel-xpu.md](docs/adr/0005-embedding-on-intel-xpu.md) を参照 |
 
 ## セットアップ
 

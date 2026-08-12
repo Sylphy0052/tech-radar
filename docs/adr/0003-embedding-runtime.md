@@ -1,8 +1,10 @@
 # ADR 0003: Embedding の実行環境と PyTorch のビルド選択
 
-- ステータス: 採用
+- ステータス: **置き換え済み** — [ADR 0005](0005-embedding-on-intel-xpu.md) を参照
 - 日付: 2026-08-01
-- 関連: `PROJECT_SPEC.md` §16 多言語仕様 / Issue #6 / [ADR 0001](0001-technology-stack.md)
+- 関連: `PROJECT_SPEC.md` §16 多言語仕様 / Issue #6 / [ADR 0001](0001-technology-stack.md) / [ADR 0005](0005-embedding-on-intel-xpu.md)
+
+> **2026-08-12 追記**: この ADR が前提とする実行環境（RTX 4050 Laptop 6GB）は現行機に存在しない。現行機は NVIDIA GPU を持たず Intel Arc Graphics（Core Ultra 7 165H の統合GPU）のみを持つため、ここで決めた CUDA 12.8 ビルドへの固定は意味を持たず、Embedding は CPU へフォールバックしていた（1 件あたり 57 秒）。実行環境と PyTorch のビルド選択は [ADR 0005](0005-embedding-on-intel-xpu.md) で置き換えた。以下は当時の記録として残す。
 
 ## コンテキスト
 
