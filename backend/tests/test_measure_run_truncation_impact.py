@@ -10,6 +10,8 @@ LLM は実際には呼ばず `FakeLLMProvider` を使う。
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 from sqlalchemy.orm import Session
@@ -18,8 +20,9 @@ from techradar.analysis.schema import ArticleAnalysis
 from techradar.analysis.service import MAX_ANALYSIS_BODY_CHARACTERS
 from techradar.db.enums import ContentType, Difficulty
 from techradar.db.models import Article
-from techradar.llm.errors import LLMError
+from techradar.llm.errors import LLMError, LLMManagedPolicyDetectedError, LLMToolUseDetectedError
 from techradar.llm.fake import FakeLLMProvider
+from techradar.measure import run_truncation_impact as cli
 from techradar.measure.run_truncation_impact import (
     ArticleComparisonResult,
     ComparisonFailure,
@@ -29,7 +32,6 @@ from techradar.measure.run_truncation_impact import (
     _parse_args,
     _render_json,
     _render_text,
-    _truncate_url,
 )
 from techradar.measure.truncation_impact import compare_analyses
 
@@ -125,19 +127,6 @@ class TestParseArgs:
         args = _parse_args(["--json"])
 
         assert args.as_json is True
-
-
-class TestTruncateUrl:
-    def test_keeps_short_urls_unchanged(self) -> None:
-        assert _truncate_url("https://example.com/a") == "https://example.com/a"
-
-    def test_truncates_long_urls_with_an_ellipsis(self) -> None:
-        url = "https://example.com/" + "a" * 100
-
-        truncated = _truncate_url(url, limit=20)
-
-        assert len(truncated) == 20
-        assert truncated.endswith("…")
 
 
 class TestLoadMeasurementBodies:
@@ -245,6 +234,30 @@ class TestCompareArticle:
         captured = capsys.readouterr()
         assert "[2/3]" in captured.err
         assert "https://example.com/progress" in captured.err
+
+    def test_reraises_tool_use_detected_error_from_the_truncated_call(self) -> None:
+        """隔離破りの検知シグナルは比較不能として記録せず、そのまま送出して計測を止める
+        （ADR 0002）。"""
+        provider = FakeLLMProvider([LLMToolUseDetectedError("ツール使用を検知")])
+        article = MeasurementArticle(canonical_url="https://example.com/a", body="x" * 300)
+
+        with pytest.raises(LLMToolUseDetectedError):
+            _compare_article(provider, article, limit=200, index=1, total=1)
+
+    def test_reraises_managed_policy_detected_error_from_the_truncated_call(self) -> None:
+        provider = FakeLLMProvider([LLMManagedPolicyDetectedError("管理者ポリシーを検知")])
+        article = MeasurementArticle(canonical_url="https://example.com/a", body="x" * 300)
+
+        with pytest.raises(LLMManagedPolicyDetectedError):
+            _compare_article(provider, article, limit=200, index=1, total=1)
+
+    def test_reraises_tool_use_detected_error_from_the_full_call(self) -> None:
+        """切り捨て版が成功しても、全文版の検知は同じく握りつぶさない。"""
+        provider = FakeLLMProvider([_RESPONSE_A, LLMToolUseDetectedError("ツール使用を検知")])
+        article = MeasurementArticle(canonical_url="https://example.com/a", body="x" * 300)
+
+        with pytest.raises(LLMToolUseDetectedError):
+            _compare_article(provider, article, limit=200, index=1, total=1)
 
 
 class TestRenderText:
@@ -443,3 +456,93 @@ class TestRenderJsonControlMode:
 
         assert normal_parsed["control"] is False
         assert control_parsed["control"] is True
+
+
+@pytest.fixture
+def stubbed_session(monkeypatch: pytest.MonkeyPatch, db_session: Session) -> Session:
+    """`read_only_session` をテスト用セッションへ差し替える。
+
+    `main()` は本番 DB を読み取り専用で参照するが、ここではテストごとにロールバックされる
+    `db_session` を使う（`test_measure_cli.py` の流儀に合わせる）。
+    """
+
+    @contextmanager
+    def fake_session() -> Iterator[Session]:
+        yield db_session
+
+    monkeypatch.setattr(cli, "read_only_session", fake_session)
+    return db_session
+
+
+@pytest.fixture
+def stubbed_provider(monkeypatch: pytest.MonkeyPatch) -> FakeLLMProvider:
+    """`ClaudeCliProvider` を `FakeLLMProvider` へ差し替える。実際の CLI は呼ばない。"""
+    fake = FakeLLMProvider([_RESPONSE_A, _RESPONSE_B])
+    monkeypatch.setattr(cli, "ClaudeCliProvider", lambda settings: fake)
+    return fake
+
+
+class TestMain:
+    def test_returns_1_and_prints_to_stderr_when_no_articles(
+        self, stubbed_session: Session, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        exit_code = cli.main(["--limit", "200"])
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "測れる本文がありません" in captured.err
+        assert captured.out == ""
+
+    def test_returns_0_on_success(
+        self, stubbed_session: Session, stubbed_provider: FakeLLMProvider
+    ) -> None:
+        _article_row(stubbed_session, slug="a", body="x" * 300)
+
+        exit_code = cli.main(["--limit", "200", "--articles", "1"])
+
+        assert exit_code == 0
+
+    def test_prints_text_by_default(
+        self,
+        stubbed_session: Session,
+        stubbed_provider: FakeLLMProvider,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _article_row(stubbed_session, slug="a", body="x" * 300)
+
+        cli.main(["--limit", "200", "--articles", "1"])
+
+        assert "記事:" in capsys.readouterr().out
+
+    def test_prints_json_with_flag(
+        self,
+        stubbed_session: Session,
+        stubbed_provider: FakeLLMProvider,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _article_row(stubbed_session, slug="a", body="x" * 300)
+
+        cli.main(["--limit", "200", "--articles", "1", "--json"])
+
+        parsed = json.loads(capsys.readouterr().out)
+        assert parsed["articles"][0]["canonical_url"] == "https://example.com/a"
+
+    def test_control_flag_propagates_to_the_comparison(
+        self, stubbed_session: Session, stubbed_provider: FakeLLMProvider
+    ) -> None:
+        """`--control` が main() 経由で伝播し、切り捨てずに全文を2回渡すことを確かめる。"""
+        _article_row(stubbed_session, slug="a", body="x" * 300)
+
+        cli.main(["--limit", "200", "--articles", "1", "--control"])
+
+        assert len(stubbed_provider.calls[0]["untrusted_content"]) == 300
+        assert len(stubbed_provider.calls[1]["untrusted_content"]) == 300
+
+    def test_without_control_flag_truncates_the_first_call(
+        self, stubbed_session: Session, stubbed_provider: FakeLLMProvider
+    ) -> None:
+        _article_row(stubbed_session, slug="a", body="x" * 300)
+
+        cli.main(["--limit", "200", "--articles", "1"])
+
+        assert len(stubbed_provider.calls[0]["untrusted_content"]) == 200

@@ -50,6 +50,10 @@ from techradar.config import get_settings
 from techradar.db.models import Article
 from techradar.llm.base import LLMProvider
 from techradar.llm.claude_cli import ClaudeCliProvider
+from techradar.llm.errors import LLMManagedPolicyDetectedError, LLMToolUseDetectedError
+from techradar.measure.cli_support import MeasurementArticle
+from techradar.measure.cli_support import parse_article_count as _parse_article_count
+from techradar.measure.cli_support import truncate_url as _truncate_url
 from techradar.measure.session import read_only_session
 from techradar.measure.truncation_impact import (
     TruncationImpact,
@@ -58,15 +62,6 @@ from techradar.measure.truncation_impact import (
 )
 
 DEFAULT_ARTICLES = 3
-_URL_DISPLAY_LIMIT = 80
-
-
-@dataclass(frozen=True)
-class MeasurementArticle:
-    """計測対象の記事。`canonical_url` は表示にだけ使う。"""
-
-    canonical_url: str
-    body: str
 
 
 @dataclass(frozen=True)
@@ -91,18 +86,6 @@ class ArticleComparisonResult:
     limit: int
     impact: TruncationImpact | None
     failure: ComparisonFailure | None
-
-
-def _parse_article_count(value: str) -> int:
-    try:
-        count = int(value)
-    except ValueError as exc:
-        message = f"記事数は整数で指定してください: {value}"
-        raise argparse.ArgumentTypeError(message) from exc
-    if count < 1:
-        message = f"記事数は1以上の整数で指定してください: {value}"
-        raise argparse.ArgumentTypeError(message)
-    return count
 
 
 def _parse_limit(value: str) -> int:
@@ -144,13 +127,6 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--json", action="store_true", dest="as_json", help="JSON で出力する")
     return parser.parse_args(argv)
-
-
-def _truncate_url(url: str, *, limit: int = _URL_DISPLAY_LIMIT) -> str:
-    """表示用に URL を短くする。長い URL は進捗行や表を潰すため。"""
-    if len(url) <= limit:
-        return url
-    return url[: limit - 1] + "…"
 
 
 def _load_measurement_bodies(
@@ -225,6 +201,10 @@ def _compare_article(
     print(f"  [{index}/{total}] {label} {first_variant}を解析中...", file=sys.stderr)
     try:
         first_analysis = _call(provider, first_body)
+    except (LLMToolUseDetectedError, LLMManagedPolicyDetectedError):
+        # 隔離破りの検知シグナル。握りつぶさず、比較不能として記録する代わりに
+        # そのまま送出して計測を止める（ADR 0002）。
+        raise
     except Exception as exc:
         print(
             f"  [{index}/{total}] {label} {first_variant}が失敗: {type(exc).__name__}: {exc}",
@@ -240,6 +220,8 @@ def _compare_article(
     print(f"  [{index}/{total}] {label} {second_variant}を解析中...", file=sys.stderr)
     try:
         second_analysis = _call(provider, article.body)
+    except (LLMToolUseDetectedError, LLMManagedPolicyDetectedError):
+        raise
     except Exception as exc:
         print(
             f"  [{index}/{total}] {label} {second_variant}が失敗: {type(exc).__name__}: {exc}",

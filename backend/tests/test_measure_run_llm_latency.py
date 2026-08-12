@@ -11,6 +11,8 @@ LLM は実際には呼ばず `FakeLLMProvider` を使う。
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 from sqlalchemy.orm import Session
@@ -18,6 +20,7 @@ from sqlalchemy.orm import Session
 from techradar.db.models import Article
 from techradar.llm.errors import LLMError
 from techradar.llm.fake import FakeLLMProvider
+from techradar.measure import run_llm_latency as cli
 from techradar.measure.llm_latency import LatencySample
 from techradar.measure.run_llm_latency import (
     ArticleLatencyResult,
@@ -28,7 +31,6 @@ from techradar.measure.run_llm_latency import (
     _parse_args,
     _render_json,
     _render_text,
-    _truncate_url,
 )
 
 _RESPONSE = (
@@ -81,20 +83,6 @@ class TestParseArgs:
             _parse_args(["--articles", "two"])
 
         assert exc_info.value.code != 0
-
-
-class TestTruncateUrl:
-    def test_keeps_short_urls_unchanged(self) -> None:
-        assert _truncate_url("https://example.com/a") == "https://example.com/a"
-
-    def test_truncates_long_urls_with_an_ellipsis(self) -> None:
-        """記事一覧の表示行を潰さないよう、長い URL は appendix を省略する。"""
-        url = "https://example.com/" + "a" * 100
-
-        truncated = _truncate_url(url, limit=20)
-
-        assert len(truncated) == 20
-        assert truncated.endswith("…")
 
 
 class TestLoadMeasurementBodies:
@@ -238,3 +226,75 @@ class TestRenderJson:
         assert parsed["articles"][0]["body_length"] == 5
         assert parsed["articles"][0]["stats"][0]["length"] == 4
         assert parsed["overall"][0]["length"] == 4
+
+
+@pytest.fixture
+def stubbed_session(monkeypatch: pytest.MonkeyPatch, db_session: Session) -> Session:
+    """`read_only_session` をテスト用セッションへ差し替える。
+
+    `main()` は本番 DB を読み取り専用で参照するが、ここではテストごとにロールバックされる
+    `db_session` を使う（`test_measure_cli.py` の流儀に合わせる）。
+    """
+
+    @contextmanager
+    def fake_session() -> Iterator[Session]:
+        yield db_session
+
+    monkeypatch.setattr(cli, "read_only_session", fake_session)
+    return db_session
+
+
+@pytest.fixture
+def stubbed_provider(monkeypatch: pytest.MonkeyPatch) -> FakeLLMProvider:
+    """`ClaudeCliProvider` を `FakeLLMProvider` へ差し替える。実際の CLI は呼ばない。"""
+    fake = FakeLLMProvider([_RESPONSE])
+    monkeypatch.setattr(cli, "ClaudeCliProvider", lambda settings: fake)
+    return fake
+
+
+class TestMain:
+    def test_returns_1_and_prints_to_stderr_when_no_articles(
+        self, stubbed_session: Session, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """記事が無いときのメッセージは stderr へ出す。`--json` の出力をリダイレクトして
+        使う運用があるため、stdout へは混ぜない。"""
+        exit_code = cli.main(["--lengths", "4"])
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "測れる本文がありません" in captured.err
+        assert captured.out == ""
+
+    def test_returns_0_on_success(
+        self, stubbed_session: Session, stubbed_provider: FakeLLMProvider
+    ) -> None:
+        _article_row(stubbed_session, slug="a", body="x" * 10)
+
+        exit_code = cli.main(["--lengths", "4", "--repeats", "1", "--articles", "1"])
+
+        assert exit_code == 0
+
+    def test_prints_text_by_default(
+        self,
+        stubbed_session: Session,
+        stubbed_provider: FakeLLMProvider,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _article_row(stubbed_session, slug="a", body="x" * 10)
+
+        cli.main(["--lengths", "4", "--repeats", "1", "--articles", "1"])
+
+        assert "記事:" in capsys.readouterr().out
+
+    def test_prints_json_with_flag(
+        self,
+        stubbed_session: Session,
+        stubbed_provider: FakeLLMProvider,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _article_row(stubbed_session, slug="a", body="x" * 10)
+
+        cli.main(["--lengths", "4", "--repeats", "1", "--articles", "1", "--json"])
+
+        parsed = json.loads(capsys.readouterr().out)
+        assert parsed["articles"][0]["canonical_url"] == "https://example.com/a"

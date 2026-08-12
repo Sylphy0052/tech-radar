@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from techradar.llm.errors import LLMError
+from techradar.llm.errors import LLMError, LLMManagedPolicyDetectedError, LLMToolUseDetectedError
 from techradar.llm.fake import FakeLLMProvider
 from techradar.measure.llm_latency import (
     LatencySample,
@@ -69,6 +69,36 @@ class TestMeasureLatency:
 
         assert sample.ok is False
         assert sample.seconds == 2.0
+
+    def test_records_the_failure_content(self) -> None:
+        """原因の切り分けに使うため、例外の型とメッセージの両方を残す（握りつぶさない）。"""
+        provider = FakeLLMProvider([LLMError("失敗しました")])
+
+        sample = measure_latency(provider, text="body", length=4, clock=_StepClock(1.0))
+
+        assert sample.exception_type == "LLMError"
+        assert sample.message == "失敗しました"
+
+    def test_succeeded_sample_has_no_failure_content(self) -> None:
+        provider = FakeLLMProvider([_RESPONSE])
+
+        sample = measure_latency(provider, text="body", length=4, clock=_StepClock(1.0))
+
+        assert sample.exception_type is None
+        assert sample.message is None
+
+    def test_reraises_tool_use_detected_error(self) -> None:
+        """隔離破りの検知シグナルは握りつぶさず、そのまま送出して計測を止める（ADR 0002）。"""
+        provider = FakeLLMProvider([LLMToolUseDetectedError("ツール使用を検知")])
+
+        with pytest.raises(LLMToolUseDetectedError):
+            measure_latency(provider, text="body", length=4, clock=_StepClock(1.0))
+
+    def test_reraises_managed_policy_detected_error(self) -> None:
+        provider = FakeLLMProvider([LLMManagedPolicyDetectedError("管理者ポリシーを検知")])
+
+        with pytest.raises(LLMManagedPolicyDetectedError):
+            measure_latency(provider, text="body", length=4, clock=_StepClock(1.0))
 
     def test_passes_the_text_to_the_provider(self) -> None:
         provider = FakeLLMProvider([_RESPONSE])
@@ -130,3 +160,44 @@ class TestSummarizeLatencies:
 
     def test_returns_empty_without_samples(self) -> None:
         assert summarize_latencies([]) == ()
+
+    def test_reports_the_failure_breakdown_by_exception_type(self) -> None:
+        """どの例外が何回起きたかを人に見えるようにする。"""
+        samples = [
+            LatencySample(length=1000, seconds=1.0, ok=True),
+            LatencySample(
+                length=1000,
+                seconds=0.1,
+                ok=False,
+                exception_type="LLMInvalidResponseError",
+                message="不正な応答",
+            ),
+            LatencySample(
+                length=1000,
+                seconds=0.2,
+                ok=False,
+                exception_type="LLMInvalidResponseError",
+                message="不正な応答2",
+            ),
+            LatencySample(
+                length=1000,
+                seconds=0.3,
+                ok=False,
+                exception_type="LLMTimeoutError",
+                message="タイムアウト",
+            ),
+        ]
+
+        stats = summarize_latencies(samples)
+
+        assert stats[0].failure_breakdown == {
+            "LLMInvalidResponseError": 2,
+            "LLMTimeoutError": 1,
+        }
+
+    def test_failure_breakdown_is_empty_when_nothing_failed(self) -> None:
+        samples = [LatencySample(length=1000, seconds=1.0, ok=True)]
+
+        stats = summarize_latencies(samples)
+
+        assert stats[0].failure_breakdown == {}

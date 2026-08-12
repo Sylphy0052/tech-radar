@@ -31,6 +31,9 @@ from techradar.config import get_settings
 from techradar.db.models import Article
 from techradar.llm.base import LLMProvider
 from techradar.llm.claude_cli import ClaudeCliProvider
+from techradar.measure.cli_support import MeasurementArticle
+from techradar.measure.cli_support import parse_article_count as _parse_article_count
+from techradar.measure.cli_support import truncate_url as _truncate_url
 from techradar.measure.llm_latency import (
     LatencySample,
     LatencyStats,
@@ -43,15 +46,6 @@ from techradar.measure.session import read_only_session
 DEFAULT_LENGTHS = (2000, 4000, 8000, 12000, 16000)
 DEFAULT_REPEATS = 3
 DEFAULT_ARTICLES = 2
-_URL_DISPLAY_LIMIT = 80
-
-
-@dataclass(frozen=True)
-class MeasurementArticle:
-    """計測対象の記事。`canonical_url` は表示にだけ使う。"""
-
-    canonical_url: str
-    body: str
 
 
 @dataclass(frozen=True)
@@ -84,18 +78,6 @@ def _parse_lengths(value: str) -> tuple[int, ...]:
     return tuple(lengths)
 
 
-def _parse_article_count(value: str) -> int:
-    try:
-        count = int(value)
-    except ValueError as exc:
-        message = f"記事数は整数で指定してください: {value}"
-        raise argparse.ArgumentTypeError(message) from exc
-    if count < 1:
-        message = f"記事数は1以上の整数で指定してください: {value}"
-        raise argparse.ArgumentTypeError(message)
-    return count
-
-
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m techradar.measure.run_llm_latency",
@@ -124,13 +106,6 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--json", action="store_true", dest="as_json", help="JSON で出力する")
     return parser.parse_args(argv)
-
-
-def _truncate_url(url: str, *, limit: int = _URL_DISPLAY_LIMIT) -> str:
-    """表示用に URL を短くする。長い URL は進捗行や表を潰すため。"""
-    if len(url) <= limit:
-        return url
-    return url[: limit - 1] + "…"
 
 
 def _load_measurement_bodies(
@@ -191,17 +166,25 @@ def _overall_stats(article_results: Sequence[ArticleLatencyResult]) -> tuple[Lat
     return summarize_latencies(samples)
 
 
+def _render_failure_breakdown(breakdown: dict[str, int]) -> list[str]:
+    """失敗の内訳を、どの例外が何回起きたか分かる形で並べる。"""
+    return [f"      {exception_type}: {count} 回" for exception_type, count in breakdown.items()]
+
+
 def _render_stats_lines(stats: Sequence[LatencyStats]) -> list[str]:
     lines = []
     for stat in stats:
         if stat.median_seconds is None:
             lines.append(f"  {stat.length:>6} 文字: 全て失敗（{stat.failures} 回）")
+            lines.extend(_render_failure_breakdown(stat.failure_breakdown))
             continue
         lines.append(
             f"  {stat.length:>6} 文字: 中央値 {stat.median_seconds:6.1f} 秒"
             f"（最小 {stat.min_seconds:.1f} / 最大 {stat.max_seconds:.1f}"
             f" / 成功 {stat.samples} / 失敗 {stat.failures}）"
         )
+        if stat.failures:
+            lines.extend(_render_failure_breakdown(stat.failure_breakdown))
     return lines
 
 
@@ -244,7 +227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             session, min_length=max(args.lengths), count=args.articles
         )
     if not articles:
-        print("測れる本文がありません。先に記事を取り込んでください")
+        print("測れる本文がありません。先に記事を取り込んでください", file=sys.stderr)
         return 1
 
     provider = ClaudeCliProvider(settings)
