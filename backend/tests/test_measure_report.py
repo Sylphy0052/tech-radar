@@ -83,6 +83,32 @@ class TestRenderText:
         assert "Kubernetes" in output
         assert "Rust" in output
 
+    def test_states_no_data_when_candidates_are_zero_but_quotas_exist(self) -> None:
+        """候補 0 件でも枠の定員は返る。実運用で起きるのはこちらの形。
+
+        `compose_feed_with_stats` は候補が無くても 4 枠ぶんの `SlotStats` を返すため、
+        枠の一覧が空になることは実行時にはほぼ無い。定員だけが並ぶと「データがあるのに
+        選ばれていない」のか「そもそもデータが無い」のか読み取れない。
+        """
+        measurements = Measurements(
+            body_length=_EMPTY.body_length,
+            clusters=_EMPTY.clusters,
+            feed=FeedCompositionStats(
+                candidate_count=0,
+                page_size=100,
+                slots=(
+                    FeedSlotStats(
+                        slot="strong_interest", quota=55, selected=0, backfilled=0, fill_rate=0.0
+                    ),
+                ),
+            ),
+        )
+
+        output = render_text(measurements)
+
+        assert "対象データがありません" in output
+        assert "strong_interest" in output
+
     def test_shows_the_configured_limit(self) -> None:
         """上限値そのものを出す。どの値に対する切り捨て率かが分かるようにする。"""
         output = render_text(_FILLED)

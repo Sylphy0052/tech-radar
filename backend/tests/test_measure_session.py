@@ -12,7 +12,7 @@ from sqlalchemy.exc import InternalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from techradar.db.models import Article
-from techradar.measure.session import make_read_only, read_only_session
+from techradar.measure.session import enforce_read_only, make_read_only, read_only_session
 
 
 class TestMakeReadOnly:
@@ -54,6 +54,43 @@ class TestMakeReadOnly:
         with session_factory() as session:
             make_read_only(session)
             make_read_only(session)
+
+            assert session.execute(text("select 1")).scalar_one() == 1
+
+
+class TestEnforceReadOnly:
+    def test_rejects_writes_in_the_current_transaction(self, migrated_engine: Engine) -> None:
+        session_factory = sessionmaker(bind=migrated_engine)
+        with session_factory() as session:
+            enforce_read_only(session)
+
+            with pytest.raises(InternalError, match="read-only transaction"):
+                session.execute(text("delete from articles"))
+
+    def test_keeps_rejecting_after_rollback(self, migrated_engine: Engine) -> None:
+        """ロールバック後に始まる次のトランザクションでも拒否する。
+
+        `SET TRANSACTION READ ONLY` は今のトランザクションにしか効かない。1 回だけ
+        発行する作りだと、失敗時に再試行する経路が足されたときに書き込みが通ってしまう。
+        """
+        session_factory = sessionmaker(bind=migrated_engine)
+        with session_factory() as session:
+            enforce_read_only(session)
+
+            with pytest.raises(InternalError, match="read-only transaction"):
+                session.execute(text("delete from articles"))
+            session.rollback()
+
+            # ここから先は新しいトランザクション。フックが無ければ書き込めてしまう。
+            with pytest.raises(InternalError, match="read-only transaction"):
+                session.execute(text("delete from articles"))
+
+    def test_allows_reading_after_rollback(self, migrated_engine: Engine) -> None:
+        """読み取りは引き続きできる。拒否するのは書き込みだけ。"""
+        session_factory = sessionmaker(bind=migrated_engine)
+        with session_factory() as session:
+            enforce_read_only(session)
+            session.rollback()
 
             assert session.execute(text("select 1")).scalar_one() == 1
 

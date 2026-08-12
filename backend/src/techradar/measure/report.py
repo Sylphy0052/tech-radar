@@ -65,10 +65,14 @@ def _render_clusters(stats: ClusterStats) -> list[str]:
 
 
 def _render_feed(stats: FeedCompositionStats) -> list[str]:
-    lines = [f"## フィード枠（ページ件数 {stats.page_size}）", ""]
-    if not stats.slots:
+    lines = [f"## フィード枠（1 回の実行で選ぶ件数 {stats.page_size}）", ""]
+    # 候補が 0 件でも `compose_feed_with_stats` は 4 枠ぶんの定員を返す。他の 2 項目と
+    # 表示を揃えるため、候補が無いことを先に明示してから定員を見せる。
+    if stats.candidate_count == 0:
         lines.append(_NO_DATA)
-        return lines
+        if not stats.slots:
+            return lines
+        lines.append("")
 
     lines.append(f"採点済み候補数: {stats.candidate_count}")
     lines.append("")

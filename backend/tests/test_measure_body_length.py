@@ -50,6 +50,16 @@ class TestSummarizeBodyLengths:
 
         assert stats.median_length == 250
 
+    def test_rounds_a_fractional_median(self) -> None:
+        """中央 2 件の平均が小数になるときは丸める。
+
+        切り捨てると件数が偶数のときだけ系統的に下振れするため `round` を使う。
+        `.5` の扱いは Python の既定（偶数側へ丸める）に従う。文字数の統計として
+        1 文字未満の差は判断に影響しないため、独自の丸めは持ち込まない。
+        """
+        assert summarize_body_lengths([100, 103], limit=12000).median_length == 102
+        assert summarize_body_lengths([100, 101], limit=12000).median_length == 100
+
     def test_counts_articles_over_the_limit(self) -> None:
         """上限を超える記事の件数と割合を出す。これが切り捨ての発生率になる。"""
         stats = summarize_body_lengths([100, 12000, 12001, 30000], limit=12000)

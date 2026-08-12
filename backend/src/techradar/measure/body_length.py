@@ -55,7 +55,9 @@ def summarize_body_lengths(lengths: Sequence[int], limit: int) -> BodyLengthStat
     return BodyLengthStats(
         article_count=len(lengths),
         min_length=min(lengths),
-        median_length=int(statistics.median(lengths)),
+        # 件数が偶数だと中央 2 件の平均になり小数を含む。切り捨てると系統的に
+        # 下振れするため丸める（`.5` は Python の既定どおり偶数側）。
+        median_length=round(statistics.median(lengths)),
         max_length=max(lengths),
         truncated_count=truncated_count,
         truncated_ratio=truncated_count / len(lengths),

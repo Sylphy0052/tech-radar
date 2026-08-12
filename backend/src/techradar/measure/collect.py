@@ -17,8 +17,8 @@ from sqlalchemy.orm import Session
 
 from techradar.analysis.service import MAX_ANALYSIS_BODY_CHARACTERS
 from techradar.config import Settings
-from techradar.interest.clusters import ClusteringSettings, ClusterSource, build_interest_clusters
-from techradar.interest.service import load_weighted_interest_articles
+from techradar.interest.clusters import ClusteringSettings, build_interest_clusters
+from techradar.interest.service import load_cluster_sources
 from techradar.measure.body_length import load_body_lengths, summarize_body_lengths
 from techradar.measure.clusters import summarize_clusters
 from techradar.measure.feed_slots import summarize_feed_slots
@@ -29,22 +29,6 @@ from techradar.recommendation.ranking import rank_candidates
 from techradar.recommendation.service import build_interest_profile, load_candidates
 
 
-def _cluster_sources(
-    session: Session, user_id: uuid.UUID, now: datetime
-) -> tuple[ClusterSource, ...]:
-    """クラスタリング対象を読む。
-
-    `interest.service.rebuild_interest_clusters` と同じ対象・同じ重み計算を使う。
-    計測用に別の抽出を書くと、測っている対象が本番のクラスタと食い違う。
-    """
-    weighted_articles = load_weighted_interest_articles(session, user_id, now)
-    return tuple(
-        ClusterSource(embedding=record.embedding, topics=record.topics, weight=record.weight)
-        for record in weighted_articles
-        if record.embedding is not None
-    )
-
-
 def collect_measurements(
     session: Session,
     *,
@@ -52,7 +36,12 @@ def collect_measurements(
     now: datetime,
     user_id: uuid.UUID | None = None,
 ) -> Measurements:
-    """3 項目の計測結果を集める。データが無くても例外にしない。"""
+    """3 項目の計測結果を集める。データが無くても例外にしない。
+
+    `session` は読み取り専用で渡すこと（`measure.session.read_only_session`）。この関数は
+    書き込みを行わないが、呼び出し先が増えたときの担保は DB 側のトランザクション属性に
+    置いている。書き込み可能なセッションを渡すと、その担保が外れる。
+    """
     target_user_id = user_id if user_id is not None else settings.default_user_id
     config = get_scoring_config()
     scoring_settings = config.to_settings()
@@ -61,7 +50,7 @@ def collect_measurements(
         load_body_lengths(session), limit=MAX_ANALYSIS_BODY_CHARACTERS
     )
 
-    sources = _cluster_sources(session, target_user_id, now)
+    sources = load_cluster_sources(session, target_user_id, now)
     clustering_settings = ClusteringSettings(
         min_clusters=config.clustering.min_clusters,
         max_clusters=config.clustering.max_clusters,
@@ -74,7 +63,11 @@ def collect_measurements(
     profile = build_interest_profile(session, target_user_id, now, settings)
     candidates = load_candidates(session, target_user_id, now, settings)
     scored = rank_candidates(candidates, profile, scoring_settings, now)
-    page_size = config.limits.default_page_size
+    # 本番の DISCOVER 生成（`recommendation.service.generate_recommendations`）と同じ
+    # `feed_run_size` を渡す。`default_page_size` は API の 1 ページ分の表示件数であって
+    # 構成比の適用単位ではない。枠の定員は `page_size × 比率` で決まるため、ここを取り違えると
+    # 定員が本番の 1/5 になり、縮退の起きやすさが実際と食い違う。
+    page_size = config.limits.feed_run_size
     composed = compose_feed_with_stats(scored, scoring_settings, page_size)
     feed = summarize_feed_slots(composed.stats, candidate_count=len(scored), page_size=page_size)
 

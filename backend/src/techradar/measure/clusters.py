@@ -36,7 +36,8 @@ class ClusterStats:
 
 
 def _squared_distance(left: Sequence[float], right: Sequence[float]) -> float:
-    return sum((a - b) ** 2 for a, b in zip(left, right, strict=False))
+    # 次元が食い違うのは実装の誤りであり、黙って短い方へ切り詰めると気付けない。
+    return sum((a - b) ** 2 for a, b in zip(left, right, strict=True))
 
 
 def assign_sources_to_clusters(

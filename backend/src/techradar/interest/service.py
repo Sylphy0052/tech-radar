@@ -699,7 +699,7 @@ def recompute_source_preferences_after_removal(
     _upsert_source_preference(session, user_id, source_domain, updated, now)
 
 
-def _load_cluster_sources(
+def load_cluster_sources(
     session: Session, user_id: uuid.UUID, now: datetime
 ) -> tuple[ClusterSource, ...]:
     """関心クラスタ構築対象の記事を `ClusterSource` に変換する。
@@ -708,6 +708,9 @@ def _load_cluster_sources(
     （DRY）。embedding が無い記事は KMeans の入力にできないため除外する
     （`recommendation.service.build_interest_profile` が `weighted_embeddings` を
     組み立てる際の除外と同じ扱い）。
+
+    `techradar.measure.collect` からも呼ぶため public にしてある。計測側で同じ抽出を
+    書き直すと、ここの条件が変わったときに計測結果が本番のクラスタと静かに食い違う。
     """
     weighted_articles = load_weighted_interest_articles(session, user_id, now)
     return tuple(
@@ -728,7 +731,7 @@ def rebuild_interest_clusters(session: Session, user_id: uuid.UUID, now: datetim
     Returns:
         生成したクラスタ数。対象記事（embedding 付きの関心記事）が無ければ 0。
     """
-    sources = _load_cluster_sources(session, user_id, now)
+    sources = load_cluster_sources(session, user_id, now)
     config = get_scoring_config()
     clustering_settings = ClusteringSettings(
         min_clusters=config.clustering.min_clusters,
