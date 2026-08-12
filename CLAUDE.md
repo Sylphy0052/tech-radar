@@ -39,14 +39,14 @@
 
 CI は 2026-08-12 に停止した。同日に一度再開している (Issue #81) が、実測して割に合わないと分かったため止め直した。[.gitlab-ci.yml](.gitlab-ci.yml) の workflow rules に `- when: never` が入っており、プロジェクト設定の `builds_access_level` も `disabled` にしてある。**pipeline は merge request でも main への push でも作られない。**
 
-止めた理由は 2 つある。
+止めた理由は2つある。
 
-- **CI が走らせる検証は、MR 前に手で回す `check.sh` と同じものである。** 1名運用では、事後にもう一度同じ検証を走らせる価値が薄い
-- **1 回の pipeline に 1 時間以上かかっていた。** backend の各ジョブが 10 分前後を要し、支配的なのは `uv sync` による torch-xpu 一式 (数GB) のダウンロードだった。runner 202 は共有 runner (`instance_type`) で分散キャッシュが未設定のため `cache` は一度も効いていない (ジョブログに `WARNING: Cache file does not exist`)。CI 側だけ CPU 版 torch へ切り替える高速化は可能だが、`pyproject.toml` / `uv.lock` / `run.sh` / `check.sh` の変更を伴い、得られるのは上記の重複した検証でしかない
+- **CI が走らせる検証は、MR 前に手で回す `check.sh` と同じものである。** むしろ `check.sh` の方が広く、`openapi.json` と `api-schema.d.ts` の鮮度チェックは CI 側に無い。1名運用では、事後にもう一度同じ検証を走らせる価値が薄い
+- **backend のジョブが1本あたり10分前後かかっていた。** 実測は ruff-check 632秒 / ruff-format 604秒 / ty-check 600秒 / pytest 295秒で、pipeline 全体では数十分規模になる (詳細はIssue #82)。支配的なのは `uv sync` による torch-xpu 一式 (数GB) のダウンロードで、runner 202 は共有 runner (`instance_type`) のため分散キャッシュが未設定であり `cache` は一度も効いていない (ジョブログに `WARNING: Cache file does not exist`)。CI 側だけ CPU 版 torch へ切り替える高速化は可能だが、`pyproject.toml` / `uv.lock` / `run.sh` / `check.sh` の変更を伴い、得られるのは上記の重複した検証でしかない
 
 **品質の担保は、手動の `check.sh` と MR の self review だけである。** 壊れたまま main へ入ってもそれを検知する自動の仕組みは無いので、MR を作る前に `check.sh` を全緑にする運用を守る。
 
-再開するときは [.gitlab-ci.yml](.gitlab-ci.yml) の `- when: never` を削除し、あわせて `builds_access_level` を `enabled` へ戻す (`jobs_enabled` は deprecated で、実体はこちら)。ジョブ定義そのものは残してあるため、この 2 箇所だけで戻る。ただし上記の所要時間はそのまま再現するので、戻す前に高速化を済ませておく。
+再開するときは [.gitlab-ci.yml](.gitlab-ci.yml) の `- when: never` を、停止理由を書いた直上のコメントごと削除し、あわせて `builds_access_level` を `enabled` へ戻す (`jobs_enabled` は deprecated で、実体はこちら)。ジョブ定義そのものは残してあるため、この2箇所で戻る。ただし上記の所要時間はそのまま再現するので、戻す前に高速化を済ませておく。CI を無効にしている間は pipeline 系の API も応答しなくなるため、過去の実測値を取り直すこともできない。
 
 ## 開発フロー (強制)
 
@@ -103,7 +103,7 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 - self-merge 前の24時間待機・翌日見直し (`~/.claude/docs/gitlab/README.md` L98)
 - **CI pipeline の完了待ち** — CI を停止しているため待つ対象が無い (Issue #82、上記「CI は使わない」)。`glab mr merge <IID> --remove-source-branch` を即実行してよい
 
-  この根拠は 3 度変わっている。当初は「commit 前に check.sh が全緑であることを hook が強制済み」だったが、2026-08-12 にその強制を廃止し (Issue #76)、同日 CI を再開して (Issue #81)、同日そのCIも止めた (Issue #82)。現在の担保は、マージ前の self review と手動の `check.sh` の 2 つだけである
+  この根拠は3度変わっている。当初は「commit 前に check.sh が全緑であることを hook が強制済み」だったが、2026-08-12 にその強制を廃止し (Issue #76)、同日 CI を再開して (Issue #81)、同日その CI も止めた (Issue #82)。現在の担保は、マージ前の self review と手動の `check.sh` の2つだけである
 
   **マージした後に壊れが判明した場合は fix-forward する。** `--remove-source-branch` で元のブランチは消えているため、revert ではなく main の先端から新しいブランチを作って直す。対象の Issue がまだ open ならそれを流用してよく、閉じていれば起票する
 

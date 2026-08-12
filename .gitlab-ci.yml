@@ -5,11 +5,10 @@ variables:
 
 workflow:
   rules:
-    # CI を停止している (Issue #82)。品質の担保は MR 前に手で回す check.sh と
-    # self review が持つため、CI が走らせる検証はその重複でしかない。1 pipeline に
-    # 1 時間以上かかるコストが、重複した検証に見合わないという判断による。
-    # 再開するときはこの 1 行を削除し、あわせてプロジェクト設定の
-    # builds_access_level を enabled へ戻す。
+    # CI を停止している (Issue #82)。止めた理由と再開の判断材料は CLAUDE.md の
+    # 「CI は使わない」節に書いてある。再開するときは、このコメントごと下の
+    # - when: never を削除し、あわせてプロジェクト設定の builds_access_level を
+    # enabled へ戻す。
     - when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
