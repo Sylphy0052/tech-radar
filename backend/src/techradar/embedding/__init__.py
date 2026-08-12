@@ -11,6 +11,7 @@ from techradar.embedding.errors import (
     EmbeddingModelLoadError,
 )
 from techradar.embedding.fake import FakeEmbeddingProvider
+from techradar.embedding.health import EmbeddingHealthCheckResult, check_embedding_health
 from techradar.embedding.qwen import QwenEmbeddingProvider, resolve_device
 from techradar.embedding.service import (
     EmbedResult,
@@ -26,12 +27,14 @@ __all__ = [
     "EmbedResult",
     "EmbeddingDimensionMismatchError",
     "EmbeddingError",
+    "EmbeddingHealthCheckResult",
     "EmbeddingModelLoadError",
     "EmbeddingProvider",
     "FakeEmbeddingProvider",
     "QwenEmbeddingProvider",
     "ScoredArticle",
     "assert_dimensions",
+    "check_embedding_health",
     "embed_articles",
     "find_neighbours",
     "find_similar_articles",
