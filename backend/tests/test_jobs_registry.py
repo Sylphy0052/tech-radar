@@ -70,3 +70,26 @@ def test_create_default_registry_registers_url_registration_and_crawl_handlers()
             assert registry.get(job_type) is not None
         else:
             assert registry.get(job_type) is None
+
+
+def test_create_default_registry_does_not_resolve_the_embedding_device(monkeypatch) -> None:
+    """受入基準（Issue #80）: `create_default_registry` を呼んだ時点で、
+    `embed_article` ハンドラが構築する `QwenEmbeddingProvider` のデバイス解決
+    （`resolve_device` 経由の `import torch`）が走らないこと。
+
+    `sys.modules` を直接見る方式は他テストの実行順序に汚染されうるため、
+    判定関数（`resolve_device`）をスパイして呼ばれないことで代替する
+    （`tests/test_embedding_qwen.py` の `TestLazyDeviceResolution` と同じ判断）。
+    """
+    # Arrange
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "techradar.embedding.qwen.resolve_device",
+        lambda configured, **_kwargs: calls.append(configured) or configured,
+    )
+
+    # Act
+    create_default_registry(Settings(_env_file=None))
+
+    # Assert
+    assert calls == []
