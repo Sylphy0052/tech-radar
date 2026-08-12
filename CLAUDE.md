@@ -28,14 +28,25 @@
 
 グローバル規約と本リポジトリの両方に効く。2026-08-12 に、commit 前の `check.sh` 自動実行を廃止した (グローバル hook `pre-bash-guard.sh` から削除。全プロジェクト対象)。commit のたびに 73〜100秒待つコストが、1名運用における検知の利得を上回るという判断による。
 
-**commit の単位では、lint / format / 型チェック / テストを自動で回す仕組みは無い。** 壊れたことに気付くのは、次に手で `check.sh` を回すか、MR を作って CI が走ったときになる。
+**lint / format / 型チェック / テストを自動で回す仕組みは、どこにも無い。** commit 前の hook も (Issue #76)、MR の CI も (Issue #82) 廃止した。壊れたことに気付くのは、次に手で `check.sh` を回したときだけである。
 
 - 品質チェックは `scripts/ai-harness/check.sh` を**手動で実行する**
 - MR を作る前に一度は全緑を確認する (推奨。機械強制はしない)
 - 完了報告の Evidence には、手動実行した `check.sh` の PASS ログを使う
 - commit のたびに回すかは変更内容で判断してよい (ドキュメントのみの変更など、明らかに影響しない場合は省略可)
 
-CI は 2026-08-12 に再開した (Issue #81)。merge request イベントと、デフォルトブランチへの push で pipeline が走る。停止する場合は [.gitlab-ci.yml](.gitlab-ci.yml) の workflow rules へ `- when: never` を戻し、あわせてプロジェクト設定の `builds_access_level` を `disabled` にする。
+## CI は使わない (Issue #82)
+
+CI は 2026-08-12 に停止した。同日に一度再開している (Issue #81) が、実測して割に合わないと分かったため止め直した。[.gitlab-ci.yml](.gitlab-ci.yml) の workflow rules に `- when: never` が入っており、プロジェクト設定の `builds_access_level` も `disabled` にしてある。**pipeline は merge request でも main への push でも作られない。**
+
+止めた理由は2つある。
+
+- **CI が走らせる検証は、MR 前に手で回す `check.sh` と同じものである。** むしろ `check.sh` の方が広く、`openapi.json` と `api-schema.d.ts` の鮮度チェックは CI 側に無い。1名運用では、事後にもう一度同じ検証を走らせる価値が薄い
+- **backend のジョブが1本あたり10分前後かかっていた。** 実測は ruff-check 632秒 / ruff-format 604秒 / ty-check 600秒 / pytest 295秒で、pipeline 全体では数十分規模になる (詳細はIssue #82)。支配的なのは `uv sync` による torch-xpu 一式 (数GB) のダウンロードで、runner 202 は共有 runner (`instance_type`) のため分散キャッシュが未設定であり `cache` は一度も効いていない (ジョブログに `WARNING: Cache file does not exist`)。CI 側だけ CPU 版 torch へ切り替える高速化は可能だが、`pyproject.toml` / `uv.lock` / `run.sh` / `check.sh` の変更を伴い、得られるのは上記の重複した検証でしかない
+
+**品質の担保は、手動の `check.sh` と MR の self review だけである。** 壊れたまま main へ入ってもそれを検知する自動の仕組みは無いので、MR を作る前に `check.sh` を全緑にする運用を守る。
+
+再開するときは [.gitlab-ci.yml](.gitlab-ci.yml) の `- when: never` を、停止理由を書いた直上のコメントごと削除し、あわせて `builds_access_level` を `enabled` へ戻す (`jobs_enabled` は deprecated で、実体はこちら)。ジョブ定義そのものは残してあるため、この2箇所で戻る。ただし上記の所要時間はそのまま再現するので、戻す前に高速化を済ませておく。CI を無効にしている間は pipeline 系の API も応答しなくなるため、過去の実測値を取り直すこともできない。
 
 ## 開発フロー (強制)
 
@@ -90,11 +101,11 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 - reviewer への承認依頼 (`gitlab-mr-flow` の「reviewer依頼note投稿」ステップは不要)
 - reviewer または権限保有者による merge 実行 (`~/.claude/skills/gitlab-mr-flow/SKILL.md` L112, L134)
 - self-merge 前の24時間待機・翌日見直し (`~/.claude/docs/gitlab/README.md` L98)
-- **CI pipeline の完了待ち** — MR 前に手動の `check.sh` を全緑にしており、CI は同じ検証を走らせる。同じものを待ち直さないため、pipeline が pending / running のままでもマージしてよい (`glab mr merge <IID> --remove-source-branch`)。ただし **失敗** していると判明した場合は、原因を潰すまでマージしない
+- **CI pipeline の完了待ち** — CI を停止しているため待つ対象が無い (Issue #82、上記「CI は使わない」)。`glab mr merge <IID> --remove-source-branch` を即実行してよい
 
-  この根拠は 2 度変わっている。当初は「commit 前に check.sh が全緑であることを hook が強制済み」だったが、2026-08-12 にその強制を廃止した (Issue #76)。廃止直後は CI も停止しており待つ対象が無かったが、同日 CI を再開した (Issue #81)。現在の担保は、マージ前の self review と手動の `check.sh`、そして事後に走る CI である
+  この根拠は3度変わっている。当初は「commit 前に check.sh が全緑であることを hook が強制済み」だったが、2026-08-12 にその強制を廃止し (Issue #76)、同日 CI を再開して (Issue #81)、同日その CI も止めた (Issue #82)。現在の担保は、マージ前の self review と手動の `check.sh` の2つだけである
 
-  **マージした後に pipeline の失敗が判明した場合は fix-forward する。** `--remove-source-branch` で元のブランチは消えているため、revert ではなく main の先端から新しいブランチを作って直す。対象の Issue がまだ open ならそれを流用してよく、閉じていれば起票する
+  **マージした後に壊れが判明した場合は fix-forward する。** `--remove-source-branch` で元のブランチは消えているため、revert ではなく main の先端から新しいブランチを作って直す。対象の Issue がまだ open ならそれを流用してよく、閉じていれば起票する
 
 ### 維持する項目 (緩和禁止)
 

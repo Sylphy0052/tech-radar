@@ -5,6 +5,11 @@ variables:
 
 workflow:
   rules:
+    # CI を停止している (Issue #82)。止めた理由と再開の判断材料は CLAUDE.md の
+    # 「CI は使わない」節に書いてある。再開するときは、このコメントごと下の
+    # - when: never を削除し、あわせてプロジェクト設定の builds_access_level を
+    # enabled へ戻す。
+    - when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
