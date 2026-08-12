@@ -1,0 +1,100 @@
+"""計測結果のまとめと出力（Issue #74）。
+
+計測結果は Issue へコメントで残す運用（Issue #73 の検証方法）のため、人が読む表形式と、
+後から機械で扱える JSON の両方を出す。出力先はファイルではなく標準出力にし、必要なら
+リダイレクトさせる。
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass
+from typing import Any
+
+from techradar.measure.body_length import BodyLengthStats
+from techradar.measure.clusters import ClusterStats
+from techradar.measure.feed_slots import FeedCompositionStats
+
+_NO_DATA = "対象データがありません"
+
+
+@dataclass(frozen=True)
+class Measurements:
+    """3 項目の計測結果。"""
+
+    body_length: BodyLengthStats
+    clusters: ClusterStats
+    feed: FeedCompositionStats
+
+
+def _format_ratio(value: float) -> str:
+    return f"{value * 100:.1f}%"
+
+
+def _render_body_length(stats: BodyLengthStats) -> list[str]:
+    lines = [f"## 本文長（上限 {stats.limit} 文字）", ""]
+    if stats.article_count == 0:
+        lines.append(_NO_DATA)
+        return lines
+
+    lines.extend(
+        [
+            f"記事数: {stats.article_count}",
+            f"最小: {stats.min_length} / 中央値: {stats.median_length} / 最大: {stats.max_length}",
+            f"上限超過: {stats.truncated_count} 件（{_format_ratio(stats.truncated_ratio)}）",
+        ]
+    )
+    return lines
+
+
+def _render_clusters(stats: ClusterStats) -> list[str]:
+    lines = ["## 関心クラスタ", ""]
+    if stats.source_count == 0:
+        lines.append(_NO_DATA)
+        return lines
+
+    lines.append(f"対象記事数: {stats.source_count} / クラスタ数: {stats.cluster_count}")
+    lines.append("")
+    for cluster in stats.clusters:
+        topics = " / ".join(cluster.topics) if cluster.topics else "-"
+        lines.append(
+            f"- {cluster.label}: {cluster.article_count} 件"
+            f"（重み {cluster.weight:.3f}、topics: {topics}）"
+        )
+    return lines
+
+
+def _render_feed(stats: FeedCompositionStats) -> list[str]:
+    lines = [f"## フィード枠（ページ件数 {stats.page_size}）", ""]
+    if not stats.slots:
+        lines.append(_NO_DATA)
+        return lines
+
+    lines.append(f"採点済み候補数: {stats.candidate_count}")
+    lines.append("")
+    for slot in stats.slots:
+        lines.append(
+            f"- {slot.slot}: 定員 {slot.quota} / 選択 {slot.selected}"
+            f"（充足 {_format_ratio(slot.fill_rate)}、うち補充 {slot.backfilled}）"
+        )
+    return lines
+
+
+def render_text(measurements: Measurements) -> str:
+    """人が読む形式でまとめる。"""
+    sections = [
+        _render_body_length(measurements.body_length),
+        _render_clusters(measurements.clusters),
+        _render_feed(measurements.feed),
+    ]
+    return "\n\n".join("\n".join(section) for section in sections)
+
+
+def to_dict(measurements: Measurements) -> dict[str, Any]:
+    """JSON へ落とせる形に変換する。"""
+    return asdict(measurements)
+
+
+def render_json(measurements: Measurements) -> str:
+    """機械可読な JSON にする。日本語のラベルはそのまま読める形で出す。"""
+    return json.dumps(to_dict(measurements), ensure_ascii=False, indent=2)
