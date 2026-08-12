@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# backend / frontend の lint・format・型チェック・テストを一括実行する。
-# commit 前に pre-bash-guard.sh から強制実行される。
+# backend / frontend の lint・format・型チェック・テスト・依存監査・secret検知を
+# 一括実行する。
+#
+# 手動で実行する。commit 前の自動実行は 2026-08-12 に廃止し（Issue #76）、CI も
+# 止めた（Issue #82）ため、これを回さない限り壊れたことに気付く機会が無い。
 #
 # 互いに独立したチェックは並列で走らせる（Issue #61）。直列だと backend の
 # pytest が終わるまで frontend が始まらず、待ち時間がそのまま足し算になる。
@@ -128,6 +131,15 @@ backend_pytest() {
   fi
 }
 
+backend_audit() {
+  cd "$REPO_ROOT/backend"
+  log "backend: uv audit"
+  # `uv audit` は uv 0.12 時点で experimental のため、明示しないと毎回警告が出る。
+  # 参照先は OSV なのでネットワークが要る（Issue #83）。
+  uv audit --preview-features audit-command \
+    || fail "backend: uv audit失敗（依存に既知脆弱性があるか、OSVへ到達できません）"
+}
+
 backend_openapi_freshness() {
   cd "$REPO_ROOT/backend"
   log "backend: openapi.jsonの鮮度チェック"
@@ -164,6 +176,15 @@ frontend_vitest() {
   npm test -- --maxWorkers="$VITEST_WORKERS" || fail "frontend: test失敗"
 }
 
+frontend_audit() {
+  cd "$REPO_ROOT/frontend"
+  log "frontend: npm audit"
+  # high 未満は日常的に出入りするため止めない。閾値を下げるなら、まず既存の
+  # moderate/low を解消してからにする（Issue #83）。
+  npm audit --audit-level=high \
+    || fail "frontend: npm audit失敗（依存にhigh以上の既知脆弱性があるか、registryへ到達できません）"
+}
+
 frontend_api_schema_freshness() {
   cd "$REPO_ROOT/frontend"
   log "frontend: api-schema.d.tsの鮮度チェック"
@@ -174,6 +195,19 @@ frontend_api_schema_freshness() {
     || fail "frontend: api-schema.d.tsの生成に失敗しました"
   diff -q src/lib/api-schema.d.ts "$freshness_tmp" >/dev/null \
     || fail "frontend: api-schema.d.tsが最新ではありません（npm run gen:api-typesで再生成してcommitしてください）"
+}
+
+# ---- リポジトリ全体のジョブ ----
+secret_scan() {
+  cd "$REPO_ROOT"
+  log "secret検知: detect-secrets"
+  # 走査対象は git の追跡下にあるファイルだけにする。detect-secrets 自体の既定も
+  # 同じだが、対象を git 側で決めておけば .venv や node_modules を掴む心配がない。
+  # baseline に載っている検出は既知として無視され、それ以外が出たときだけ落ちる。
+  # baseline の更新手順は CLAUDE.md の「secret検知と依存脆弱性監査」節にある。
+  git ls-files -z \
+    | xargs -0 uv run --project backend --no-sync detect-secrets-hook --baseline .secrets.baseline \
+    || fail "secret検知: baselineに無いsecretを検出しました（誤検知ならCLAUDE.mdの手順でbaselineを更新してください）"
 }
 
 # ---- 依存の用意（並列ジョブの前提になるため直列で済ませる） ----
@@ -198,13 +232,18 @@ fi
 if [[ -f backend/pyproject.toml ]]; then
   start_job "backend: ruff / ty" backend_lint
   start_job "backend: pytest" backend_pytest
+  start_job "backend: uv audit" backend_audit
   start_job "backend: openapi.jsonの鮮度" backend_openapi_freshness
+  # detect-secrets は backend の dev 依存として入るため、backend があることを
+  # 条件にする。走査対象はリポジトリ全体で、backend だけを見るわけではない。
+  start_job "secret検知" secret_scan
 fi
 
 if [[ -f frontend/package.json ]]; then
   start_job "frontend: eslint" frontend_eslint
   start_job "frontend: tsc" frontend_typecheck
   start_job "frontend: vitest" frontend_vitest
+  start_job "frontend: npm audit" frontend_audit
   start_job "frontend: api-schema.d.tsの鮮度" frontend_api_schema_freshness
 fi
 

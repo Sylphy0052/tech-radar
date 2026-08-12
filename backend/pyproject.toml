@@ -129,5 +129,6 @@ triton-xpu = { index = "pytorch-xpu" }
 
 [dependency-groups]
 dev = [
+    "detect-secrets>=1.5.0",
     "types-pyyaml>=6.0",
 ]

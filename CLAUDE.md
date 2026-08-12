@@ -20,8 +20,9 @@
 
 - `./run.sh` — backend + frontend を起動する (PostgreSQL は自動起動、ジョブワーカーは backend プロセスに同居)
 - `./run.sh --stop` — PostgreSQL コンテナも含めて停止する
-- `scripts/ai-harness/check.sh` — lint / format / 型チェック / テストを一括実行する。PostgreSQL が未起動なら自動で立ち上げる。**手動で実行する** (2026-08-12 に commit 前の自動実行を廃止した。下記「品質チェックは手動運用」を参照)
+- `scripts/ai-harness/check.sh` — lint / format / 型チェック / テスト / 依存脆弱性監査 / secret検知を一括実行する。PostgreSQL が未起動なら自動で立ち上げる。**手動で実行する** (2026-08-12 に commit 前の自動実行を廃止した。下記「品質チェックは手動運用」を参照)
   - 互いに独立したチェックは並列で走る (Issue #61)。出力は混ざらないよう、全ジョブの完了後にまとめて表示する
+  - 依存監査と secret検知は下記「secret検知と依存脆弱性監査」を参照。audit の2つはネットワークを使う
   - pytest と vitest のワーカー数は `PYTEST_WORKERS` / `VITEST_WORKERS` で変えられる。既定はコア数の半分と 8 の小さい方 (22コア機なら 8、8コア機なら 4)。22コア機での実測では 8 + 8 が最速だった。`PYTEST_WORKERS=1` で pytest の並列化を切れる
 
 ## 品質チェックは手動運用 (Issue #76)
@@ -34,6 +35,37 @@
 - MR を作る前に一度は全緑を確認する (推奨。機械強制はしない)
 - 完了報告の Evidence には、手動実行した `check.sh` の PASS ログを使う
 - commit のたびに回すかは変更内容で判断してよい (ドキュメントのみの変更など、明らかに影響しない場合は省略可)
+
+## secret検知と依存脆弱性監査 (Issue #83)
+
+`check.sh` は lint / 型 / テストに加えて、次の3つを毎回走らせる。CI を止めた以上 (Issue #82)、これらが走る機会は `check.sh` を手で回したときしか無い。
+
+| ジョブ | 実体 | 単体の所要 |
+| --- | --- | --- |
+| `secret検知` | `detect-secrets-hook --baseline .secrets.baseline` | 約27秒 |
+| `backend: uv audit` | `uv audit` (OSV を参照) | 約2秒 |
+| `frontend: npm audit` | `npm audit --audit-level=high` | 約1秒 |
+
+いずれも並列ジョブなので、壁時計の支配項である pytest より短い限り `check.sh` 全体の所要時間は変わらない。3つを追加した状態での実測は 1分46秒 (依存を取得済みの状態) だった。
+
+**audit の2つはネットワークを使う。** `uv audit` は OSV へ、`npm audit` は npm registry へ問い合わせる。オフラインでは失敗するため、機内などで作業するときは `check.sh` が通らないことがある。ネットワーク起因の失敗と、実際に脆弱性が見つかった失敗は、出力を読んで区別する。
+
+**`uv audit` は uv 0.12 時点で experimental である。** `--preview-features audit-command` を付けて警告を抑えている。uv の更新でオプションや出力が変わる可能性がある。
+
+### secret の誤検知が出たとき
+
+`detect-secrets` の走査対象は git の追跡下にあるファイルだけで、`.secrets.baseline` に載っている検出は既知として無視される。baseline に無い検出が出ると `check.sh` が落ちる。
+
+誤検知だと確認できたら、baseline を作り直して差分を commit する。
+
+```bash
+cd <リポジトリルート>
+./backend/.venv/bin/detect-secrets scan > .secrets.baseline
+```
+
+作り直す前に、**検出された箇所を1件ずつ目で見て、本物の secret が混ざっていないことを確かめる**。baseline はハッシュしか持たないため、一度取り込むと中身の再確認ができない。
+
+現在 baseline に入っている17件は、いずれも実害が無いことを確認済みである。内訳は alembic のリビジョンID 9件 (高エントロピー文字列として誤検知)、テストのダミー資格情報 4件、テスト関数名の誤検知 2件 (長い識別子が GitHub Token パターンに当たる)、CI の使い捨て資格情報 1件、環境変数テンプレートの接続文字列 1件。
 
 ## CI は使わない (Issue #82)
 
