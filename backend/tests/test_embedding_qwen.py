@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Sequence
 
 import pytest
@@ -17,7 +18,7 @@ from techradar.config import Settings
 from techradar.db import EMBEDDING_DIMENSIONS
 from techradar.embedding.base import assert_dimensions
 from techradar.embedding.errors import EmbeddingDimensionMismatchError
-from techradar.embedding.qwen import QwenEmbeddingProvider, resolve_device
+from techradar.embedding.qwen import QwenEmbeddingProvider, is_xpu_available, resolve_device
 
 requires_model = pytest.mark.skipif(
     os.environ.get("TECHRADAR_RUN_MODEL_TESTS") != "1",
@@ -31,18 +32,58 @@ def cosine(left: Sequence[float], right: Sequence[float]) -> float:
 
 
 class TestResolveDevice:
-    @pytest.mark.parametrize("configured", ["cpu", "cuda"])
+    @pytest.mark.parametrize("configured", ["cpu", "cuda", "xpu"])
     def test_respects_an_explicit_device(self, configured: str):
-        # Arrange / Act / Assert — 明示指定はそのまま使う
+        # Arrange / Act / Assert — 明示指定はそのまま使う（xpu もそのまま通る）
         assert resolve_device(configured) == configured
 
-    def test_auto_falls_back_to_cpu_without_cuda(self):
+    def test_auto_falls_back_to_cpu_without_cuda_or_xpu(self):
         # Arrange / Act / Assert — 判定を注入し、torch を読み込まずに検証する
-        assert resolve_device("auto", cuda_available=lambda: False) == "cpu"
+        assert (
+            resolve_device("auto", cuda_available=lambda: False, xpu_available=lambda: False)
+            == "cpu"
+        )
+
+    def test_auto_selects_xpu_when_cuda_is_unavailable(self):
+        # Arrange — 開発機は NVIDIA GPU を持たず Intel Arc（XPU）のみを持つ想定
+        # Act / Assert
+        assert (
+            resolve_device("auto", cuda_available=lambda: False, xpu_available=lambda: True)
+            == "xpu"
+        )
+
+    def test_auto_prefers_cuda_over_xpu_when_both_are_available(self):
+        # Arrange — NVIDIA の dGPU がある環境では統合GPU（XPU）より高速なため
+        # CUDA を優先することを固定する
+        # Act / Assert
+        assert (
+            resolve_device("auto", cuda_available=lambda: True, xpu_available=lambda: True)
+            == "cuda"
+        )
 
     def test_auto_selects_cuda_when_available(self):
-        # Arrange / Act / Assert
-        assert resolve_device("auto", cuda_available=lambda: True) == "cuda"
+        # Arrange / Act / Assert — xpu 判定が呼ばれない（cuda が先に決着する）ことも兼ねて確認
+        assert (
+            resolve_device(
+                "auto",
+                cuda_available=lambda: True,
+                xpu_available=lambda: (_ for _ in ()).throw(AssertionError("呼ばれないはず")),
+            )
+            == "cuda"
+        )
+
+
+class TestIsXpuAvailable:
+    def test_returns_false_without_raising_when_torch_has_no_xpu_attribute(self, monkeypatch):
+        # Arrange — 古い torch や XPU ビルドでない torch には `torch.xpu` が無い。
+        # 属性が無いことを理由に例外を投げず False を返すことを固定する。
+        import types
+
+        fake_torch = types.SimpleNamespace()  # xpu 属性を持たないダミー
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        # Act / Assert
+        assert is_xpu_available() is False
 
 
 class TestDimensionGuard:

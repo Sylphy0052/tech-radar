@@ -19,7 +19,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # リポジトリルート (backend/src/techradar/config.py から 3 階層上)
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-EmbeddingDevice = Literal["auto", "cuda", "cpu"]
+EmbeddingDevice = Literal["auto", "cuda", "cpu", "xpu"]
 
 # MVP は認証なしの単一ユーザー（`docs/decisions.md`）のため、固定 UUID を既定の
 # user_id として使う。将来認証を導入する際は `api.deps.get_current_user_id` の
