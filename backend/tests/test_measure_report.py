@@ -135,7 +135,10 @@ class TestRenderText:
         assert "novelty と interest_similarity の順位相関（Spearman）: -0.800" in output
 
     def test_shows_correlation_as_undefined_when_none(self) -> None:
-        """分散ゼロで相関が定義できないとき、0 と混同しない表示にする。"""
+        """相関が定義できないとき、0 と混同しない表示にする。
+
+        未定義になる理由は分散ゼロと候補数不足の 2 つあるため、表示は両方を挙げる。
+        """
         measurements = Measurements(
             body_length=_EMPTY.body_length,
             clusters=_EMPTY.clusters,
@@ -152,7 +155,7 @@ class TestRenderText:
 
         output = render_text(measurements)
 
-        assert "算出不可（分散ゼロ）" in output
+        assert "算出不可（分散ゼロまたは候補数不足）" in output
         assert "算出不可（対象候補なし）" in output
 
     def test_shows_the_slot_divergence(self) -> None:
@@ -220,6 +223,8 @@ class TestRenderJson:
         assert parsed["feed"]["slots"][0]["slot"] == "strong_interest"
         assert parsed["novelty"]["distribution"]["saturated_count"] == 2
         assert parsed["novelty"]["threshold_table"][0]["threshold"] == 0.6
+        assert parsed["novelty"]["novelty_interest_correlation"] == -0.8
+        assert parsed["novelty"]["slot_divergence"]["diversity_ratio"] == 0.5
 
     def test_keeps_none_for_missing_values(self) -> None:
         """0 件のときの長さは 0 ではなく null にする。0 文字の記事と区別する。"""

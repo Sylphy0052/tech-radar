@@ -266,6 +266,10 @@ def summarize_novelty_interest_correlation(scored: Sequence[ScoredCandidate]) ->
     3 段目（exploration、novelty で判定）が実質同じ軸の表裏になっていることを示す。
     Pearson ではなく Spearman を使うのは、知りたいのが線形性ではなく「並べ直したとき
     同じ順になるか」だから。両方が単調な関係ではあっても線形とは限らない。
+
+    対象は候補の全件である。`summarize_slot_divergence` が数える偏りは上位 2 枠を
+    外れた候補だけを見るため、両者の母集団は一致しない。相関がほぼ -1 でも、閾値の
+    近傍でどう分岐するかは別の問題であり、片方からもう片方を導けるわけではない。
     """
     novelty_values = [item.breakdown.novelty for item in scored]
     interest_values = [item.breakdown.interest_similarity for item in scored]
@@ -281,6 +285,9 @@ def summarize_slot_divergence(
     `summarize_threshold_table` と違い閾値は動かさず、現在の `settings` の
     `exploration_min_novelty` 1 点だけで判定する。閾値走査は候補側（どの閾値なら
     分岐するか）を見るためのもの、こちらは今の設定での実際の偏りを見るためのもの。
+
+    数えるのは上位 2 枠（strong_interest / primary_source）を外れた候補だけで、
+    全件を見る `summarize_novelty_interest_correlation` とは母集団が違う。
     """
     excluded_count = 0
     diversity_count = 0

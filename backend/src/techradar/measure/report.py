@@ -107,7 +107,11 @@ def _render_novelty(stats: NoveltyStats) -> list[str]:
     )
 
     correlation = stats.novelty_interest_correlation
-    correlation_text = f"{correlation:.3f}" if correlation is not None else "算出不可（分散ゼロ）"
+    # 未定義になる理由は分散ゼロだけではなく、候補が 2 件未満のときも該当する
+    # （`summarize_novelty_interest_correlation`）。片方だけを書くと誤読させるため両方挙げる。
+    correlation_text = (
+        f"{correlation:.3f}" if correlation is not None else "算出不可（分散ゼロまたは候補数不足）"
+    )
     lines.append(f"novelty と interest_similarity の順位相関（Spearman）: {correlation_text}")
 
     divergence = stats.slot_divergence
