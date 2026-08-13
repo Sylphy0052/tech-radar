@@ -15,7 +15,16 @@
 
 枠の判定は `recommendation.composition._slot_for` をそのまま呼ぶ。優先順位
 （strong_interest → primary_source → exploration → diversity）をここで再実装すると、
-測っている対象が本番の挙動から外れる（`feed_slots.py` と同じ方針）。
+測っている対象が本番の挙動から外れるため。本番の実装を読む方針そのものは
+`feed_slots.py` と同じだが、あちらが公開の `CompositionStats` だけを読むのに対し、
+ここは private な `_slot_for` を跨いで呼んでいる点が違う。`composition.py` 側で
+名前やシグネチャが変わっても型チェックでは気付けないため、そのときはこのモジュールの
+テストが落ちることで検出する。
+
+`_slot_for` は候補を 1 件ずつ分類するだけで、`compose_feed_with_stats` が行う定員の
+適用・他枠からの補充・ドメイン重複の排除（`_select_primary`）は通らない。閾値表が
+示すのは「その閾値なら各枠にいくつの候補が入りうるか」であって、最終的なフィードの
+中身ではない。実際の充足率は `feed_slots.py` の集計で見る。
 """
 
 from __future__ import annotations
