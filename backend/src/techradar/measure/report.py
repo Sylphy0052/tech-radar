@@ -103,10 +103,29 @@ def _render_novelty(stats: NoveltyStats) -> list[str]:
             f"（{_format_ratio(distribution.saturated_ratio)}）",
             f"現行の exploration_min_novelty（{distribution.exploration_min_novelty:.3f}）以上: "
             f"{distribution.above_threshold_count} 件",
-            "",
-            "### 閾値ごとの exploration / diversity 件数",
         ]
     )
+
+    correlation = stats.novelty_interest_correlation
+    # 未定義になる理由は分散ゼロだけではなく、候補が 2 件未満のときも該当する
+    # （`summarize_novelty_interest_correlation`）。片方だけを書くと誤読させるため両方挙げる。
+    correlation_text = (
+        f"{correlation:.3f}" if correlation is not None else "算出不可（分散ゼロまたは候補数不足）"
+    )
+    lines.append(f"novelty と interest_similarity の順位相関（Spearman）: {correlation_text}")
+
+    divergence = stats.slot_divergence
+    divergence_ratio_text = (
+        _format_ratio(divergence.diversity_ratio)
+        if divergence.diversity_ratio is not None
+        else "算出不可（対象候補なし）"
+    )
+    lines.append(
+        f"strong_interest/primary_source 対象外 {divergence.excluded_count} 件のうち "
+        f"diversity 行き: {divergence.diversity_count} 件（{divergence_ratio_text}）"
+    )
+
+    lines.extend(["", "### 閾値ごとの exploration / diversity 件数"])
     for row in stats.threshold_table:
         lines.append(
             f"- {row.threshold:.1f}: exploration {row.exploration_count} / "

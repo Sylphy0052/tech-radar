@@ -1,17 +1,30 @@
-"""novelty 分布の集計（Issue #87）。
+"""novelty 分布の集計（Issue #87、Issue #88）。
 
 `compute_novelty` が topics の文字列一致で判定していた頃、既知トピックと 1 語も
 重ならない候補が軒並み novelty = 1.0（上端）へ張り付き、diversity 枠が構造的に
 選ばれなくなっていた。式は embedding のコサイン類似ベースへ差し替えたが
-（`docs/adr/0007-embedding-based-novelty.md`）、同じ縮退が
-別の形で再発しうるため、分布を継続して観測できるようにこの集計を残す。novelty の
-計算方法そのものには関与しない。
+（`docs/adr/0007-embedding-based-novelty.md`）、`compute_interest_similarity`
+（top_k 加重平均）と同じ embedding 空間を見るため両者の相関は残る。関心プロファイル
+の偏り方によっては同じ縮退が別の形で再発しうるため、分布に加えて縮退の兆候そのもの
+（相関・枠の偏り）も継続して観測できるようにこの集計を持つ。novelty の計算方法
+そのものには関与しない。
 
-出すのは 2 つ。ひとつは `rank_candidates` が返す `ScoredCandidate.breakdown.novelty`
-の分布（`summarize_novelty_distribution`）。上端への張り付き件数・割合と、現行の
-`exploration_min_novelty` を超える件数を必ず含める。もうひとつは、その閾値を
-0.0〜1.0 の 0.1 刻みで動かしたときに exploration 枠と diversity 枠がどう分岐するかの表
-（`summarize_threshold_table`）で、閾値を実測で確定させる材料になる。
+出すのは 4 つ。
+
+1. `rank_candidates` が返す `ScoredCandidate.breakdown.novelty` の分布
+   （`summarize_novelty_distribution`）。上端への張り付き件数・割合と、現行の
+   `exploration_min_novelty` を超える件数を必ず含める
+2. その閾値を 0.0〜1.0 の 0.1 刻みで動かしたときに exploration 枠と diversity 枠が
+   どう分岐するかの表（`summarize_threshold_table`）。閾値を実測で確定させる材料になる
+3. novelty と interest_similarity の Spearman 順位相関（`summarize_novelty_interest_correlation`）。
+   両者が同じ embedding 空間の表裏になっていないか、原因側から見る指標
+4. strong_interest / primary_source を外れた候補が exploration と diversity のどちらへ
+   偏っているか（`summarize_slot_divergence`）。ADR 0007 で実際に起きた症状
+   （上位2枠に取られなかった候補が全て同じ枠へ流れる）を、症状側からそのまま数える
+
+3 と 4 は原因と症状の対で意味を持つ。相関が -1 に近くても枠が両方へ分岐していれば
+実害は無く、逆に相関が弱くても枠が偏っていれば別の要因で縮退している。どちらか片方
+だけでは縮退の有無を読み違える。
 
 枠の判定は `recommendation.composition._slot_for` をそのまま呼ぶ。優先順位
 （strong_interest → primary_source → exploration → diversity）をここで再実装すると、
@@ -73,11 +86,30 @@ class ThresholdSlotCounts:
 
 
 @dataclass(frozen=True)
+class SlotDivergenceStats:
+    """strong_interest / primary_source を外れた候補が exploration / diversity の
+    どちらへ偏っているかの割合。
+
+    `excluded_count` は exploration + diversity に入った候補数（＝上位2枠に取られ
+    なかった候補数）、`diversity_count` はそのうち diversity に入った件数。
+    `diversity_ratio` が 0% または 100% へ張り付いていたら、片方の枠へ候補が集中
+    している＝縮退の兆候（ADR 0007 で実際に起きた症状）。`excluded_count` が 0
+    （候補が無い、または全候補が上位2枠に収まる）なら比較対象が無いため `None`。
+    """
+
+    excluded_count: int
+    diversity_count: int
+    diversity_ratio: float | None
+
+
+@dataclass(frozen=True)
 class NoveltyStats:
-    """novelty 分布と、閾値走査の表をまとめた集計。"""
+    """novelty 分布・閾値走査の表・縮退の兆候（相関と枠の偏り）をまとめた集計。"""
 
     distribution: NoveltyDistribution
     threshold_table: tuple[ThresholdSlotCounts, ...]
+    novelty_interest_correlation: float | None
+    slot_divergence: SlotDivergenceStats
 
 
 def _percentile(sorted_values: Sequence[float], fraction: float) -> float:
@@ -177,11 +209,116 @@ def summarize_threshold_table(
     return tuple(rows)
 
 
+def _average_ranks(values: Sequence[float]) -> list[float]:
+    """値の列に 1 始まりの順位を付ける。同順位 (tie) は平均順位にする。
+
+    Spearman の順位相関は同順位を無視すると値がずれるため、`statistics` に無いこの
+    処理を自前で持つ。例えば `(10, 20, 20, 30)` の順位は `(1, 2.5, 2.5, 4)` になる
+    （2 位と 3 位を分け合う）。
+    """
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        # i 番目から j 番目まで（0 始まり）が同順位。1 始まりの平均順位に直す。
+        average_rank = (i + j) / 2 + 1
+        for k in range(i, j + 1):
+            ranks[order[k]] = average_rank
+        i = j + 1
+    return ranks
+
+
+def _spearman_correlation(xs: Sequence[float], ys: Sequence[float]) -> float | None:
+    """Spearman の順位相関係数を求める。
+
+    順位に変換したうえで Pearson の相関係数と同じ式（共分散 / 標準偏差の積）を適用する。
+    これは同順位を平均順位で扱う一般化であり、同順位が無ければ教科書の
+    `1 - 6Σd² / (n(n²-1))` と一致する。分散ゼロ（全値が同じ、または件数が 2 未満）
+    のときは相関を定義できないため `None` を返す（例外にしない）。
+    """
+    count = len(xs)
+    if count < 2:
+        return None
+
+    rank_x = _average_ranks(xs)
+    rank_y = _average_ranks(ys)
+    mean_x = sum(rank_x) / count
+    mean_y = sum(rank_y) / count
+
+    covariance = sum((rx - mean_x) * (ry - mean_y) for rx, ry in zip(rank_x, rank_y, strict=True))
+    variance_x = sum((rx - mean_x) ** 2 for rx in rank_x)
+    variance_y = sum((ry - mean_y) ** 2 for ry in rank_y)
+    if variance_x == 0.0 or variance_y == 0.0:
+        return None
+
+    return covariance / (variance_x * variance_y) ** 0.5
+
+
+def summarize_novelty_interest_correlation(scored: Sequence[ScoredCandidate]) -> float | None:
+    """novelty と interest_similarity の Spearman 順位相関を求める。
+
+    両者は同じ embedding 空間を見ている（novelty は関心記事群への最大類似度の裏返し、
+    interest_similarity は top_k 加重平均）ため相関が残る（ADR 0007「影響」節）。
+    -1.0 に近いほど、枠判定の 1 段目（strong_interest、interest_similarity で判定）と
+    3 段目（exploration、novelty で判定）が実質同じ軸の表裏になっていることを示す。
+    Pearson ではなく Spearman を使うのは、知りたいのが線形性ではなく「並べ直したとき
+    同じ順になるか」だから。両方が単調な関係ではあっても線形とは限らない。
+
+    対象は候補の全件である。`summarize_slot_divergence` が数える偏りは上位 2 枠を
+    外れた候補だけを見るため、両者の母集団は一致しない。相関がほぼ -1 でも、閾値の
+    近傍でどう分岐するかは別の問題であり、片方からもう片方を導けるわけではない。
+    """
+    novelty_values = [item.breakdown.novelty for item in scored]
+    interest_values = [item.breakdown.interest_similarity for item in scored]
+    return _spearman_correlation(novelty_values, interest_values)
+
+
+def summarize_slot_divergence(
+    scored: Sequence[ScoredCandidate], settings: ScoringSettings
+) -> SlotDivergenceStats:
+    """strong_interest / primary_source を外れた候補が exploration / diversity の
+    どちらへ偏っているかを数える（ADR 0007 で実際に起きた症状をそのまま数える）。
+
+    `summarize_threshold_table` と違い閾値は動かさず、現在の `settings` の
+    `exploration_min_novelty` 1 点だけで判定する。閾値走査は候補側（どの閾値なら
+    分岐するか）を見るためのもの、こちらは今の設定での実際の偏りを見るためのもの。
+
+    数えるのは上位 2 枠（strong_interest / primary_source）を外れた候補だけで、
+    全件を見る `summarize_novelty_interest_correlation` とは母集団が違う。
+    """
+    excluded_count = 0
+    diversity_count = 0
+    for item in scored:
+        slot = _slot_for(item, settings)
+        if slot is FeedSlot.EXPLORATION:
+            excluded_count += 1
+        elif slot is FeedSlot.DIVERSITY:
+            excluded_count += 1
+            diversity_count += 1
+
+    diversity_ratio = diversity_count / excluded_count if excluded_count > 0 else None
+    return SlotDivergenceStats(
+        excluded_count=excluded_count,
+        diversity_count=diversity_count,
+        diversity_ratio=diversity_ratio,
+    )
+
+
 def summarize_novelty(scored: Sequence[ScoredCandidate], settings: ScoringSettings) -> NoveltyStats:
-    """採点済み候補から novelty の分布と閾値走査をまとめる。"""
+    """採点済み候補から novelty の分布・閾値走査・縮退の兆候をまとめる。"""
     values = tuple(item.breakdown.novelty for item in scored)
     distribution = summarize_novelty_distribution(
         values, exploration_min_novelty=settings.feed_composition.exploration_min_novelty
     )
     threshold_table = summarize_threshold_table(scored, settings)
-    return NoveltyStats(distribution=distribution, threshold_table=threshold_table)
+    correlation = summarize_novelty_interest_correlation(scored)
+    slot_divergence = summarize_slot_divergence(scored, settings)
+    return NoveltyStats(
+        distribution=distribution,
+        threshold_table=threshold_table,
+        novelty_interest_correlation=correlation,
+        slot_divergence=slot_divergence,
+    )

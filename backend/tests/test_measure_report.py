@@ -12,7 +12,12 @@ import json
 from techradar.measure.body_length import BodyLengthStats
 from techradar.measure.clusters import ClusterStats, ClusterSummary
 from techradar.measure.feed_slots import FeedCompositionStats, FeedSlotStats
-from techradar.measure.novelty import NoveltyDistribution, NoveltyStats, ThresholdSlotCounts
+from techradar.measure.novelty import (
+    NoveltyDistribution,
+    NoveltyStats,
+    SlotDivergenceStats,
+    ThresholdSlotCounts,
+)
 from techradar.measure.report import Measurements, render_json, render_text
 
 _EMPTY_NOVELTY = NoveltyStats(
@@ -30,6 +35,8 @@ _EMPTY_NOVELTY = NoveltyStats(
         exploration_min_novelty=0.6,
     ),
     threshold_table=(),
+    novelty_interest_correlation=None,
+    slot_divergence=SlotDivergenceStats(excluded_count=0, diversity_count=0, diversity_ratio=None),
 )
 
 _EMPTY = Measurements(
@@ -91,6 +98,10 @@ _FILLED = Measurements(
         threshold_table=(
             ThresholdSlotCounts(threshold=0.6, exploration_count=2, diversity_count=2),
         ),
+        novelty_interest_correlation=-0.8,
+        slot_divergence=SlotDivergenceStats(
+            excluded_count=4, diversity_count=2, diversity_ratio=0.5
+        ),
     ),
 )
 
@@ -116,6 +127,45 @@ class TestRenderText:
 
         assert "1.0への張り付き: 2 件（50.0%）" in output
         assert "0.6: exploration 2 / diversity 2" in output
+
+    def test_shows_the_novelty_interest_correlation(self) -> None:
+        """縮退の兆候（原因側）。Spearman 順位相関を出す（Issue #88）。"""
+        output = render_text(_FILLED)
+
+        assert "novelty と interest_similarity の順位相関（Spearman）: -0.800" in output
+
+    def test_shows_correlation_as_undefined_when_none(self) -> None:
+        """相関が定義できないとき、0 と混同しない表示にする。
+
+        未定義になる理由は分散ゼロと候補数不足の 2 つあるため、表示は両方を挙げる。
+        """
+        measurements = Measurements(
+            body_length=_EMPTY.body_length,
+            clusters=_EMPTY.clusters,
+            feed=_FILLED.feed,
+            novelty=NoveltyStats(
+                distribution=_FILLED.novelty.distribution,
+                threshold_table=(),
+                novelty_interest_correlation=None,
+                slot_divergence=SlotDivergenceStats(
+                    excluded_count=0, diversity_count=0, diversity_ratio=None
+                ),
+            ),
+        )
+
+        output = render_text(measurements)
+
+        assert "算出不可（分散ゼロまたは候補数不足）" in output
+        assert "算出不可（対象候補なし）" in output
+
+    def test_shows_the_slot_divergence(self) -> None:
+        """縮退の兆候（症状側）。exploration / diversity への偏りを出す（Issue #88）。"""
+        output = render_text(_FILLED)
+
+        assert (
+            "strong_interest/primary_source 対象外 4 件のうち diversity 行き: 2 件（50.0%）"
+            in output
+        )
 
     def test_shows_truncation_ratio_as_percentage(self) -> None:
         output = render_text(_FILLED)
@@ -173,6 +223,8 @@ class TestRenderJson:
         assert parsed["feed"]["slots"][0]["slot"] == "strong_interest"
         assert parsed["novelty"]["distribution"]["saturated_count"] == 2
         assert parsed["novelty"]["threshold_table"][0]["threshold"] == 0.6
+        assert parsed["novelty"]["novelty_interest_correlation"] == -0.8
+        assert parsed["novelty"]["slot_divergence"]["diversity_ratio"] == 0.5
 
     def test_keeps_none_for_missing_values(self) -> None:
         """0 件のときの長さは 0 ではなく null にする。0 文字の記事と区別する。"""
