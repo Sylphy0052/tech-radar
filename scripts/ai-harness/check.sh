@@ -23,6 +23,11 @@ ENTRYPOINT_SCRIPT="${BASH_SOURCE[0]}"
 # shellcheck source=lib/postgres.sh
 source "$REPO_ROOT/scripts/ai-harness/lib/postgres.sh"
 
+# 機械の混み具合を読む（Issue #84）。失敗が「壊れたから」なのか「重かったから」なのかを
+# 区別するために使う。判定できない環境でも落ちない。
+# shellcheck source=lib/machine-load.sh
+source "$REPO_ROOT/scripts/ai-harness/lib/machine-load.sh"
+
 # pytest と vitest をそれぞれ何プロセスへ分散させるか。
 #
 # pytest はワーカーごとにテスト用 DB を作り直すため（Issue #33）、CPU 数ぶんまで
@@ -112,7 +117,18 @@ wait_jobs() {
   JOB_LABELS=()
   JOB_PIDS=()
   JOB_LOGS=()
-  ((${#failed[@]} == 0)) || fail "失敗したチェック: ${failed[*]}"
+  if ((${#failed[@]} > 0)); then
+    # 機械の状態を添える。混んだ機械では、変更が壊れていなくてもジョブが落ちる
+    # （Issue #84 の実測では load 82 / swap 96% で pytest・vitest・audit 2つが落ち、
+    # 負荷が引いた後は同じ木で全緑になった）。これが無いと「壊れた」のか「重かった」
+    # のかが出力から区別できない。
+    log "実行後の機械の状態: $(describe_machine_state)"
+    if machine_is_congested; then
+      log "この機械は混んでいる。上の失敗は資源の奪い合いによるものかもしれない。"
+      log "他の重い処理が終わってから、もう一度回して切り分ける。"
+    fi
+    fail "失敗したチェック: ${failed[*]}"
+  fi
 }
 
 # ---- backend (Python / uv) のジョブ ----
@@ -236,6 +252,15 @@ secret_scan() {
         uv run --project backend --no-sync detect-secrets-hook --baseline .secrets.baseline -n -- \
     || fail "secret検知: baselineに無いsecretを検出しました（誤検知ならCLAUDE.mdの手順でbaselineを更新してください）"
 }
+
+# ---- 実行前の見立て ----
+# 混んでいても止めない。止めるかどうかは人が決める（急ぐなら重いまま回してもよいし、
+# 落ちてから切り分けてもよい）。ここで伝えたいのは「この後の失敗は資源の奪い合いに
+# よるものかもしれない」という前提だけである（Issue #84）。
+if machine_is_congested; then
+  log "この機械は今混んでいる: $(describe_machine_state)"
+  log "重い処理が他に走っていると、変更が壊れていなくてもジョブが落ちることがある。"
+fi
 
 # ---- 依存の用意（並列ジョブの前提になるため直列で済ませる） ----
 # secret検知はリポジトリ全体が対象なので backend / frontend のどちらのブロックにも
