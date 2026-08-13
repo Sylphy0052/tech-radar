@@ -262,6 +262,26 @@ class TestSchemaLimits:
         assert analysis.translated_title is None
 
 
+class TestOverlongSummaryReachesTheArticle:
+    def test_saves_a_truncated_summary_instead_of_failing(self, db_session: Session):
+        # Arrange — 受入基準は「上限を超える要約でも記事が解析済みになる」(Issue #86)。
+        # スキーマ単体で切り詰めが効いても、パイプラインの別の層で長さを見ていれば
+        # 記事は failed のまま残る。`analyze_article` を通して確かめる
+        article = make_article(db_session)
+        provider = FakeLLMProvider(
+            [{**VALID_ANALYSIS, "summary_ja": "あ" * (MAX_SUMMARY_LENGTH + 47)}]
+        )
+
+        # Act
+        result = analyze_article(db_session, provider, article, sleep=no_sleep)
+
+        # Assert
+        assert result.analyzed is True
+        assert article.analysis_status == JobStatus.COMPLETED
+        assert article.summary_ja is not None
+        assert len(article.summary_ja) == MAX_SUMMARY_LENGTH
+
+
 class TestAnalysisInstruction:
     def test_states_the_summary_length_limit(self):
         # Arrange / Act / Assert — スキーマ側の切り詰めは安全網であって、

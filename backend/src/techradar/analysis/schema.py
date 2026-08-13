@@ -39,7 +39,12 @@ class ArticleAnalysis(BaseModel):
         max_length=MAX_TITLE_LENGTH,
     )
     summary_ja: str = Field(
-        description="日本語の要約。原文の言語を問わず日本語で書く。",
+        # このスキーマは `model_json_schema()` を経て LLM への指示にも埋め込まれる
+        # （`llm.claude_cli`）。`max_length` を外したぶん、上限は説明文で伝える。
+        description=(
+            f"日本語の要約。原文の言語を問わず日本語で書く。"
+            f"{MAX_SUMMARY_LENGTH} 字以内（超えた分は切り捨てる）。"
+        ),
         min_length=1,
     )
     domain: str = Field(
