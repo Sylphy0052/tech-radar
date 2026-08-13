@@ -39,9 +39,13 @@ class ArticleAnalysis(BaseModel):
         max_length=MAX_TITLE_LENGTH,
     )
     summary_ja: str = Field(
-        description="日本語の要約。原文の言語を問わず日本語で書く。",
+        # このスキーマは `model_json_schema()` を経て LLM への指示にも埋め込まれる
+        # （`llm.claude_cli`）。`max_length` を外したぶん、上限は説明文で伝える。
+        description=(
+            f"日本語の要約。原文の言語を問わず日本語で書く。"
+            f"{MAX_SUMMARY_LENGTH} 字以内（超えた分は切り捨てる）。"
+        ),
         min_length=1,
-        max_length=MAX_SUMMARY_LENGTH,
     )
     domain: str = Field(
         description="大分類。例: Generative AI, Web Frontend",
@@ -71,11 +75,26 @@ class ArticleAnalysis(BaseModel):
         le=1.0,
     )
 
-    @field_validator("summary_ja", "domain", "category", mode="after")
+    @field_validator("domain", "category", mode="after")
     @classmethod
     def _clean_text(cls, value: str) -> str:
         """制御文字を落とす。"""
         return _clean(value)
+
+    @field_validator("summary_ja", mode="after")
+    @classmethod
+    def _clean_and_truncate_summary(cls, value: str) -> str:
+        """制御文字を落とし、上限を超えた分を切る。
+
+        発表内容の列挙が多い記事では、LLM が上限を超える要約を返すことがある
+        （Issue #86）。`max_length` で弾くと同じ入力に対して再試行しても同じ長さが
+        返り、記事が未解析のまま残る。要約は表示用途のため、末尾が欠けても
+        解析結果ごと失うよりは被害が小さい。
+
+        切るのは制御文字を除いた後にする。先に切ると、除去したぶんだけ
+        上限を下回った要約になる。
+        """
+        return _clean(value)[:MAX_SUMMARY_LENGTH]
 
     @field_validator("topics", "technologies", mode="after")
     @classmethod
