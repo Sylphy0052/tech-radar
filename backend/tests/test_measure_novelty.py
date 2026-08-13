@@ -1,23 +1,27 @@
-"""novelty 分布の集計（`techradar.measure.novelty`）のテスト（Issue #87）。
+"""novelty 分布の集計（`techradar.measure.novelty`）のテスト（Issue #87、Issue #88）。
 
 文字列一致ベースの `compute_novelty` では、topics を共有しない候補が軒並み
 novelty = 1.0 に張り付き、分布を持たない疑いがある。この集計はその疑いを実データで
 確かめるための材料であり、ここでは `ScoredCandidate.breakdown.novelty` が既に
-持っている値から分布と閾値走査を正しく導けることだけを確かめる（novelty の計算
-方法そのものは対象外、`recommendation/` 配下が別途担当する）。
+持っている値から分布・閾値走査・縮退の兆候（相関・枠の偏り）を正しく導けることだけを
+確かめる（novelty の計算方法そのものは対象外、`recommendation/` 配下が別途担当する）。
 """
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 
 from techradar.measure.novelty import (
     NoveltyDistribution,
+    SlotDivergenceStats,
     ThresholdSlotCounts,
     summarize_novelty,
     summarize_novelty_distribution,
+    summarize_novelty_interest_correlation,
+    summarize_slot_divergence,
     summarize_threshold_table,
 )
 from techradar.recommendation.ranking import (
@@ -284,10 +288,156 @@ class TestSummarizeNovelty:
         assert stats.distribution.exploration_min_novelty == 0.6
         assert len(stats.threshold_table) == 11
 
+    def test_wires_the_correlation_and_slot_divergence_from_the_same_candidates(self) -> None:
+        """相関と枠の偏りも、単体関数を直接呼んだ結果と一致する（配線の確認）。"""
+        settings = _settings(exploration_min_novelty=0.6)
+        candidates = (
+            _scored(novelty=0.9, interest_similarity=0.1),
+            _scored(novelty=0.2, interest_similarity=0.4),
+        )
+
+        stats = summarize_novelty(candidates, settings)
+
+        assert stats.novelty_interest_correlation == summarize_novelty_interest_correlation(
+            candidates
+        )
+        assert stats.slot_divergence == summarize_slot_divergence(candidates, settings)
+
     def test_handles_no_scored_candidates_without_raising(self) -> None:
         stats = summarize_novelty((), _settings())
 
         assert stats.distribution.candidate_count == 0
         assert all(
             row.exploration_count == 0 and row.diversity_count == 0 for row in stats.threshold_table
+        )
+        assert stats.novelty_interest_correlation is None
+        assert stats.slot_divergence == SlotDivergenceStats(
+            excluded_count=0, diversity_count=0, diversity_ratio=None
+        )
+
+
+class TestSummarizeNoveltyInterestCorrelation:
+    def test_returns_none_when_all_novelty_values_are_the_same(self) -> None:
+        """novelty の分散がゼロだと順位が全て同順位になり、相関を定義できない。"""
+        candidates = (
+            _scored(novelty=0.5, interest_similarity=0.1),
+            _scored(novelty=0.5, interest_similarity=0.2),
+            _scored(novelty=0.5, interest_similarity=0.3),
+        )
+
+        correlation = summarize_novelty_interest_correlation(candidates)
+
+        assert correlation is None
+
+    def test_returns_minus_one_when_novelty_is_the_exact_complement(self) -> None:
+        """novelty が `1 - interest_similarity` と完全一致 = 縮退の極。相関は -1.0。"""
+        candidates = (
+            _scored(novelty=0.9, interest_similarity=0.1),
+            _scored(novelty=0.8, interest_similarity=0.2),
+            _scored(novelty=0.7, interest_similarity=0.3),
+        )
+
+        correlation = summarize_novelty_interest_correlation(candidates)
+
+        assert correlation == -1.0
+
+    def test_returns_zero_when_ranks_are_unrelated(self) -> None:
+        """順位が完全に無関係な入力（手計算で 0 になるよう組んだ順列）では 0 付近になる。"""
+        candidates = (
+            _scored(novelty=0.1, interest_similarity=0.2),
+            _scored(novelty=0.2, interest_similarity=0.4),
+            _scored(novelty=0.3, interest_similarity=0.1),
+            _scored(novelty=0.4, interest_similarity=0.3),
+        )
+
+        correlation = summarize_novelty_interest_correlation(candidates)
+
+        assert correlation == 0.0
+
+    def test_uses_average_rank_for_ties(self) -> None:
+        """同順位 (tie) を平均順位で扱う。手計算で検算できる 3 件で固定する。
+
+        novelty = (0.5, 0.5, 0.2) の順位は (2.5, 2.5, 1)（先頭 2 件が 2 位・3 位を
+        分け合う）。interest_similarity = (0.1, 0.2, 0.3) の順位は (1, 2, 3)。
+        共分散 -1.5、両者の分散はそれぞれ 1.5 と 2.0 になり、相関は
+        -1.5 / sqrt(1.5 * 2.0) = -sqrt(3) / 2 になる。
+        """
+        candidates = (
+            _scored(novelty=0.5, interest_similarity=0.1),
+            _scored(novelty=0.5, interest_similarity=0.2),
+            _scored(novelty=0.2, interest_similarity=0.3),
+        )
+
+        correlation = summarize_novelty_interest_correlation(candidates)
+
+        assert correlation is not None
+        assert math.isclose(correlation, -math.sqrt(3) / 2)
+
+    def test_handles_no_candidates_without_raising(self) -> None:
+        assert summarize_novelty_interest_correlation(()) is None
+
+    def test_handles_a_single_candidate_without_raising(self) -> None:
+        """1 件だけでは順位に差が出ようがなく、相関を定義できない。"""
+        candidates = (_scored(novelty=0.5, interest_similarity=0.3),)
+
+        assert summarize_novelty_interest_correlation(candidates) is None
+
+
+class TestSummarizeSlotDivergence:
+    def test_returns_zero_percent_when_all_excluded_candidates_land_in_exploration(self) -> None:
+        """全件が exploration へ流れる = 片方への張り付き（縮退の兆候）。"""
+        candidates = (
+            _scored(novelty=0.7, interest_similarity=0.1),
+            _scored(novelty=0.8, interest_similarity=0.2),
+        )
+
+        stats = summarize_slot_divergence(candidates, _settings())
+
+        assert stats == SlotDivergenceStats(
+            excluded_count=2, diversity_count=0, diversity_ratio=0.0
+        )
+
+    def test_returns_hundred_percent_when_all_excluded_candidates_land_in_diversity(self) -> None:
+        """全件が diversity へ流れる = 逆側への張り付き（Issue #87 で実際に起きた症状）。"""
+        candidates = (
+            _scored(novelty=0.3, interest_similarity=0.1),
+            _scored(novelty=0.4, interest_similarity=0.2),
+        )
+
+        stats = summarize_slot_divergence(candidates, _settings())
+
+        assert stats == SlotDivergenceStats(
+            excluded_count=2, diversity_count=2, diversity_ratio=1.0
+        )
+
+    def test_returns_none_ratio_when_no_candidate_is_excluded_from_the_top_two_slots(self) -> None:
+        """全候補が strong_interest に収まると比較対象が無い。0 と混同しない。"""
+        settings = _settings()
+        candidates = (
+            _scored(
+                novelty=1.0,
+                interest_similarity=settings.feed_composition.strong_interest_min_similarity,
+            ),
+        )
+
+        stats = summarize_slot_divergence(candidates, settings)
+
+        assert stats == SlotDivergenceStats(
+            excluded_count=0, diversity_count=0, diversity_ratio=None
+        )
+
+    def test_handles_no_candidates_without_raising(self) -> None:
+        stats = summarize_slot_divergence((), _settings())
+
+        assert stats == SlotDivergenceStats(
+            excluded_count=0, diversity_count=0, diversity_ratio=None
+        )
+
+    def test_handles_a_single_candidate_without_raising(self) -> None:
+        candidate = _scored(novelty=0.3, interest_similarity=0.1)
+
+        stats = summarize_slot_divergence((candidate,), _settings())
+
+        assert stats == SlotDivergenceStats(
+            excluded_count=1, diversity_count=1, diversity_ratio=1.0
         )

@@ -16,7 +16,7 @@ from techradar.measure import __main__ as cli
 from techradar.measure.body_length import BodyLengthStats
 from techradar.measure.clusters import ClusterStats, ClusterSummary
 from techradar.measure.feed_slots import FeedCompositionStats
-from techradar.measure.novelty import NoveltyDistribution, NoveltyStats
+from techradar.measure.novelty import NoveltyDistribution, NoveltyStats, SlotDivergenceStats
 from techradar.measure.report import Measurements
 
 _MEASUREMENTS = Measurements(
@@ -50,6 +50,10 @@ _MEASUREMENTS = Measurements(
             exploration_min_novelty=0.6,
         ),
         threshold_table=(),
+        novelty_interest_correlation=None,
+        slot_divergence=SlotDivergenceStats(
+            excluded_count=0, diversity_count=0, diversity_ratio=None
+        ),
     ),
 )
 
