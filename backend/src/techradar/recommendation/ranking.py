@@ -73,10 +73,10 @@ class WeightedEmbedding:
 class InterestProfile:
     """ユーザーの関心プロファイル（`PROJECT_SPEC.md` §8）。
 
-    関心記事の重み付き embedding 群（`embeddings`）と、既知トピックの集合
-    （`known_topics`）、Bad 済み記事の embedding 群（`bad_embeddings`）を持つ。
-    単一の平均 embedding ではなく複数の embedding を保持し、上位 k 件の
-    加重平均で類似度を求める（`compute_interest_similarity`）。
+    関心記事の重み付き embedding 群（`embeddings`）と、Bad 済み記事の
+    embedding 群（`bad_embeddings`）を持つ。単一の平均 embedding ではなく
+    複数の embedding を保持し、上位 k 件の加重平均で類似度を求める
+    （`compute_interest_similarity`）。
 
     `bad_embeddings` は Bad 近傍抑制（`compute_bad_similarity_penalty`）専用
     で、関心一致度の計算には使わない。Bad は「関心の逆」ではなく「意味的に
@@ -84,7 +84,6 @@ class InterestProfile:
     """
 
     embeddings: tuple[WeightedEmbedding, ...]
-    known_topics: frozenset[str]
     bad_embeddings: tuple[tuple[float, ...], ...]
 
 
@@ -174,8 +173,8 @@ class MatchSettings:
 class NoveltySettings:
     """新規性の計算設定。"""
 
-    # topics が空の記事に使う既定値。
-    default_when_no_topics: float
+    # 候補に embedding が無い、または関心プロファイルが空で比較できないときの既定値。
+    default_when_no_embedding: float
 
 
 @dataclass(frozen=True)
@@ -447,17 +446,30 @@ def compute_novelty(
 ) -> float:
     """新規性のスコアを返す。
 
-    `topics` のうちユーザーの既知トピック集合（`known_topics`）に無いものの
-    割合。`topics` が空なら比較できないため `default_when_no_topics` を返す。
-    """
-    if not candidate.topics:
-        return settings.default_when_no_topics
+    候補の embedding と関心プロファイルの embedding 群それぞれとのコサイン類似度の
+    うち最大値 s を求め、`1 - s`（[0.0, 1.0] へ丸め）を返す。「最も近い関心記事
+    1 件からどれだけ遠いか」という統計量であり、`compute_interest_similarity`
+    （上位 `top_k` の加重平均）をそのまま裏返した値にはしない。裏返しにすると
+    `composition.py` の `_slot_for` が 1 段目（strong_interest）と 3 段目
+    （exploration）で同じ値の表裏しか見られなくなり、新規テーマ探索枠が別の
+    情報を持てなくなるため（Issue #87）。
 
-    known_topics = frozenset(_normalize_text(topic) for topic in profile.known_topics)
-    unknown_count = sum(
-        1 for topic in candidate.topics if _normalize_text(topic) not in known_topics
+    旧実装は `topics` が既知トピック集合と 1 件も重ならないかどうかで判定して
+    おり、記事ごとに付与された `topics` の語彙が少しでも揃わないと候補間の
+    novelty が軒並み 1.0 で飽和し、diversity 枠が構造的に選ばれなくなっていた
+    （Issue #87 の核心）。embedding の連続値で測ることでこの飽和を避ける。
+
+    候補に embedding が無い、または関心プロファイルが空なら比較できないため
+    `default_when_no_embedding` を返す。コサイン類似度は負にもなりうるため、
+    `1 - s` が 1.0 を超える場合は `_clamp01` で丸める。
+    """
+    if candidate.embedding is None or not profile.embeddings:
+        return settings.default_when_no_embedding
+
+    max_similarity = max(
+        cosine_similarity(candidate.embedding, item.vector) for item in profile.embeddings
     )
-    return unknown_count / len(candidate.topics)
+    return _clamp01(1.0 - max_similarity)
 
 
 def compute_bad_similarity_penalty(

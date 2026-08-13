@@ -85,8 +85,9 @@ source_match:
   partial_match_score: 0.5
 
 novelty:
-  # topics が空で新規性を判定できない記事を、新規でも既知でもない中間値として扱う
-  default_when_no_topics: 0.5
+  # 候補に embedding が無い、または関心プロファイルが空で比較できない記事を、
+  # 新規でも既知でもない中間値として扱う
+  default_when_no_embedding: 0.5
 
 feed_composition:
   # Discover フィードの構成比の目安（PROJECT_SPEC.md §15）
@@ -98,8 +99,14 @@ feed_composition:
   # 「強い関心一致」枠は一致度の中央よりやや高い水準で切り、フィードの主力枠に
   # ふさわしい候補だけを入れる
   strong_interest_min_similarity: 0.5
-  # novelty は topics 未知率（0〜1）。半分より多くが未知テーマの記事を
-  # 「新規テーマ探索」枠の対象にする
+  # novelty は「関心プロファイル中、最も近い記事1件からの embedding 距離」
+  # （1 - 最大コサイン類似度、0〜1）。最も近い関心記事とも半分以上離れている
+  # 記事を「新規テーマ探索」枠の対象にする。
+  # 2026-08-14 に実データ（関心記事 69 件 / 候補 169 件）で確認し、据え置いた。
+  # novelty の分布は p25 0.430 / p50 0.523 / p75 0.610 / max 0.754。閾値を
+  # 0.1 刻みで動かすと exploration / diversity の件数は 0.5 で 34 / 5、
+  # 0.6 で 16 / 23、0.7 で 1 / 38 となる。定員は exploration 15 / diversity 5
+  # なので、両枠が自前の候補で埋まるのは 0.6 だけである（ADR 0007）
   exploration_min_novelty: 0.6
 
 limits:

@@ -49,7 +49,7 @@ AUTHORITY_GATE = AuthorityGate(min_interest_similarity=0.35, min_factor=0.2)
 FRESHNESS_SETTINGS = FreshnessSettings(max_age_days=7)
 INTEREST_SETTINGS = InterestSettings(top_k=3)
 MATCH_SETTINGS = MatchSettings(partial_match_score=0.5)
-NOVELTY_SETTINGS = NoveltySettings(default_when_no_topics=0.5)
+NOVELTY_SETTINGS = NoveltySettings(default_when_no_embedding=0.5)
 FEED_COMPOSITION = FeedComposition(
     strong_interest=0.55,
     primary_source=0.25,

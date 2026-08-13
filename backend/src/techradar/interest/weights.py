@@ -90,7 +90,7 @@ def compute_confidence(
 
     * `has_embedding`: 関心プロファイル（`recommendation/service.py` の
       `build_interest_profile`）と関心クラスタへ寄与できるか
-    * `has_topics`: トピック選好・既知トピック（`compute_novelty`）へ寄与できるか
+    * `has_topics`: トピック選好へ寄与できるか
     * `is_analyzed`: 解析（`analysis/service.py`）が完了しているか。未解析の
       記事は topics も embedding も後から付くため、現時点の情報は暫定である
 
