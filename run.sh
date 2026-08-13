@@ -49,6 +49,11 @@ source "$REPO_ROOT/scripts/ai-harness/lib/postgres.sh"
 # shellcheck source=scripts/ai-harness/lib/app_processes.sh
 source "$REPO_ROOT/scripts/ai-harness/lib/app_processes.sh"
 
+# ブラウザで開く URL のホストを決める（Issue #85）。BIND_HOST は listen する
+# インターフェースの指定であって、開く先のホストとは別物である。
+# shellcheck source=scripts/ai-harness/lib/browse_url.sh
+source "$REPO_ROOT/scripts/ai-harness/lib/browse_url.sh"
+
 # 起動したプロセスグループの ID を残す場所。git 管理外（.gitignore 済み）。
 # 次回の起動で「前回の残り」を特定するために使う。
 BACKEND_PID_FILE="$REPO_ROOT/.run/backend.pid"
@@ -126,7 +131,12 @@ trap cleanup EXIT INT TERM
 # 設定値でコマンドの構造が変わってしまう。
 export BIND_HOST BACKEND_PORT FRONTEND_PORT
 
-log "backend を起動します (http://${BIND_HOST}:${BACKEND_PORT})"
+# 案内は listen アドレスと開く URL を分けて出す。既定の BIND_HOST（127.0.0.1）を
+# 開く URL として案内していたため、そのとおりに開くと API 呼び出しが CORS で
+# 弾かれていた（Issue #85）。
+BROWSE_HOST="$(browse_host "$BIND_HOST")"
+
+log "backend を起動します (listen ${BIND_HOST}:${BACKEND_PORT})"
 # setsid で独立したプロセスグループにする。子孫までまとめて止められるようにするため。
 # Ctrl-C の SIGINT は届かなくなるが、停止は上の cleanup が担う。
 # 変数はここではなく起動先のシェルで展開する（上の export 参照）。
@@ -136,12 +146,12 @@ backend_pgid="$(process_group_of $!)"
 pids+=("$backend_pgid")
 write_pid_file "$BACKEND_PID_FILE" "$backend_pgid"
 
-log "frontend を起動します (http://${BIND_HOST}:${FRONTEND_PORT})"
+log "frontend を起動します (listen ${BIND_HOST}:${FRONTEND_PORT})"
 # shellcheck disable=SC2016
 setsid bash -c 'cd frontend && exec npm run dev -- --hostname "$BIND_HOST" --port "$FRONTEND_PORT"' &
 frontend_pgid="$(process_group_of $!)"
 pids+=("$frontend_pgid")
 write_pid_file "$FRONTEND_PID_FILE" "$frontend_pgid"
 
-log "起動完了。Ctrl-C で停止します"
+log "起動完了。ブラウザで http://${BROWSE_HOST}:${FRONTEND_PORT} を開いてください。Ctrl-C で停止します"
 wait

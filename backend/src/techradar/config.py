@@ -30,7 +30,13 @@ _DEFAULT_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 # frontend（Next.js dev server）の既定オリジン。`run.sh` の `FRONTEND_PORT` の
 # 既定値と一致させる。よく使われる 3000 番台は他プロセスと衝突しやすいため、
 # ephemeral port range（32768-60999）の外にある 5 桁を既定にする。
-_DEFAULT_FRONTEND_ORIGIN = "http://localhost:13700"
+#
+# ループバックの両表記を許す（Issue #85）。`localhost` と `127.0.0.1` は CORS 上は
+# 別オリジンとして扱われ、`CORSMiddleware` は完全一致で比較するため、片方だけを許す
+# と手で打った側で API 呼び出しがすべて弾かれる。しかもバックエンドは 200 を返し DB
+# にも書き込まれるため、UI だけが「通信に失敗しました」と出て原因が追いにくい。
+# どちらもループバックであり、許可を増やしても外部から到達できる範囲は変わらない。
+_DEFAULT_FRONTEND_ORIGINS = ("http://localhost:13700", "http://127.0.0.1:13700")
 
 
 def _reject_origin_that_cannot_match(origin: str) -> None:
@@ -164,7 +170,8 @@ class Settings(BaseSettings):
     # MVP は認証なしの単一ユーザー（`docs/decisions.md`）。全レコードの user_id
     # にこの値を使う。`api.deps.get_current_user_id` から参照する。
     default_user_id: uuid.UUID = Field(default=_DEFAULT_USER_ID)
-    # CORS を許可するオリジン。既定は `run.sh` が起動する frontend のみ。
+    # CORS を許可するオリジン。既定は `run.sh` が起動する frontend のループバック
+    # 両表記のみ（`_DEFAULT_FRONTEND_ORIGINS`）。
     # ポートは既定値を変えられるため（`.env` の `FRONTEND_PORT`）、許可オリジンも
     # 環境変数で追随できるようにする。`allow_credentials=True` と併用するため
     # ワイルドカードは受け付けない（`main.create_app`）。
@@ -173,7 +180,7 @@ class Settings(BaseSettings):
     # JSON として解釈され、カンマ区切りで書いた時点で `SettingsError` になる。この
     # デコードは失敗した瞬間に例外を投げるため、バリデータには到達しない（Issue #58）。
     cors_allow_origins: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: [_DEFAULT_FRONTEND_ORIGIN]
+        default_factory=lambda: list(_DEFAULT_FRONTEND_ORIGINS)
     )
     log_retention_days: int = Field(default=90, gt=0)
     # `recommendation_runs` の保持期間（Issue #28）。`GET /api/feed` は呼ばれる

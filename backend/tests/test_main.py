@@ -95,6 +95,32 @@ def test_rejects_cors_preflight_from_an_unconfigured_origin():
     assert "access-control-allow-origin" not in response.headers
 
 
+@pytest.mark.parametrize("origin", ["http://localhost:13700", "http://127.0.0.1:13700"])
+def test_allows_cors_preflight_from_both_loopback_spellings_by_default(origin: str):
+    """`run.sh` が案内する URL をそのまま開いても弾かれないこと（Issue #85）。
+
+    `localhost` と `127.0.0.1` は CORS 上は別オリジンとして扱われ、`CORSMiddleware` は
+    許可リストと `Origin` ヘッダを完全一致で比較する。片方だけを既定にしていたため、
+    もう片方で開くと API 呼び出しがすべて preflight の 400 で弾かれていた。
+    """
+    # Arrange — 既定のまま（`cors_allow_origins` を渡さない）
+    app = create_app(Settings(_env_file=None))
+    client = TestClient(app)
+
+    # Act
+    response = client.options(
+        "/api/health",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    # Assert
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == origin
+
+
 def test_does_not_start_the_job_worker_when_worker_enabled_is_false():
     # Arrange — 実ワーカーが DB をポーリングし始めるとテストが不安定になるため、
     # 無効化した場合に lifespan を通してもワーカーが起動しないことを確認する。
