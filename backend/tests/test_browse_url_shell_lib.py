@@ -71,6 +71,20 @@ class TestBrowseHost:
         assert result.returncode == 0, result.stderr
         assert result.stdout == bind_host
 
+    @pytest.mark.parametrize("bind_host", ["LOCALHOST", "LocalHost", "0.0.0.0 "])
+    def test_大文字のループバック表記もlocalhostへ倒す(self, bind_host: str) -> None:
+        """ホスト名の解決は大小を区別しないため `LOCALHOST` でも起動できてしまうが、
+        CORS の許可オリジンは小文字である。素通しすると案内どおりに開いた先で弾かれる。
+
+        末尾に空白が付いた値は倒さない。`run.sh` は空白のみの `BIND_HOST` を弾くだけで
+        トリムはせず、その値のまま listen を試みるため、案内だけ別のホストへ倒すと
+        かえって食い違う。
+        """
+        result = _run_lib('browse_host "$1"', bind_host)
+        assert result.returncode == 0, result.stderr
+        expected = "localhost" if bind_host.strip() == bind_host else bind_host
+        assert result.stdout == expected
+
     def test_引数が無くてもlocalhostを返す(self) -> None:
         """`set -u` の下で未定義参照にならないこと。案内のための関数が起動を
         止めるのは本末転倒である。"""

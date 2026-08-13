@@ -23,10 +23,16 @@
 # しないと意味がない（`.env.example` のとおり、その場合は `CORS_ALLOW_ORIGINS` と
 # `NEXT_PUBLIC_API_BASE_URL` を利用者が揃える）。
 #
+# 角括弧付きの IPv6 表記（`[::1]` など）は対象外で、そのまま返す。`.env.example` は
+# IPv4 のみを案内しており、URL へ埋めるときの角括弧の扱いまでは引き受けない。
+#
 # 案内のための関数が起動を止めるのは本末転倒なので、引数が無くても落とさない。
 browse_host() {
   local bind_host="${1:-}"
-  case "$bind_host" in
+  # 比較だけ小文字へ倒す。ホスト名の解決は大小を区別しないため `LOCALHOST` でも起動
+  # できてしまうが、CORS の許可オリジンは小文字である。素通しすると案内どおりに開いた
+  # 先で弾かれ、この Issue と同じ症状を踏む。返す値は元の表記のままにする。
+  case "${bind_host,,}" in
     "" | 0.0.0.0 | 127.0.0.1 | localhost | :: | ::1)
       printf 'localhost'
       ;;
