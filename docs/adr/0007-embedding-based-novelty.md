@@ -1,0 +1,105 @@
+# ADR 0007: 新規性を embedding 距離で測る
+
+- ステータス: 採用
+- 日付: 2026-08-14
+- 関連: `PROJECT_SPEC.md` §8, §14, §15 / Issue #75, #87 / [ADR 0003](0003-embedding-runtime.md)
+
+## コンテキスト
+
+`compute_novelty`（`backend/src/techradar/recommendation/ranking.py`）は当初、候補記事の `topics` のうちユーザーの既知トピック集合（`InterestProfile.known_topics`）に無いものの割合を返していた。既知かどうかは正規化した文字列の一致で判定していた。
+
+Issue #75 で既定値を実測しようとした際、この式が実データで機能していないことが分かった。フィードの多様性確保枠（diversity、定員 5）に入る候補が 0 件で、枠が常に他枠からのあふれだけで埋まっていた。
+
+原因は、LLM が付ける `topics` が記事ごとの固有名詞に近く、語がほとんど再利用されない点にある。2026-08-13 の実測（関心記事 69 件 / 候補 169 件）では次のとおりだった。
+
+- `known_topics` 337 語に対し、候補側の topics 語彙は 832 語（延べ 843）。重なりはわずか 13 語
+- その結果 novelty は 1.0 が 153 件、0.8 が 15 件、0.6 が 1 件。連続値にならず上端へ張り付く
+- 実際の topics の例: 「AGENTS.md への規則の外出し」「AI ファシリテーションのリファインメント」「8列グリッド設計」。いずれも一度しか現れない
+
+閾値では直せないことも確認した。上位 2 枠に取られない候補 39 件について `exploration_min_novelty` を上げても、39 件全てが novelty 1.0 のため、取りうる最大値 1.0 まで上げて分岐しなかった。
+
+## 決定
+
+`compute_novelty` を embedding のコサイン類似度ベースへ差し替える。
+
+```text
+novelty = clamp01(1 - max(cosine_similarity(candidate.embedding, e.vector) for e in profile.embeddings))
+```
+
+「最も近い関心記事 1 件からどれだけ遠いか」を測る。候補に embedding が無い、または関心プロファイルが空なら比較できないため `novelty.default_when_no_embedding`（0.5）を返す。
+
+topics による判定は残さず撤去する。フォールバックとして併存させると、候補ごとに値の意味が変わり採点経路が 2 本になるため。この結果、`InterestProfile.known_topics` は読み手が無くなるので併せて削除した。
+
+### 最大値を使う理由
+
+`compute_interest_similarity` は上位 `top_k` 件の加重平均を取る。novelty をその裏返し（`1 - interest_similarity`）にすると、`composition.py` の `_slot_for` は 1 段目（strong_interest）と 3 段目（exploration）で同じ値の表裏しか見られなくなる。最大値を使えば別の統計量になり、strong_interest を外れた候補が exploration と diversity へ分岐しうる。
+
+## 計測
+
+本番 DB（記事 261 件・関心記事 69 件・候補 169 件、2026-08-14 時点）を読み取り専用で参照して測った。再現手順は末尾に置く。
+
+### 1. novelty の分布
+
+| 指標 | 変更前（topics 未知率） | 変更後（embedding 距離） |
+| --- | --- | --- |
+| 最小 | 0.6 | 0.135 |
+| p25 | 1.0 | 0.430 |
+| 中央値 | 1.0 | 0.523 |
+| p75 | 1.0 | 0.610 |
+| p95 | 1.0 | 0.671 |
+| 最大 | 1.0 | 0.754 |
+| 1.0 に張り付いた件数 | 153 / 169 | 0 / 169 |
+
+変更前の列は Issue #87 に記録された 2026-08-13 の実測（1.0 が 153 件、0.8 が 15 件、0.6 が 1 件）から導いた。旧実装には novelty の分布を出す計測が無かったため、同じ計測モジュールで測り直したものではない。変更後の列は `techradar.measure` の出力そのものである。
+
+上端への張り付きが解消し、連続的な分布になった。上限が 0.754 に留まるのは、候補が「ユーザーが購読している情報源から集めた技術記事」であり、関心プロファイルと完全に無関係な記事が母集団に存在しないためで、想定どおりである。
+
+### 2. 枠ごとの充足率
+
+`page_size` は本番の `limits.feed_run_size`（100）。
+
+| 枠 | 定員 | 変更前 選択 / 補充 | 変更後 選択 / 補充 |
+| --- | --- | --- | --- |
+| strong_interest | 55 | 55 / 0 | 55 / 0 |
+| primary_source | 25 | 25 / 0 | 25 / 0 |
+| exploration | 15 | 15 / 0 | 15 / 0 |
+| diversity | 5 | 5 / **5** | 5 / **0** |
+
+変更前は diversity 枠の 5 件すべてが他枠からのあふれ（補充）だった。変更後は自前の候補で埋まる。ドメイン重複を避ける `_select_primary` の制約が、これで初めて効く。
+
+### 3. 閾値の選定
+
+`exploration_min_novelty` を 0.1 刻みで動かし、上位 2 枠に取られなかった候補 39 件がどう分岐するかを数えた。
+
+| 閾値 | exploration | diversity |
+| --- | --- | --- |
+| 0.0〜0.4 | 39 | 0 |
+| 0.5 | 34 | 5 |
+| **0.6（採用）** | **16** | **23** |
+| 0.7 | 1 | 38 |
+| 0.8〜1.0 | 0 | 39 |
+
+定員は exploration 15 / diversity 5。両枠が自前の候補で埋まるのは 0.6 だけである。0.5 では diversity がちょうど定員と同数で余裕が無く、0.7 では exploration が 1 件しか残らず補充頼みになる。現行値 0.6 を据え置く。
+
+## 却下した案
+
+- **topics を正規化して部分一致を許す。** 小文字化・記号除去に加えて複合語を分割する案。LLM の出力形式へ依存し続ける点が変わらず、固有名詞中心の topics では改善幅が読めない
+- **プロンプトを変えて topics を語彙の限られた分類語にする。** 既存記事 261 件の再解析が必要になる。得られるものに対して実行コストが見合わない
+- **`1 - interest_similarity`（top_k 加重平均の裏返し）を使う。** 上記「最大値を使う理由」のとおり、枠判定が同じ軸の表裏になる
+
+## 影響
+
+- 設定キー `novelty.default_when_no_topics` を `novelty.default_when_no_embedding` へ改名した（値 0.5 は据え置き）。`backend/config/scoring.yaml` を手で書き換えている環境では追随が要る
+- embedding が未生成の記事は novelty が 0.5 に固定される。変更前は topics さえあれば値が出ていた。実データの候補 169 件では該当が無く、影響は観測されなかった
+- `InterestProfile.known_topics` を削除した。関心プロファイルからトピック語彙を読む経路は無くなる
+- `interest_similarity` と同じ embedding 空間を見るため、両者の相関は残る。実測では最大値を使うことで枠が分岐したが、関心プロファイルの偏り方によっては再び縮退しうる。その場合は閾値ではなく式を再検討する
+
+## 再現手順
+
+```bash
+cd backend
+uv run python -m techradar.measure          # 人が読む表形式
+uv run python -m techradar.measure --json   # 機械可読な JSON
+```
+
+novelty の分布・閾値表は出力の `novelty` 以下、枠ごとの充足率は `feed` 以下にある。集計の実装は `backend/src/techradar/measure/novelty.py` と `backend/src/techradar/measure/feed_slots.py`。枠の判定は自前で持たず `recommendation.composition` の `_slot_for` をそのまま呼ぶため、測っている対象は本番の挙動と一致する。
