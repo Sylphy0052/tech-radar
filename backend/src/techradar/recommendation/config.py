@@ -160,7 +160,7 @@ class NoveltyConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    default_when_no_topics: float = Field(ge=0.0, le=1.0)
+    default_when_no_embedding: float = Field(ge=0.0, le=1.0)
 
 
 class FeedCompositionConfig(BaseModel):
@@ -505,7 +505,9 @@ class ScoringConfig(BaseModel):
             freshness=FreshnessSettings(max_age_days=self.freshness.max_age_days),
             interest=InterestSettings(top_k=self.interest.top_k),
             source_match=MatchSettings(partial_match_score=self.source_match.partial_match_score),
-            novelty=NoveltySettings(default_when_no_topics=self.novelty.default_when_no_topics),
+            novelty=NoveltySettings(
+                default_when_no_embedding=self.novelty.default_when_no_embedding
+            ),
             feed_composition=FeedComposition(
                 strong_interest=self.feed_composition.strong_interest,
                 primary_source=self.feed_composition.primary_source,

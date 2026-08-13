@@ -51,7 +51,7 @@ interest:
 source_match:
   partial_match_score: 0.5
 novelty:
-  default_when_no_topics: 0.5
+  default_when_no_embedding: 0.5
 feed_composition:
   strong_interest: 0.55
   primary_source: 0.25
@@ -394,7 +394,7 @@ class TestConversionToRankingDataclasses:
         assert settings.freshness.max_age_days == 7
         assert settings.interest.top_k == 3
         assert settings.source_match.partial_match_score == 0.5
-        assert settings.novelty.default_when_no_topics == 0.5
+        assert settings.novelty.default_when_no_embedding == 0.5
         assert settings.feed_composition.strong_interest == 0.55
         assert settings.limits.max_candidates_per_run == 500
         assert settings.bad_similarity.min_similarity == 0.7

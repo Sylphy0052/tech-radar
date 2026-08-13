@@ -54,7 +54,7 @@ AUTHORITY_GATE = AuthorityGate(min_interest_similarity=0.35, min_factor=0.2)
 FRESHNESS_SETTINGS = FreshnessSettings(max_age_days=7)
 INTEREST_SETTINGS = InterestSettings(top_k=3)
 MATCH_SETTINGS = MatchSettings(partial_match_score=0.5)
-NOVELTY_SETTINGS = NoveltySettings(default_when_no_topics=0.5)
+NOVELTY_SETTINGS = NoveltySettings(default_when_no_embedding=0.5)
 FEED_COMPOSITION = FeedComposition(
     strong_interest=0.55,
     primary_source=0.25,
@@ -89,7 +89,7 @@ def make_weighted_embeddings(
     return tuple(WeightedEmbedding(vector=vector, weight=weight) for vector in vectors)
 
 
-EMPTY_PROFILE = InterestProfile(embeddings=(), known_topics=frozenset(), bad_embeddings=())
+EMPTY_PROFILE = InterestProfile(embeddings=(), bad_embeddings=())
 
 
 def make_candidate(
@@ -153,7 +153,6 @@ class TestComputeInterestSimilarity:
         # Arrange
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
         candidate = make_candidate(embedding=None)
@@ -173,7 +172,6 @@ class TestComputeInterestSimilarity:
         settings = InterestSettings(top_k=2)
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0), (0.9, 0.1), (0.0, 1.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
         candidate = make_candidate(embedding=(1.0, 0.0))
@@ -190,7 +188,6 @@ class TestComputeInterestSimilarity:
         # Arrange
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0), (0.5, 0.5), (0.0, 1.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
         candidate = make_candidate(embedding=(0.8, 0.2))
@@ -211,7 +208,6 @@ class TestComputeInterestSimilarityWeighted:
         settings = InterestSettings(top_k=2)
         equal_profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0), (0.9, 0.1), (0.0, 1.0), weight=0.5),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
         candidate_embedding = (1.0, 0.0)
@@ -241,7 +237,6 @@ class TestComputeInterestSimilarityWeighted:
                 WeightedEmbedding(vector=(1.0, 0.0), weight=1.0),
                 WeightedEmbedding(vector=(0.0, 1.0), weight=1.0),
             ),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
         skewed_profile = InterestProfile(
@@ -249,7 +244,6 @@ class TestComputeInterestSimilarityWeighted:
                 WeightedEmbedding(vector=(1.0, 0.0), weight=9.0),
                 WeightedEmbedding(vector=(0.0, 1.0), weight=1.0),
             ),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
 
@@ -268,7 +262,6 @@ class TestComputeInterestSimilarityWeighted:
                 WeightedEmbedding(vector=(1.0, 0.0), weight=1.0),
                 WeightedEmbedding(vector=(0.9, 0.1), weight=-1.0),
             ),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
         candidate_embedding = (1.0, 0.0)
@@ -390,44 +383,92 @@ class TestComputeFreshness:
 
 
 class TestComputeNovelty:
-    def test_returns_the_default_when_topics_are_empty(self):
+    """embedding ベースの新規性を検証する（Issue #87）。
+
+    旧実装は `topics` が既知トピック集合と1件も重ならないかどうかで判定して
+    おり、記事ごとの topics 語彙が少しでも揃わないと候補間の
+    novelty が軒並み 1.0 で飽和し、diversity 枠が構造的に選ばれなくなっていた。
+    新実装は候補の embedding と関心プロファイルの embedding 群とのコサイン
+    類似度の最大値を基準にする。
+    """
+
+    def test_returns_the_default_when_the_candidate_has_no_embedding(self):
         # Arrange
-        candidate = make_candidate(topics=())
+        profile = InterestProfile(
+            embeddings=make_weighted_embeddings((1.0, 0.0)),
+            bad_embeddings=(),
+        )
+        candidate = make_candidate(embedding=None)
+
+        # Act / Assert
+        assert compute_novelty(candidate, profile, NOVELTY_SETTINGS) == (
+            NOVELTY_SETTINGS.default_when_no_embedding
+        )
+
+    def test_returns_the_default_when_the_interest_profile_has_no_embeddings(self):
+        # Arrange
+        candidate = make_candidate(embedding=(1.0, 0.0))
 
         # Act / Assert
         assert compute_novelty(candidate, EMPTY_PROFILE, NOVELTY_SETTINGS) == (
-            NOVELTY_SETTINGS.default_when_no_topics
+            NOVELTY_SETTINGS.default_when_no_embedding
         )
 
-    def test_returns_zero_when_all_topics_are_known(self):
-        # Arrange
+    def test_returns_one_minus_the_cosine_similarity_to_the_closest_interest_embedding(self):
+        # Arrange — 直交ベクトル（類似度 0.0）なので新規性は 1.0
         profile = InterestProfile(
-            embeddings=(), known_topics=frozenset({"python", "rust"}), bad_embeddings=()
+            embeddings=make_weighted_embeddings((1.0, 0.0)),
+            bad_embeddings=(),
         )
-        candidate = make_candidate(topics=("Python", "Rust"))
+        candidate = make_candidate(embedding=(0.0, 1.0))
 
-        # Act / Assert — 大文字小文字を無視して既知と判定する
-        assert compute_novelty(candidate, profile, NOVELTY_SETTINGS) == 0.0
+        # Act / Assert
+        assert compute_novelty(candidate, profile, NOVELTY_SETTINGS) == pytest.approx(1.0)
 
-    def test_returns_one_when_no_topics_are_known(self):
-        # Arrange
+    def test_lowers_novelty_when_the_embedding_is_close_even_if_topics_never_overlap(self):
+        # Arrange — Issue #87 の核心の固定: どちらの候補も topics が
+        # 旧実装の既知トピック集合と1件も重ならない（旧実装なら両方とも
+        # novelty=1.0 で飽和していた）。embedding が近い候補だけ novelty が
+        # 下がることを固定する
         profile = InterestProfile(
-            embeddings=(), known_topics=frozenset({"python"}), bad_embeddings=()
+            embeddings=make_weighted_embeddings((1.0, 0.0)),
+            bad_embeddings=(),
         )
-        candidate = make_candidate(topics=("量子コンピュータ", "Rust"))
+        close_candidate = make_candidate(embedding=(1.0, 0.0), topics=("量子コンピュータ",))
+        far_candidate = make_candidate(embedding=(0.0, 1.0), topics=("量子コンピュータ",))
+
+        # Act
+        close_novelty = compute_novelty(close_candidate, profile, NOVELTY_SETTINGS)
+        far_novelty = compute_novelty(far_candidate, profile, NOVELTY_SETTINGS)
+
+        # Assert
+        assert close_novelty == pytest.approx(0.0)
+        assert far_novelty == pytest.approx(1.0)
+        assert close_novelty < far_novelty
+
+    def test_uses_the_maximum_similarity_across_multiple_interest_embeddings(self):
+        # Arrange — 遠い関心記事が大量にあっても、最も近い1件が効く
+        # （top_k 加重平均ではなく最大値を使うことの固定）
+        profile = InterestProfile(
+            embeddings=make_weighted_embeddings((0.0, 1.0), (0.0, 1.0), (1.0, 0.0)),
+            bad_embeddings=(),
+        )
+        candidate = make_candidate(embedding=(1.0, 0.0))
+
+        # Act / Assert — 最も近い1件（類似度 1.0）を基準にするため新規性はほぼ 0
+        assert compute_novelty(candidate, profile, NOVELTY_SETTINGS) == pytest.approx(0.0)
+
+    def test_does_not_exceed_one_when_the_cosine_similarity_is_negative(self):
+        # Arrange — 完全に逆向き（類似度 -1.0）だと 1 - (-1.0) = 2.0 になり
+        # [0.0, 1.0] を超えるため、1.0 に丸められることを固定する
+        profile = InterestProfile(
+            embeddings=make_weighted_embeddings((1.0, 0.0)),
+            bad_embeddings=(),
+        )
+        candidate = make_candidate(embedding=(-1.0, 0.0))
 
         # Act / Assert
         assert compute_novelty(candidate, profile, NOVELTY_SETTINGS) == 1.0
-
-    def test_returns_the_fraction_of_unknown_topics(self):
-        # Arrange — 4 件中 1 件だけ未知
-        profile = InterestProfile(
-            embeddings=(), known_topics=frozenset({"python", "rust", "go"}), bad_embeddings=()
-        )
-        candidate = make_candidate(topics=("Python", "Rust", "Go", "量子コンピュータ"))
-
-        # Act / Assert
-        assert compute_novelty(candidate, profile, NOVELTY_SETTINGS) == pytest.approx(0.25)
 
 
 class TestComputeBadSimilarityPenalty:
@@ -435,7 +476,7 @@ class TestComputeBadSimilarityPenalty:
 
     def test_returns_zero_when_there_are_no_bad_embeddings(self):
         # Arrange
-        profile = InterestProfile(embeddings=(), known_topics=frozenset(), bad_embeddings=())
+        profile = InterestProfile(embeddings=(), bad_embeddings=())
         candidate = make_candidate(embedding=(1.0, 0.0))
 
         # Act / Assert
@@ -443,9 +484,7 @@ class TestComputeBadSimilarityPenalty:
 
     def test_returns_zero_when_the_candidate_has_no_embedding(self):
         # Arrange
-        profile = InterestProfile(
-            embeddings=(), known_topics=frozenset(), bad_embeddings=((1.0, 0.0),)
-        )
+        profile = InterestProfile(embeddings=(), bad_embeddings=((1.0, 0.0),))
         candidate = make_candidate(embedding=None)
 
         # Act / Assert
@@ -453,9 +492,7 @@ class TestComputeBadSimilarityPenalty:
 
     def test_penalizes_a_candidate_very_close_to_a_bad_article(self):
         # Arrange — Bad 記事とほぼ同一（類似度 1.0）の候補は最大減点になる
-        profile = InterestProfile(
-            embeddings=(), known_topics=frozenset(), bad_embeddings=((1.0, 0.0),)
-        )
+        profile = InterestProfile(embeddings=(), bad_embeddings=((1.0, 0.0),))
         candidate = make_candidate(embedding=(1.0, 0.0))
 
         # Act
@@ -466,9 +503,7 @@ class TestComputeBadSimilarityPenalty:
 
     def test_does_not_penalize_a_candidate_far_from_bad_articles(self):
         # Arrange — 類似度 0.0（直交）は閾値未満なので減点しない
-        profile = InterestProfile(
-            embeddings=(), known_topics=frozenset(), bad_embeddings=((0.0, 1.0),)
-        )
+        profile = InterestProfile(embeddings=(), bad_embeddings=((0.0, 1.0),))
         candidate = make_candidate(embedding=(1.0, 0.0))
 
         # Act / Assert
@@ -478,7 +513,6 @@ class TestComputeBadSimilarityPenalty:
         # Arrange — 複数の Bad embedding のうち最も近いものを基準にする
         profile = InterestProfile(
             embeddings=(),
-            known_topics=frozenset(),
             bad_embeddings=((0.0, 1.0), (1.0, 0.0)),
         )
         candidate = make_candidate(embedding=(1.0, 0.0))
@@ -493,9 +527,7 @@ class TestComputeBadSimilarityPenalty:
         # Arrange — 類似度がちょうど min_similarity（0.7）になるベクトルを作る
         settings = BadSimilaritySettings(min_similarity=0.5, max_penalty=0.5)
         # cos(theta) = 0.5 となる向き
-        profile = InterestProfile(
-            embeddings=(), known_topics=frozenset(), bad_embeddings=((0.5, 0.8660254038),)
-        )
+        profile = InterestProfile(embeddings=(), bad_embeddings=((0.5, 0.8660254038),))
         candidate = make_candidate(embedding=(1.0, 0.0))
 
         # Act
@@ -507,9 +539,7 @@ class TestComputeBadSimilarityPenalty:
     def test_is_the_max_penalty_at_a_similarity_of_one(self):
         # Arrange
         settings = BadSimilaritySettings(min_similarity=0.5, max_penalty=0.5)
-        profile = InterestProfile(
-            embeddings=(), known_topics=frozenset(), bad_embeddings=((1.0, 0.0),)
-        )
+        profile = InterestProfile(embeddings=(), bad_embeddings=((1.0, 0.0),))
         candidate = make_candidate(embedding=(1.0, 0.0))
 
         # Act
@@ -522,9 +552,7 @@ class TestComputeBadSimilarityPenalty:
         # Arrange — min_similarity と 1.0 のちょうど中間の類似度なら減点も中間になる
         settings = BadSimilaritySettings(min_similarity=0.6, max_penalty=1.0)
         # cos(theta) = 0.8 (min_similarity と 1.0 の中間) となる向き
-        profile = InterestProfile(
-            embeddings=(), known_topics=frozenset(), bad_embeddings=((0.8, 0.6),)
-        )
+        profile = InterestProfile(embeddings=(), bad_embeddings=((0.8, 0.6),))
         candidate = make_candidate(embedding=(1.0, 0.0))
 
         # Act
@@ -545,7 +573,6 @@ class TestScoreCandidate:
         )
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset({"go"}),
             bad_embeddings=(),
         )
 
@@ -570,7 +597,7 @@ class TestScoreCandidate:
         # Arrange
         good = make_candidate(is_bad=False)
         bad = make_candidate(is_bad=True)
-        profile = InterestProfile(embeddings=(), known_topics=frozenset(), bad_embeddings=())
+        profile = InterestProfile(embeddings=(), bad_embeddings=())
 
         # Act
         good_breakdown = score_candidate(good, profile, SETTINGS, NOW)
@@ -584,7 +611,7 @@ class TestScoreCandidate:
         # Arrange
         unread = make_candidate(is_read=False)
         read = make_candidate(is_read=True)
-        profile = InterestProfile(embeddings=(), known_topics=frozenset(), bad_embeddings=())
+        profile = InterestProfile(embeddings=(), bad_embeddings=())
 
         # Act
         unread_breakdown = score_candidate(unread, profile, SETTINGS, NOW)
@@ -598,7 +625,7 @@ class TestScoreCandidate:
         # Arrange — `articles.duplicate_penalty` をそのまま減点に使う
         original = make_candidate(duplicate_penalty=0.0)
         duplicate = make_candidate(duplicate_penalty=0.6)
-        profile = InterestProfile(embeddings=(), known_topics=frozenset(), bad_embeddings=())
+        profile = InterestProfile(embeddings=(), bad_embeddings=())
 
         # Act
         original_breakdown = score_candidate(original, profile, SETTINGS, NOW)
@@ -612,9 +639,7 @@ class TestScoreCandidate:
         # Arrange — 受入基準: Bad した記事と Embedding 近傍の候補のスコア（total）が下がる
         near_bad_candidate = make_candidate(embedding=(1.0, 0.0))
         far_from_bad_candidate = make_candidate(embedding=(0.0, 1.0))
-        profile = InterestProfile(
-            embeddings=(), known_topics=frozenset(), bad_embeddings=((1.0, 0.0),)
-        )
+        profile = InterestProfile(embeddings=(), bad_embeddings=((1.0, 0.0),))
 
         # Act
         near_breakdown = score_candidate(near_bad_candidate, profile, SETTINGS, NOW)
@@ -631,7 +656,7 @@ class TestScoreCandidate:
     def test_clamps_technical_quality_to_the_unit_range(self, raw: float, expected: float):
         # Arrange
         candidate = make_candidate(technical_quality=raw)
-        profile = InterestProfile(embeddings=(), known_topics=frozenset(), bad_embeddings=())
+        profile = InterestProfile(embeddings=(), bad_embeddings=())
 
         # Act
         breakdown = score_candidate(candidate, profile, SETTINGS, NOW)
@@ -650,7 +675,6 @@ class TestScoreCandidate:
         )
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
 
@@ -696,7 +720,6 @@ class TestAuthorityGate:
         candidate = make_candidate(embedding=(-1.0, 0.0), source_authority=0.8)
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
 
@@ -712,7 +735,6 @@ class TestAuthorityGate:
         candidate = make_candidate(embedding=(1.0, 0.0), source_authority=0.8)
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
 
@@ -730,7 +752,6 @@ class TestAuthorityGate:
         candidate = make_candidate(embedding=(0.0, 1.0), source_authority=0.8)
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
 
@@ -751,7 +772,6 @@ class TestAuthorityGate:
         )
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
 
@@ -770,7 +790,6 @@ class TestAuthorityGate:
         # 類似度がちょうど 0.4 になるよう、cos(theta)=0.4 の向きにする
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((0.4, 0.9165151390)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
 
@@ -822,7 +841,6 @@ class TestSourcePreferenceInScore:
     def _profile(self) -> InterestProfile:
         return InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
 
@@ -899,7 +917,7 @@ class TestRankCandidates:
             make_candidate(source_authority=0.4),
             make_candidate(source_authority=0.6),
         )
-        profile = InterestProfile(embeddings=(), known_topics=frozenset(), bad_embeddings=())
+        profile = InterestProfile(embeddings=(), bad_embeddings=())
 
         # Act
         first = rank_candidates(candidates, profile, SETTINGS, NOW)
@@ -914,7 +932,7 @@ class TestRankCandidates:
         second_id = uuid.UUID("00000000-0000-0000-0000-000000000002")
         second = make_candidate(id=second_id)
         first = make_candidate(id=first_id)
-        profile = InterestProfile(embeddings=(), known_topics=frozenset(), bad_embeddings=())
+        profile = InterestProfile(embeddings=(), bad_embeddings=())
 
         # Act
         ranked = rank_candidates((second, first), profile, SETTINGS, NOW)
@@ -927,7 +945,6 @@ class TestRankCandidates:
         # (is_primary_source=True かつ authority 高) が非公式記事より上位に来る
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
         primary = make_candidate(embedding=(1.0, 0.0), source_authority=0.9, is_primary_source=True)
@@ -948,7 +965,6 @@ class TestRankCandidates:
         # 関心一致度が高い非公式記事より上位に来ない
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
         low_interest_official = make_candidate(
@@ -974,7 +990,6 @@ class TestRankCandidates:
         # Arrange — 受入基準: 重み設定を変えると順位が変わる
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
         strong_interest_stale = make_candidate(
@@ -1018,7 +1033,6 @@ class TestBuildReasonSummary:
         candidate = make_candidate(embedding=(1.0, 0.0), source_authority=1.0)
         profile = InterestProfile(
             embeddings=make_weighted_embeddings((1.0, 0.0)),
-            known_topics=frozenset(),
             bad_embeddings=(),
         )
         breakdown = score_candidate(candidate, profile, SETTINGS, NOW)

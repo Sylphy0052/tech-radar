@@ -1,4 +1,4 @@
-"""計測結果のまとめと出力（`techradar.measure.report`）のテスト（Issue #74）。
+"""計測結果のまとめと出力（`techradar.measure.report`）のテスト（Issue #74、Issue #87）。
 
 計測結果は Issue へコメントで残す運用（Issue #73 の検証方法）のため、人が読む
 表形式と、後から機械で扱える JSON の両方を出す。データが 0 件でも「対象データが無い」
@@ -12,7 +12,25 @@ import json
 from techradar.measure.body_length import BodyLengthStats
 from techradar.measure.clusters import ClusterStats, ClusterSummary
 from techradar.measure.feed_slots import FeedCompositionStats, FeedSlotStats
+from techradar.measure.novelty import NoveltyDistribution, NoveltyStats, ThresholdSlotCounts
 from techradar.measure.report import Measurements, render_json, render_text
+
+_EMPTY_NOVELTY = NoveltyStats(
+    distribution=NoveltyDistribution(
+        candidate_count=0,
+        min_novelty=None,
+        p25=None,
+        p50=None,
+        p75=None,
+        p95=None,
+        max_novelty=None,
+        saturated_count=0,
+        saturated_ratio=0.0,
+        above_threshold_count=0,
+        exploration_min_novelty=0.6,
+    ),
+    threshold_table=(),
+)
 
 _EMPTY = Measurements(
     body_length=BodyLengthStats(
@@ -26,6 +44,7 @@ _EMPTY = Measurements(
     ),
     clusters=ClusterStats(source_count=0, cluster_count=0, clusters=()),
     feed=FeedCompositionStats(candidate_count=0, page_size=20, slots=()),
+    novelty=_EMPTY_NOVELTY,
 )
 
 _FILLED = Measurements(
@@ -55,6 +74,24 @@ _FILLED = Measurements(
             ),
         ),
     ),
+    novelty=NoveltyStats(
+        distribution=NoveltyDistribution(
+            candidate_count=4,
+            min_novelty=0.1,
+            p25=0.2,
+            p50=0.5,
+            p75=1.0,
+            p95=1.0,
+            max_novelty=1.0,
+            saturated_count=2,
+            saturated_ratio=0.5,
+            above_threshold_count=2,
+            exploration_min_novelty=0.6,
+        ),
+        threshold_table=(
+            ThresholdSlotCounts(threshold=0.6, exploration_count=2, diversity_count=2),
+        ),
+    ),
 )
 
 
@@ -65,12 +102,20 @@ class TestRenderText:
 
         assert "対象データがありません" in output
 
-    def test_includes_all_three_sections(self) -> None:
+    def test_includes_all_four_sections(self) -> None:
         output = render_text(_FILLED)
 
         assert "本文長" in output
         assert "関心クラスタ" in output
         assert "フィード枠" in output
+        assert "novelty分布" in output
+
+    def test_shows_novelty_saturation_and_threshold_table(self) -> None:
+        """1.0 への張り付き件数・割合と、閾値ごとの分岐表を出す（Issue #87 の核心）。"""
+        output = render_text(_FILLED)
+
+        assert "1.0への張り付き: 2 件（50.0%）" in output
+        assert "0.6: exploration 2 / diversity 2" in output
 
     def test_shows_truncation_ratio_as_percentage(self) -> None:
         output = render_text(_FILLED)
@@ -102,6 +147,7 @@ class TestRenderText:
                     ),
                 ),
             ),
+            novelty=_EMPTY_NOVELTY,
         )
 
         output = render_text(measurements)
@@ -125,6 +171,8 @@ class TestRenderJson:
         assert parsed["clusters"]["cluster_count"] == 2
         assert parsed["clusters"]["clusters"][0]["label"] == "Kubernetes"
         assert parsed["feed"]["slots"][0]["slot"] == "strong_interest"
+        assert parsed["novelty"]["distribution"]["saturated_count"] == 2
+        assert parsed["novelty"]["threshold_table"][0]["threshold"] == 0.6
 
     def test_keeps_none_for_missing_values(self) -> None:
         """0 件のときの長さは 0 ではなく null にする。0 文字の記事と区別する。"""
@@ -146,6 +194,7 @@ class TestRenderJson:
                 ),
             ),
             feed=_EMPTY.feed,
+            novelty=_EMPTY_NOVELTY,
         )
 
         assert "日本語ラベル" in render_json(measurements)

@@ -442,7 +442,6 @@ class TestBuildInterestProfile:
 
         # Assert — embedding が無い記事は無視され、他 2 件の embedding は集まる
         assert len(profile.embeddings) == 2
-        assert profile.known_topics == {"llm", "rag", "agent"}
         assert all(item.weight > 0.0 for item in profile.embeddings)
 
     def test_returns_an_empty_profile_without_raising_when_there_are_no_interest_articles(
@@ -455,9 +454,7 @@ class TestBuildInterestProfile:
         profile = build_interest_profile(db_session, user_id, NOW, settings)
 
         # Assert
-        assert profile == InterestProfile(
-            embeddings=(), known_topics=frozenset(), bad_embeddings=()
-        )
+        assert profile == InterestProfile(embeddings=(), bad_embeddings=())
 
     def test_truncates_to_the_configured_limit_and_logs_a_warning(
         self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch

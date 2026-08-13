@@ -129,9 +129,7 @@ def build_interest_profile(
     weighted_articles = load_weighted_interest_articles(session, user_id, now)
 
     weighted_embeddings: list[WeightedEmbedding] = []
-    known_topics: set[str] = set()
     for record in weighted_articles:
-        known_topics.update(record.topics)
         if record.embedding is None:
             continue
         weighted_embeddings.append(WeightedEmbedding(vector=record.embedding, weight=record.weight))
@@ -143,7 +141,6 @@ def build_interest_profile(
 
     return InterestProfile(
         embeddings=tuple(weighted_embeddings),
-        known_topics=frozenset(known_topics),
         bad_embeddings=bad_embeddings,
     )
 
@@ -329,10 +326,11 @@ def _build_article_based_profile(
     起点記事を経由した推薦であっても、ユーザーが明示的に Bad と判断した
     記事に近い候補を勧めるべきではないのは Discover と共通の要件のため。
 
-    記事起点推薦では `known_topics` が起点記事自身の topics になるため、
-    `compute_novelty`（新規性）は「起点記事とどれだけトピックを共有していないか」
-    の裏返しとして働く。つまりここでの novelty は一般的な「ユーザーにとって
-    未知のテーマか」ではなく「起点記事と主題がどれだけ離れているか」を表す。
+    記事起点推薦では `embeddings` が起点記事自身の embedding 1 件だけになるため、
+    `compute_novelty`（新規性、Issue #87 以降は embedding ベース）は「候補が
+    起点記事の embedding からどれだけ離れているか」として働く。つまりここでの
+    novelty は一般的な「ユーザーにとって未知のテーマか」ではなく「起点記事と
+    意味的にどれだけ離れているか」を表す。
     """
     source_article = session.get(Article, source_article_id)
     if source_article is None:
@@ -350,7 +348,6 @@ def _build_article_based_profile(
     )
     return InterestProfile(
         embeddings=embeddings,
-        known_topics=frozenset(source_article.topics),
         bad_embeddings=bad_embeddings,
     )
 

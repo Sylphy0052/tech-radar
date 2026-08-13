@@ -49,7 +49,7 @@ AUTHORITY_GATE = AuthorityGate(min_interest_similarity=0.35, min_factor=0.2)
 FRESHNESS_SETTINGS = FreshnessSettings(max_age_days=7)
 INTEREST_SETTINGS = InterestSettings(top_k=3)
 MATCH_SETTINGS = MatchSettings(partial_match_score=0.5)
-NOVELTY_SETTINGS = NoveltySettings(default_when_no_topics=0.5)
+NOVELTY_SETTINGS = NoveltySettings(default_when_no_embedding=0.5)
 FEED_COMPOSITION = FeedComposition(
     strong_interest=0.55,
     primary_source=0.25,
@@ -220,6 +220,24 @@ class TestFeedSlotAssignment:
     def test_assigns_to_diversity_when_nothing_else_matches(self):
         # Arrange
         candidate = make_scored(interest_similarity=0.1, novelty=0.1, total=1.0)
+
+        # Act
+        result = compose_feed_with_stats((candidate,), SETTINGS, PAGE_SIZE)
+
+        # Assert
+        diversity_stats = next(s for s in result.stats.slots if s.slot == FeedSlot.DIVERSITY)
+        assert diversity_stats.selected == 1
+
+    def test_assigns_to_diversity_when_the_candidate_has_no_embedding(self):
+        # Arrange — embedding が無い候補は `compute_novelty` が
+        # `default_when_no_embedding` を返す。この既定値が
+        # `exploration_min_novelty` を下回る限り、embedding 未生成の記事は
+        # 新規テーマ探索枠ではなく多様性確保枠へ落ちる（Issue #87）
+        candidate = make_scored(
+            interest_similarity=0.1,
+            novelty=NOVELTY_SETTINGS.default_when_no_embedding,
+            total=1.0,
+        )
 
         # Act
         result = compose_feed_with_stats((candidate,), SETTINGS, PAGE_SIZE)
