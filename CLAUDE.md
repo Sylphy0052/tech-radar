@@ -20,8 +20,9 @@
 
 - `./run.sh` — backend + frontend を起動する (PostgreSQL は自動起動、ジョブワーカーは backend プロセスに同居)
 - `./run.sh --stop` — PostgreSQL コンテナも含めて停止する
-- `scripts/ai-harness/check.sh` — lint / format / 型チェック / テストを一括実行する。PostgreSQL が未起動なら自動で立ち上げる。**手動で実行する** (2026-08-12 に commit 前の自動実行を廃止した。下記「品質チェックは手動運用」を参照)
+- `scripts/ai-harness/check.sh` — lint / format / 型チェック / テスト / 依存脆弱性監査 / secret検知を一括実行する。PostgreSQL が未起動なら自動で立ち上げる。**手動で実行する** (2026-08-12 に commit 前の自動実行を廃止した。下記「品質チェックは手動運用」を参照)
   - 互いに独立したチェックは並列で走る (Issue #61)。出力は混ざらないよう、全ジョブの完了後にまとめて表示する
+  - 依存監査と secret検知は下記「secret検知と依存脆弱性監査」を参照。audit の2つはネットワークを使う
   - pytest と vitest のワーカー数は `PYTEST_WORKERS` / `VITEST_WORKERS` で変えられる。既定はコア数の半分と 8 の小さい方 (22コア機なら 8、8コア機なら 4)。22コア機での実測では 8 + 8 が最速だった。`PYTEST_WORKERS=1` で pytest の並列化を切れる
 
 ## 品質チェックは手動運用 (Issue #76)
@@ -34,6 +35,61 @@
 - MR を作る前に一度は全緑を確認する (推奨。機械強制はしない)
 - 完了報告の Evidence には、手動実行した `check.sh` の PASS ログを使う
 - commit のたびに回すかは変更内容で判断してよい (ドキュメントのみの変更など、明らかに影響しない場合は省略可)
+
+## secret検知と依存脆弱性監査 (Issue #83)
+
+`check.sh` は lint / 型 / テストに加えて、次の3つを毎回走らせる。CI を止めた以上 (Issue #82)、これらが走る機会は `check.sh` を手で回したときしか無い。
+
+| ジョブ | 実体 | 単体の所要 |
+| --- | --- | --- |
+| `secret検知` | `detect-secrets-hook --baseline .secrets.baseline` | 約27秒 |
+| `backend: uv audit` | `uv audit` (OSV を参照) | 約2秒 |
+| `frontend: npm audit` | `npm audit --audit-level=high` | 約1秒 |
+
+いずれも並列ジョブなので、壁時計の支配項である pytest より短い限り `check.sh` 全体の所要時間は変わらない。3つを追加した状態での実測は 1分32秒 から 2分2秒 (依存を取得済みの状態) で、機械の混み具合で振れる。
+
+**audit の2つはネットワークを使う。** `uv audit` は OSV へ、`npm audit` は npm registry へ問い合わせる。オフラインでは失敗するため、機内などで作業するときは `check.sh` が通らないことがある。ネットワーク起因の失敗と、実際に脆弱性が見つかった失敗は、出力を読んで区別する。
+
+**secret検知はネットワークを使わない。** detect-secrets は既定で、検出した候補を発行元のAPIへ投げて生きている資格情報かどうかを確かめる (Slack / Stripe / Mailchimp / Telegram などのプラグインが `requests` で実際にリクエストを送る)。本物の secret を踏んだ瞬間にその値が外部サービスへ渡ることになるため、`-n` を付けてこの挙動を切ってある。**このオプションを外さないこと。** 副作用として、外部で無効と確認できたはずの候補も検出として残るが、その分は baseline で扱う。
+
+`check.sh` の呼び出しには他に `--no-run-if-empty` と `--` が付いている。前者は対象が0件のときに何も走査せず緑になるのを防ぎ、後者は `-h` のような名前のファイルが追跡下に入ったときにオプションとして解釈されて走査そのものが飛ぶのを防ぐ。いずれも外さない。
+
+**`uv audit` は uv 0.12 時点で experimental である。** `--preview-features audit-command` を付けて警告を抑えている。uv の更新でオプションや出力が変わる可能性がある。
+
+### secret が検出されたとき
+
+`detect-secrets` の走査対象は git の追跡下にあるファイルだけで、`.secrets.baseline` に載っている検出は既知として無視される。baseline に無い検出が出ると `check.sh` が落ちる。
+
+**まず、それが本物かどうかを見る。** 落ちた検出には「誤検知」と「本物の secret を commit してしまった」の両方があり得る。このリポジトリは commit 前のフックも CI も無く、`check.sh` は手動実行なので、気付いた時点で既に push 済みのことがある。
+
+本物だったときは baseline に入れない。次の順で対応する。
+
+1. 該当する資格情報を直ちに失効・再発行する (漏れた値は git から消しても無効化されない)
+2. 影響範囲を確認する (どこへ push したか、誰が読めたか)
+3. 必要なら履歴から除去する。ただし1を済ませてからでよい
+
+誤検知だと確認できたら、baseline を作り直して差分を commit する。
+
+```bash
+cd <リポジトリルート>
+uv run --project backend --no-sync detect-secrets scan -n --baseline .secrets.baseline
+git add .secrets.baseline
+```
+
+`git add` まで済ませること。`detect-secrets-hook` は baseline が unstaged だと `Your baseline file (.secrets.baseline) is unstaged.` と言って落ちる (baseline だけこっそり書き換えて検知を黙らせる操作を防ぐため)。更新した直後に `check.sh` を回すと、この理由で赤くなる。
+
+`--baseline` へ渡すと、そのファイルを直接書き換える形で更新される。**`scan > .secrets.baseline` のようにリダイレクトで作り直さないこと。** その形だと `.secrets.baseline` 自身が走査対象に入り、中の `hashed_secret` (40桁の hex) が高エントロピー文字列として検出されて、再生成のたびに自己参照のノイズが増える (実測で28件)。`--baseline` 経由なら detect-secrets が baseline 自身を除外する。`-n` を付ける理由は上記のとおり。
+
+作り直す前に、**検出された箇所を1件ずつ目で見て、本物の secret が混ざっていないことを確かめる**。baseline はハッシュしか持たないため、一度取り込むと中身の再確認ができない。
+
+現在 baseline に入っている17件は、いずれも実害が無いことを確認済みである。内訳は alembic のリビジョンID 9件 (高エントロピー文字列として誤検知)、テストのダミー資格情報 4件、テスト関数名の誤検知 2件 (長い識別子が GitHub Token パターンに当たる)、CI の使い捨て資格情報 1件、環境変数テンプレートの接続文字列 1件。
+
+### この監査が見ないもの
+
+- **git の履歴**。`check.sh` が見るのは現在のツリーだけで、過去のコミットで足して後から消した secret は検知できない。導入時 (2026-08-12) に一度だけ全履歴を点検してある。全 blob 1192件を展開して走査し、検出78件はすべて現在のツリーにあるものと同じ顔ぶれ (alembic のリビジョンID、テストのダミー、CI の `POSTGRES_PASSWORD: techradar`、`.env.example` のプレースホルダ) で、過去にだけ存在した secret は無かった。**この点検はこの一回きりである。**以降に混入したものは現ツリーに残っている限り検知できるが、足して消せば通り抜ける
+- **コンテナのベースイメージ**。`uv audit` と `npm audit` が見るのは Python と npm の依存だけで、`infra/docker-compose.yml` が使う `pgvector/pgvector:pg17` は対象外
+- **コードの脆弱性そのもの** (SAST)。導入していない
+- **`# pragma: allowlist secret` を書いた行**。detect-secrets は行単位の除外指示を解釈するため、この注釈を付けた行は baseline を経ずに検知をすり抜ける。誤検知を1行だけ黙らせたいときの逃げ道だが、本物へ付けても止まらない
 
 ## CI は使わない (Issue #82)
 

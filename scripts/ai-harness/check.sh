@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# backend / frontend の lint・format・型チェック・テストを一括実行する。
-# commit 前に pre-bash-guard.sh から強制実行される。
+# backend / frontend の lint・format・型チェック・テスト・依存監査・secret検知を
+# 一括実行する。
+#
+# 手動で実行する。commit 前の自動実行は 2026-08-12 に廃止し（Issue #76）、CI も
+# 止めた（Issue #82）ため、これを回さない限り壊れたことに気付く機会が無い。
 #
 # 互いに独立したチェックは並列で走らせる（Issue #61）。直列だと backend の
 # pytest が終わるまで frontend が始まらず、待ち時間がそのまま足し算になる。
@@ -40,6 +43,11 @@ _default_workers() {
 }
 PYTEST_WORKERS="${PYTEST_WORKERS:-$(_default_workers)}"
 VITEST_WORKERS="${VITEST_WORKERS:-$(_default_workers)}"
+
+# 依存脆弱性監査の上限時間。実測は uv audit が約2秒、npm audit が約1秒なので、
+# ここへ到達するのは相手側 (OSV / npm registry) が応答を返さないときだけである。
+# 上限が無いと wait_jobs が待ち続け、check.sh 全体が終わらなくなる（Issue #83）。
+AUDIT_TIMEOUT_SECONDS="${AUDIT_TIMEOUT_SECONDS:-120}"
 
 # 並列実行するジョブを、ラベル・PID・出力先の3つの並びで管理する。
 JOB_LABELS=()
@@ -128,6 +136,24 @@ backend_pytest() {
   fi
 }
 
+backend_audit() {
+  cd "$REPO_ROOT/backend"
+  log "backend: uv audit"
+  # `uv audit` は uv 0.12 時点で experimental のため、明示しないと毎回警告が出る。
+  # 参照先は OSV なのでネットワークが要る（Issue #83）。応答が返らないまま
+  # 待ち続けると wait_jobs ごと止まるため、timeout で頭を押さえる。
+  #
+  # 打ち切り（timeout の 124）と脆弱性の検出を別のメッセージにする。timeout は既定で
+  # 何も言わずに殺すため、まとめて扱うと出力からどちらか分からない。
+  local rc=0
+  timeout "$AUDIT_TIMEOUT_SECONDS" uv audit --preview-features audit-command || rc=$?
+  if ((rc == 124)); then
+    fail "backend: uv auditが${AUDIT_TIMEOUT_SECONDS}秒で応答せず打ち切りました（OSVへ到達できません）"
+  elif ((rc != 0)); then
+    fail "backend: uv audit失敗（依存に既知脆弱性があるか、OSVへ到達できません）"
+  fi
+}
+
 backend_openapi_freshness() {
   cd "$REPO_ROOT/backend"
   log "backend: openapi.jsonの鮮度チェック"
@@ -164,6 +190,20 @@ frontend_vitest() {
   npm test -- --maxWorkers="$VITEST_WORKERS" || fail "frontend: test失敗"
 }
 
+frontend_audit() {
+  cd "$REPO_ROOT/frontend"
+  log "frontend: npm audit"
+  # high 未満は日常的に出入りするため止めない。閾値を下げるなら、まず既存の
+  # moderate/low を解消してからにする（Issue #83）。
+  local rc=0
+  timeout "$AUDIT_TIMEOUT_SECONDS" npm audit --audit-level=high || rc=$?
+  if ((rc == 124)); then
+    fail "frontend: npm auditが${AUDIT_TIMEOUT_SECONDS}秒で応答せず打ち切りました（registryへ到達できません）"
+  elif ((rc != 0)); then
+    fail "frontend: npm audit失敗（依存にhigh以上の既知脆弱性があるか、registryへ到達できません）"
+  fi
+}
+
 frontend_api_schema_freshness() {
   cd "$REPO_ROOT/frontend"
   log "frontend: api-schema.d.tsの鮮度チェック"
@@ -176,7 +216,39 @@ frontend_api_schema_freshness() {
     || fail "frontend: api-schema.d.tsが最新ではありません（npm run gen:api-typesで再生成してcommitしてください）"
 }
 
+# ---- リポジトリ全体のジョブ ----
+secret_scan() {
+  cd "$REPO_ROOT"
+  log "secret検知: detect-secrets"
+  # 走査対象は git の追跡下にあるファイルだけにする。detect-secrets 自体の既定も
+  # 同じだが、対象を git 側で決めておけば .venv や node_modules を掴む心配がない。
+  # baseline に載っている検出は既知として無視され、それ以外が出たときだけ落ちる。
+  # baseline の更新手順は CLAUDE.md の「secret検知と依存脆弱性監査」節にある。
+  #
+  # オプションはどれも外さないこと。
+  #   -n  検出した候補を発行元のAPIへ投げて生死を確かめる挙動 (既定で有効) を切る。
+  #       付けないと、本物のsecretを踏んだ瞬間にその値が外部サービスへ送られる。
+  #   --no-run-if-empty  対象が0件のときに引数無しで起動して緑になるのを防ぐ。
+  #   --  以降を全てファイル名として扱わせる。`-h` のような名前のファイルが
+  #       追跡下に入るとオプションとして解釈され、走査せず成功してしまう。
+  git ls-files -z \
+    | xargs -0 --no-run-if-empty \
+        uv run --project backend --no-sync detect-secrets-hook --baseline .secrets.baseline -n -- \
+    || fail "secret検知: baselineに無いsecretを検出しました（誤検知ならCLAUDE.mdの手順でbaselineを更新してください）"
+}
+
 # ---- 依存の用意（並列ジョブの前提になるため直列で済ませる） ----
+# secret検知はリポジトリ全体が対象なので backend / frontend のどちらのブロックにも
+# 属さないが、実体（detect-secrets）は backend の dev 依存なので backend が無ければ
+# 走らせようがない。そのときに黙って省略すると「全チェック緑」が「secretを検査した」
+# を意味しなくなるため、省略ではなく落とす。
+#
+# この判定をここへ置くのは、ジョブを1つも起動していない時点だからである。並列ジョブの
+# 起動後に fail すると EXIT trap の cleanup_jobs が走り、起動済みのジョブを出力ごと
+# 消してしまう（wait_jobs は全ジョブの出力を出し切ってから落ちる設計）。
+[[ -f backend/pyproject.toml ]] \
+  || fail "secret検知: backend/pyproject.tomlが無く、detect-secretsを実行できません"
+
 if [[ -f backend/pyproject.toml ]]; then
   command -v uv >/dev/null 2>&1 || fail "uv未インストール — https://astral.sh/uv"
   ensure_postgres
@@ -198,6 +270,7 @@ fi
 if [[ -f backend/pyproject.toml ]]; then
   start_job "backend: ruff / ty" backend_lint
   start_job "backend: pytest" backend_pytest
+  start_job "backend: uv audit" backend_audit
   start_job "backend: openapi.jsonの鮮度" backend_openapi_freshness
 fi
 
@@ -205,8 +278,13 @@ if [[ -f frontend/package.json ]]; then
   start_job "frontend: eslint" frontend_eslint
   start_job "frontend: tsc" frontend_typecheck
   start_job "frontend: vitest" frontend_vitest
+  start_job "frontend: npm audit" frontend_audit
   start_job "frontend: api-schema.d.tsの鮮度" frontend_api_schema_freshness
 fi
+
+# secret検知はリポジトリ全体が対象なので、backend / frontend のどちらのブロックにも
+# 入れない。backend が無い場合は上の依存の用意の時点で落としてある。
+start_job "secret検知" secret_scan
 
 log "${#JOB_PIDS[@]}件のチェックを並列実行します（出力は完了後にまとめて表示します）"
 wait_jobs
