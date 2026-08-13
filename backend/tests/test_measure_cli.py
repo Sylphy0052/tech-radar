@@ -16,6 +16,7 @@ from techradar.measure import __main__ as cli
 from techradar.measure.body_length import BodyLengthStats
 from techradar.measure.clusters import ClusterStats, ClusterSummary
 from techradar.measure.feed_slots import FeedCompositionStats
+from techradar.measure.novelty import NoveltyDistribution, NoveltyStats
 from techradar.measure.report import Measurements
 
 _MEASUREMENTS = Measurements(
@@ -34,6 +35,22 @@ _MEASUREMENTS = Measurements(
         clusters=(ClusterSummary(label="Go", weight=1.0, topics=("go",), article_count=1),),
     ),
     feed=FeedCompositionStats(candidate_count=0, page_size=20, slots=()),
+    novelty=NoveltyStats(
+        distribution=NoveltyDistribution(
+            candidate_count=0,
+            min_novelty=None,
+            p25=None,
+            p50=None,
+            p75=None,
+            p95=None,
+            max_novelty=None,
+            saturated_count=0,
+            saturated_ratio=0.0,
+            above_threshold_count=0,
+            exploration_min_novelty=0.6,
+        ),
+        threshold_table=(),
+    ),
 )
 
 

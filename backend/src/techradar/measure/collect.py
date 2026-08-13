@@ -1,7 +1,8 @@
-"""3 項目の計測を DB から集める（Issue #74）。
+"""4 項目の計測を DB から集める（Issue #74、Issue #87）。
 
-各集計そのものは `body_length` / `clusters` / `feed_slots` が持つ。ここは DB から必要な
-入力を読み、既存の実装（クラスタ構築・採点・構成比適用）を呼び出して結果へ橋渡しする。
+各集計そのものは `body_length` / `clusters` / `feed_slots` / `novelty` が持つ。ここは DB
+から必要な入力を読み、既存の実装（クラスタ構築・採点・構成比適用）を呼び出して結果へ
+橋渡しする。
 
 推薦の保存は行わない。`recommendation.service.generate_recommendations` は
 `recommendation_runs` / `recommendations` へ書き込むため、計測からは呼ばずに同じ順序で
@@ -22,6 +23,7 @@ from techradar.interest.service import load_cluster_sources
 from techradar.measure.body_length import load_body_lengths, summarize_body_lengths
 from techradar.measure.clusters import summarize_clusters
 from techradar.measure.feed_slots import summarize_feed_slots
+from techradar.measure.novelty import summarize_novelty
 from techradar.measure.report import Measurements
 from techradar.recommendation.composition import compose_feed_with_stats
 from techradar.recommendation.config import get_scoring_config
@@ -36,7 +38,7 @@ def collect_measurements(
     now: datetime,
     user_id: uuid.UUID | None = None,
 ) -> Measurements:
-    """3 項目の計測結果を集める。データが無くても例外にしない。
+    """4 項目の計測結果を集める。データが無くても例外にしない。
 
     `session` は読み取り専用で渡すこと（`measure.session.read_only_session`）。この関数は
     書き込みを行わないが、呼び出し先が増えたときの担保は DB 側のトランザクション属性に
@@ -71,4 +73,6 @@ def collect_measurements(
     composed = compose_feed_with_stats(scored, scoring_settings, page_size)
     feed = summarize_feed_slots(composed.stats, candidate_count=len(scored), page_size=page_size)
 
-    return Measurements(body_length=body_length, clusters=clusters, feed=feed)
+    novelty = summarize_novelty(scored, scoring_settings)
+
+    return Measurements(body_length=body_length, clusters=clusters, feed=feed, novelty=novelty)
