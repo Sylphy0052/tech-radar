@@ -30,12 +30,19 @@ def test_enables_brave_search_when_api_key_is_present():
     assert settings.is_brave_search_enabled is True
 
 
-def test_allows_the_local_frontend_origin_by_default():
+def test_allows_both_loopback_spellings_of_the_local_frontend_origin_by_default():
     # Arrange / Act
     settings = Settings(_env_file=None)
 
-    # Assert — run.sh が既定で起動する frontend のオリジンと一致していること
-    assert settings.cors_allow_origins == ["http://localhost:13700"]
+    # Assert — run.sh が既定で起動する frontend のオリジンと一致していること。
+    # `localhost` と `127.0.0.1` は CORS 上は別オリジンとして扱われ、`CORSMiddleware`
+    # は完全一致で比較する。片方だけを許すと、手で打った側で API 呼び出しがすべて
+    # 弾かれる（Issue #85）。どちらもループバックであり、許可を増やしても外部から
+    # 到達できる範囲は変わらない。
+    assert settings.cors_allow_origins == [
+        "http://localhost:13700",
+        "http://127.0.0.1:13700",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -57,7 +64,7 @@ def test_splits_comma_separated_cors_allow_origins(configured: str, expected: li
     # Arrange / Act
     settings = Settings(_env_file=None, cors_allow_origins=configured)
 
-    # Assert
+    # Assert — 明示した値だけになること。既定（ループバック両表記）は混ざらない
     assert settings.cors_allow_origins == expected
 
 
