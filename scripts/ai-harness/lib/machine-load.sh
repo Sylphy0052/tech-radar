@@ -102,6 +102,18 @@ memory_available_mb() {
 machine_is_congested() {
   local one five
   local cores="$MACHINE_LOAD_CORES"
+  local limit="$MACHINE_LOAD_PER_CORE_LIMIT_PERCENT"
+
+  # 算術式は数値でない文字列を変数名として再展開するため、`set -u` の下では
+  # `unbound variable` でシェルごと落ちる。上書き用の2変数は人が手で渡すので、
+  # 算術式へ入れる前に数値であることを確かめる。`10#` は `08` の8進数解釈を防ぐ
+  # （_load_to_percent と同じ理由。こちらは黙って「混雑していない」へ倒れるため
+  # 落ちるより厄介である）。
+  if [[ ! "$cores" =~ ^[0-9]+$ ]] || [[ ! "$limit" =~ ^[0-9]+$ ]]; then
+    return 2
+  fi
+  cores="10#$cores"
+  limit="10#$limit"
 
   one="$(load_average_percent 1)" || one=""
   five="$(load_average_percent 5)" || five=""
@@ -111,10 +123,10 @@ machine_is_congested() {
   fi
 
   # `&&` と `||` で書くと、条件が偽のときに文全体が失敗して `set -e` に殺される。
-  if ((one / cores >= MACHINE_LOAD_PER_CORE_LIMIT_PERCENT)); then
+  if ((one / cores >= limit)); then
     return 0
   fi
-  if ((five / cores >= MACHINE_LOAD_PER_CORE_LIMIT_PERCENT)); then
+  if ((five / cores >= limit)); then
     return 0
   fi
   return 1
@@ -139,6 +151,18 @@ _percent_or_unknown() {
   printf '%s%%' "$v"
 }
 
+# コア数は環境変数で上書きできるため、数値とは限らない。整数でなければ「不明」と
+# 書く。生の値をそのまま出すと `(autoコア)` のような嘘の表示になり、ついでに制御
+# 文字を含む値が端末へ流れる。
+_cores_or_unknown() {
+  local v="${1:-}"
+  if [[ ! "$v" =~ ^[0-9]+$ ]]; then
+    printf '不明'
+    return 0
+  fi
+  printf '%s' "$((10#$v))"
+}
+
 _megabytes_or_unknown() {
   local v="${1:-}"
   if [[ ! "$v" =~ ^[0-9]+$ ]]; then
@@ -159,7 +183,7 @@ describe_machine_state() {
   printf 'load %s / %s (%sコア), swap %s, 空きメモリ %s' \
     "$(_percent_to_load "$one")" \
     "$(_percent_to_load "$five")" \
-    "$MACHINE_LOAD_CORES" \
+    "$(_cores_or_unknown "$MACHINE_LOAD_CORES")" \
     "$(_percent_or_unknown "$swap")" \
     "$(_megabytes_or_unknown "$avail")"
 }

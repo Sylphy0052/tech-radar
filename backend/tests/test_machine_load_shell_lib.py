@@ -267,6 +267,64 @@ class TestMachineIsCongested:
         )
         assert result.stdout == "rc=0"
 
+    @pytest.mark.parametrize(
+        "cores",
+        ["notanumber", "16.0", "-4", "two hundred"],
+    )
+    def test_コア数が数値でなければ判定できないを返す(self, tmp_path: Path, cores: str) -> None:
+        """算術式は数値でない文字列を変数名として再展開するため、素通しすると
+        `set -u` の下で `unbound variable` になり check.sh ごと落ちる。"""
+        proc = _write_proc(tmp_path, _CONGESTED_LOADAVG, _CONGESTED_MEMINFO)
+        result = _run_lib(_CAPTURE_RC, env=_env(proc, cores=cores))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "rc=2"
+
+    @pytest.mark.parametrize(
+        "limit",
+        ["twohundred", "200.0", "-1"],
+    )
+    def test_閾値が数値でなければ判定できないを返す(self, tmp_path: Path, limit: str) -> None:
+        proc = _write_proc(tmp_path, _CONGESTED_LOADAVG, _CONGESTED_MEMINFO)
+        result = _run_lib(
+            _CAPTURE_RC,
+            env=_env(proc, MACHINE_LOAD_PER_CORE_LIMIT_PERCENT=limit),
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "rc=2"
+
+    def test_閾値の先頭ゼロを8進数として解釈しない(self, tmp_path: Path) -> None:
+        """`089` を8進数として読むと `value too great for base` で算術式が落ち、
+        黙って「混雑していない」へ倒れる。閾値89%なら実測値は混雑側になる。"""
+        proc = _write_proc(tmp_path, _CONGESTED_LOADAVG, _CONGESTED_MEMINFO)
+        result = _run_lib(
+            _CAPTURE_RC,
+            env=_env(proc, MACHINE_LOAD_PER_CORE_LIMIT_PERCENT="089"),
+        )
+        assert result.stderr == "", result.stderr
+        assert result.stdout == "rc=0"
+
+    def test_コア数の先頭ゼロを8進数として解釈しない(self, tmp_path: Path) -> None:
+        """`08` が 8 として読まれること（8進数エラーで落ちないこと）を固定する。
+        実測値の5分平均 5530% を8コアで割ると 691% で、既定の 200% を超える。"""
+        proc = _write_proc(tmp_path, _CONGESTED_LOADAVG, _CONGESTED_MEMINFO)
+        result = _run_lib(_CAPTURE_RC, env=_env(proc, cores="08"))
+        assert result.stderr == "", result.stderr
+        assert result.stdout == "rc=0"
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [{"cores": ""}, {"MACHINE_LOAD_PER_CORE_LIMIT_PERCENT": ""}],
+    )
+    def test_空文字の上書きは既定値へ倒れる(
+        self, tmp_path: Path, overrides: dict[str, str]
+    ) -> None:
+        """`${VAR:-既定}` は空文字も既定値へ置き換える。判定は実機のコア数に依存する
+        ため、rc そのものではなく「判定できない側へ落ちない」ことだけを固定する。"""
+        proc = _write_proc(tmp_path, _CONGESTED_LOADAVG, _CONGESTED_MEMINFO)
+        result = _run_lib(_CAPTURE_RC, env=_env(proc, **overrides))
+        assert result.stderr == "", result.stderr
+        assert result.stdout in ("rc=0", "rc=1")
+
     def test_procを読めないときは判定できないを返す(self, tmp_path: Path) -> None:
         result = _run_lib(_CAPTURE_RC, env=_env(tmp_path / "no-proc"))
         assert result.stdout == "rc=2"
@@ -305,4 +363,13 @@ class TestDescribeMachineState:
         """load average は絶対値だけでは重さが分からない。"""
         proc = _write_proc(tmp_path, _CONGESTED_LOADAVG, _CONGESTED_MEMINFO)
         result = _run_lib("describe_machine_state", env=_env(proc, cores=cores))
-        assert cores in result.stdout
+        assert f"({cores}コア)" in result.stdout
+
+    @pytest.mark.parametrize("cores", ["auto", "16.0", "not a number"])
+    def test_コア数が数値でなければ不明と書く(self, tmp_path: Path, cores: str) -> None:
+        """生の値をそのまま出すと `(autoコア)` のような嘘の表示になる。"""
+        proc = _write_proc(tmp_path, _CONGESTED_LOADAVG, _CONGESTED_MEMINFO)
+        result = _run_lib("describe_machine_state", env=_env(proc, cores=cores))
+        assert result.returncode == 0, result.stderr
+        assert "(不明コア)" in result.stdout
+        assert cores not in result.stdout
