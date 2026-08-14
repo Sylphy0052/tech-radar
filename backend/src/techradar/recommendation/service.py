@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -28,7 +29,7 @@ from techradar.db import (
     UserSourcePreference,
 )
 from techradar.db.enums import ArticleOrigin, FeedbackAction, RecommendationMode
-from techradar.interest.clusters import build_interest_clusters
+from techradar.interest.clusters import InterestCluster, build_interest_clusters
 from techradar.interest.service import (
     load_cluster_sources,
     load_weighted_interest_articles,
@@ -182,7 +183,12 @@ def _load_bad_embeddings(
 
 
 def build_interest_profile(
-    session: Session, user_id: uuid.UUID, now: datetime, settings: Settings
+    session: Session,
+    user_id: uuid.UUID,
+    now: datetime,
+    settings: Settings,
+    *,
+    clusters: Sequence[InterestCluster] | None = None,
 ) -> InterestProfile:
     """ユーザーの関心プロファイルを構築する（`PROJECT_SPEC.md` §8）。
 
@@ -212,6 +218,21 @@ def build_interest_profile(
     同じ形の縮退を、テーブル未更新という別の経路で踏む）。KMeans の計算コスト
     （実データ 69 件で数百 ms 程度）は Discover 生成 1 回あたりで許容できる範囲
     のため、都度構築を選んだ。
+
+    `clusters` を指定すると、この都度構築を省いてそれを `cluster_centroids`
+    の元にする。計測ツール（`measure.collect.collect_measurements`）が
+    `summarize_clusters` 用に既に構築したクラスタを使い回すためのキーワード
+    引数で、同じ user・同じ時刻に対する KMeans を 1 回の計測で 2 度走らせない。
+    既定の `None` では従来どおり内部で構築する。
+
+    `cluster_centroids` は `feed_filters`（検索語・タグ、Issue #90/#91）に依存
+    しないが、この関数の呼び出し元（`generate_recommendations`）は
+    `filter_fingerprint` が変わるたびに新規に run を作るため、検索語を変える
+    だけの操作でも同じ KMeans が毎回走る。`feed_run_reuse_seconds`
+    （フィンガープリント単位の run キャッシュ）はこの重複には効かない。単一
+    ユーザー・ローカル実行で数百 ms 規模のため現時点では許容し、実装は変えて
+    いない。将来 `filter_fingerprint` とは別の、関心記事の更新時刻などを鍵に
+    したキャッシュを設ければ避けられる。
     """
     del settings  # 現時点では未使用（呼び出し側との引数統一のために残す）。
 
@@ -228,9 +249,10 @@ def build_interest_profile(
         session, user_id, config.interest.max_bad_profile_articles
     )
 
-    cluster_sources = load_cluster_sources(session, user_id, now)
-    clustering_settings = clustering_settings_from_config(config)
-    clusters = build_interest_clusters(cluster_sources, clustering_settings)
+    if clusters is None:
+        cluster_sources = load_cluster_sources(session, user_id, now)
+        clustering_settings = clustering_settings_from_config(config)
+        clusters = build_interest_clusters(cluster_sources, clustering_settings)
     cluster_centroids = tuple(cluster.centroid for cluster in clusters)
 
     return InterestProfile(

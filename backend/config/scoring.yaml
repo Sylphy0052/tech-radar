@@ -241,11 +241,12 @@ clustering:
   # 下回る（記事が少ないうちは無理にクラスタを分けない）。max_clusters は上限として
   # 常に効く。
   # 2026-08-13 に実データ（関心記事 69 件）で確認し、3 値とも据え置いた。
-  # クラスタは推薦スコアに使われず（読むのは GET /api/interests だけ）、
-  # この値が決めるのは関心を人が眺めるときの粒度だけである。max_clusters を
-  # 10 以上にすると記事 1〜2 件のクラスタが現れてラベルが意味をなさず、
-  # 4 では 24 件と 18 件の塊ができて粗い。8 は最小クラスタが 3 件で
-  # min_articles_per_cluster を割らない（ADR 0006）
+  # クラスタは GET /api/interests の表示だけでなく、build_interest_profile
+  # 経由で cluster_centroids となり compute_novelty の cluster_part（新規性
+  # 判定）を通じて推薦スコアとフィード枠判定にも効く（Issue #89、ADR 0007）。
+  # max_clusters を 10 以上にすると記事 1〜2 件のクラスタが現れてラベルが
+  # 意味をなさず、4 では 24 件と 18 件の塊ができて粗い。8 は最小クラスタが
+  # 3 件で min_articles_per_cluster を割らない（ADR 0006）
   min_clusters: 2
   max_clusters: 8
   # 1 クラスタを成立させるのに要する記事数。少数の記事だけで意味のあるクラスタと

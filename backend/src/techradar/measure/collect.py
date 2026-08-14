@@ -54,9 +54,16 @@ def collect_measurements(
 
     sources = load_cluster_sources(session, target_user_id, now)
     clustering_settings = clustering_settings_from_config(config)
-    clusters = summarize_clusters(sources, build_interest_clusters(sources, clustering_settings))
+    built_clusters = build_interest_clusters(sources, clustering_settings)
+    clusters = summarize_clusters(sources, built_clusters)
 
-    profile = build_interest_profile(session, target_user_id, now, settings)
+    # `build_interest_profile` は既定では同じ user・同じ now に対して KMeans を
+    # 自前で再実行する（Issue #89）。上で `summarize_clusters` 用に既に構築した
+    # `built_clusters` をそのまま渡し、同じクラスタリングを 1 回の計測で 2 度
+    # 走らせない（MR !91 self review）。
+    profile = build_interest_profile(
+        session, target_user_id, now, settings, clusters=built_clusters
+    )
     candidates = load_candidates(session, target_user_id, now, settings)
     scored = rank_candidates(candidates, profile, scoring_settings, now)
     # 本番の DISCOVER 生成（`recommendation.service.generate_recommendations`）と同じ

@@ -27,6 +27,7 @@ from techradar.recommendation.ranking import (
     ScoringSettings,
     SourcePreferenceGate,
     WeightedEmbedding,
+    _compute_neighbor_similarities,
     build_reason_summary,
     compute_bad_similarity_penalty,
     compute_freshness,
@@ -1139,6 +1140,32 @@ class TestRankCandidates:
 
         # Assert
         assert novelty_by_id[odd_dimension.id] == pytest.approx(1.0)
+
+
+class TestComputeNeighborSimilarities:
+    def test_matches_cosine_similarity_for_non_trivial_vectors(self):
+        # Arrange — 受入基準: 直交（類似度 0）でも完全一致（類似度 1）でもない、
+        # 非自明な値のベクトルで numpy 経由の一括計算を検証する
+        # （MR !91 self review、指摘5）。3 件を使い、各要素の「他の候補との
+        # 最大類似度」が単一ペアの比較に潰れないようにする
+        vector_a = (0.3, 0.7, -0.2, 1.5)
+        vector_b = (1.1, -0.4, 0.9, 0.2)
+        vector_c = (-0.5, 0.6, 1.2, -0.8)
+        vectors = (vector_a, vector_b, vector_c)
+        candidates = tuple(make_candidate(embedding=vector) for vector in vectors)
+
+        # Act
+        neighbor_similarities = _compute_neighbor_similarities(candidates)
+
+        # Assert — 各要素が純粋関数 cosine_similarity による
+        # max(自分以外との類似度) と一致する
+        for index, own_vector in enumerate(vectors):
+            expected = max(
+                cosine_similarity(own_vector, other_vector)
+                for other_index, other_vector in enumerate(vectors)
+                if other_index != index
+            )
+            assert neighbor_similarities[index] == pytest.approx(expected)
 
 
 class TestBuildReasonSummary:

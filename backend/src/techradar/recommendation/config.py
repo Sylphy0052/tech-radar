@@ -380,11 +380,16 @@ class ClusteringConfig(BaseModel):
     （`interest/clusters.py` の `_cluster_count`）、記事が少ないうちは
     `min_clusters` を下回る。`max_clusters` は上限として常に効く。
 
-    ここで作るクラスタは推薦スコアには使われない。読むのは `api/interests.py`
-    （`GET /api/interests`）だけで、`ranking.py` の `interest_similarity` は
-    関心記事の embedding を直接加重平均しており、クラスタを経由しない。
-    そのためこれらの値が決めるのは、関心を人が眺めるときの粒度だけである
-    （`docs/adr/0006-cluster-count-and-feed-slot-defaults.md`）。
+    ここで作るクラスタは `api/interests.py`（`GET /api/interests`）が関心を
+    人が眺めるための表示に使うだけでなく、`recommendation.service.
+    build_interest_profile` を経由して `InterestProfile.cluster_centroids`
+    にもなり、`compute_novelty` の `cluster_part`（新規性判定）を通じて
+    推薦スコアとフィードの枠判定（exploration / diversity）へ直接効く
+    （Issue #89、`docs/adr/0007-embedding-based-novelty.md`）。そのため
+    `min_clusters` / `max_clusters` / `min_articles_per_cluster` を動かすと、
+    関心の表示粒度だけでなくクラスタ重心の位置が変わり、推薦結果も変わりうる
+    （`docs/adr/0006-cluster-count-and-feed-slot-defaults.md` の「値を動かす
+    利得が小さい」という結論は Issue #89 以前のもので、現在は成り立たない）。
     """
 
     model_config = ConfigDict(extra="forbid")

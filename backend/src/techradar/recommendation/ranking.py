@@ -518,9 +518,10 @@ def _compute_neighbor_similarities(
     """候補群それぞれについて、同じ採点対象の他の候補との最大コサイン類似度を返す。
 
     `compute_novelty` の `neighbor_part`（Issue #89）の入力。純 Python の総当たり
-    （候補数の 2 乗）は候補 1000 件で 42 秒かかると実測されており、numpy の
-    行列積に置き換えると 0.3 秒になる。そのため素朴な二重ループにはせず、
-    embedding を正規化した行列同士の積で一括計算する。
+    （候補数の 2 乗）は候補 500 件（`limits.max_candidates_per_run` の上限）で
+    20.41 秒かかると実測されており、numpy の行列積に置き換えると 0.14 秒になる
+    （`docs/adr/0007-embedding-based-novelty.md` の実測表）。そのため素朴な
+    二重ループにはせず、embedding を正規化した行列同士の積で一括計算する。
 
     embedding が無い候補は比較できないため `None`。次元が違う embedding が
     候補間に混ざる可能性があるため（モデル更新などによる混入、
