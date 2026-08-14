@@ -24,7 +24,10 @@ from techradar.db.enums import ArticleOrigin, FeedbackAction, RecommendationMode
 from techradar.recommendation.config import get_scoring_config
 from techradar.recommendation.ranking import InterestProfile
 from techradar.recommendation.service import (
+    FeedFilters,
     build_interest_profile,
+    compute_filter_fingerprint,
+    count_recommendations,
     find_latest_run,
     generate_recommendations,
     load_candidates,
@@ -58,6 +61,8 @@ def make_article(
     session: Session,
     *,
     title: str = "記事タイトル",
+    translated_title: str | None = None,
+    summary_ja: str | None = None,
     source_domain: str = "example.com",
     source_authority: float = 0.5,
     technical_quality: float = 0.5,
@@ -77,6 +82,8 @@ def make_article(
         canonical_url=canonical_url,
         original_url=canonical_url,
         title=title,
+        translated_title=translated_title,
+        summary_ja=summary_ja,
         source_domain=source_domain,
         source_authority=source_authority,
         technical_quality=technical_quality,
@@ -746,3 +753,300 @@ class TestFindLatestRun:
 
         # Assert
         assert latest is None
+
+    def test_filters_by_fingerprint_when_given(self, db_session: Session, settings: Settings):
+        """受入基準: 条件が違えば別 run とみなす（Issue #90）。
+
+        同じ user・mode でも `filter_fingerprint` が異なる run は
+        `find_latest_run` の対象から外れる。
+        """
+        # Arrange
+        user_id = uuid.uuid4()
+        make_article(db_session, title="候補")
+        filters_a = FeedFilters(query="python")
+        filters_b = FeedFilters(query="rust")
+        run_a = generate_recommendations(
+            db_session, user_id, RecommendationMode.DISCOVER, settings, NOW, feed_filters=filters_a
+        )
+
+        # Act
+        latest_for_a = find_latest_run(
+            db_session,
+            user_id,
+            RecommendationMode.DISCOVER,
+            fingerprint=compute_filter_fingerprint(filters_a),
+        )
+        latest_for_b = find_latest_run(
+            db_session,
+            user_id,
+            RecommendationMode.DISCOVER,
+            fingerprint=compute_filter_fingerprint(filters_b),
+        )
+
+        # Assert
+        assert latest_for_a is not None
+        assert latest_for_a.id == run_a.run_id
+        assert latest_for_b is None
+
+
+class TestComputeFilterFingerprint:
+    """`compute_filter_fingerprint` の正規化を検証する（Issue #90）。"""
+
+    def test_same_conditions_produce_the_same_fingerprint(self) -> None:
+        # Arrange
+        first = FeedFilters(query="LLM", topics=("llm", "rag"), technologies=("python",))
+        second = FeedFilters(query="llm", topics=("llm", "rag"), technologies=("python",))
+
+        # Act / Assert — 検索語は大文字小文字を区別しないため同一視する
+        assert compute_filter_fingerprint(first) == compute_filter_fingerprint(second)
+
+    def test_topic_order_does_not_affect_the_fingerprint(self) -> None:
+        # Arrange — 受入基準: 順序だけが違う指定は同じフィンガープリントになる
+        ordered_ab = FeedFilters(topics=("a", "b"))
+        ordered_ba = FeedFilters(topics=("b", "a"))
+
+        # Act / Assert
+        assert compute_filter_fingerprint(ordered_ab) == compute_filter_fingerprint(ordered_ba)
+
+    def test_different_conditions_produce_different_fingerprints(self) -> None:
+        # Arrange
+        with_query = FeedFilters(query="python")
+        without_query = FeedFilters()
+
+        # Act / Assert
+        assert compute_filter_fingerprint(with_query) != compute_filter_fingerprint(without_query)
+
+    def test_technology_order_does_not_affect_the_fingerprint(self) -> None:
+        # Arrange
+        ordered_ab = FeedFilters(technologies=("go", "rust"))
+        ordered_ba = FeedFilters(technologies=("rust", "go"))
+
+        # Act / Assert
+        assert compute_filter_fingerprint(ordered_ab) == compute_filter_fingerprint(ordered_ba)
+
+
+class TestLoadCandidatesFiltersBySearchQuery:
+    """受入基準: 検索語が title/translated_title/summary_ja のいずれかに部分一致すれば当たる。"""
+
+    def test_matches_the_title_case_insensitively(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        target = make_article(db_session, title="Python入門ガイド")
+        other = make_article(db_session, title="Rustハンドブック")
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(query="python")
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert target.id in candidate_ids
+        assert other.id not in candidate_ids
+
+    def test_matches_the_translated_title(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        target = make_article(db_session, title="Original Title", translated_title="日本語タイトル")
+        other = make_article(db_session, title="Other Title", translated_title="別の見出し")
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(query="日本語")
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert target.id in candidate_ids
+        assert other.id not in candidate_ids
+
+    def test_matches_the_summary(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        target = make_article(db_session, title="記事A", summary_ja="LLMの活用事例を紹介する")
+        other = make_article(db_session, title="記事B", summary_ja="CSSレイアウトの基礎")
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(query="LLM")
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert target.id in candidate_ids
+        assert other.id not in candidate_ids
+
+
+class TestLoadCandidatesFiltersByTopicsAndTechnologies:
+    """受入基準: topics/technologies を複数指定したとき、全てを含む記事だけが残る（AND）。"""
+
+    def test_requires_all_specified_topics(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        both = make_article(db_session, title="両方持ち", topics=["llm", "rag"])
+        only_one = make_article(db_session, title="片方だけ", topics=["llm"])
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(topics=("llm", "rag"))
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert both.id in candidate_ids
+        assert only_one.id not in candidate_ids
+
+    def test_requires_all_specified_technologies(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        both = make_article(db_session, title="両方持ち", technologies=["python", "fastapi"])
+        only_one = make_article(db_session, title="片方だけ", technologies=["python"])
+
+        # Act
+        candidates = load_candidates(
+            db_session,
+            user_id,
+            NOW,
+            settings,
+            feed_filters=FeedFilters(technologies=("python", "fastapi")),
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert both.id in candidate_ids
+        assert only_one.id not in candidate_ids
+
+
+class TestLoadCandidatesFiltersByPublishedRangeAndSourceDomain:
+    """受入基準: 公開日の範囲、情報源ドメインで絞れる。"""
+
+    def test_filters_by_published_at_range(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        in_range = make_article(db_session, title="範囲内", published_at=NOW - timedelta(days=1))
+        too_old = make_article(db_session, title="範囲外", published_at=NOW - timedelta(days=5))
+
+        # Act
+        candidates = load_candidates(
+            db_session,
+            user_id,
+            NOW,
+            settings,
+            feed_filters=FeedFilters(published_from=NOW - timedelta(days=2), published_to=NOW),
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert in_range.id in candidate_ids
+        assert too_old.id not in candidate_ids
+
+    def test_uses_fetched_at_when_published_at_is_null(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 公開日欠損時は fetched_at を代替に使う既存ロジックに揃える
+        user_id = uuid.uuid4()
+        target = make_article(
+            db_session, title="fetched_atで代替", published_at=None, fetched_at=NOW
+        )
+
+        # Act
+        candidates = load_candidates(
+            db_session,
+            user_id,
+            NOW,
+            settings,
+            feed_filters=FeedFilters(published_from=NOW - timedelta(days=1), published_to=NOW),
+        )
+
+        # Assert
+        assert target.id in {candidate.id for candidate in candidates}
+
+    def test_filters_by_source_domain(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        target = make_article(db_session, title="対象ドメイン", source_domain="example.com")
+        other = make_article(db_session, title="別ドメイン", source_domain="other.example")
+
+        # Act
+        candidates = load_candidates(
+            db_session,
+            user_id,
+            NOW,
+            settings,
+            feed_filters=FeedFilters(source_domain="example.com"),
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert target.id in candidate_ids
+        assert other.id not in candidate_ids
+
+
+class TestLoadRecommendationPageOffset:
+    """`offset` によるページ番号ベースのページングを検証する（Issue #90）。"""
+
+    def test_returns_pages_by_offset_without_duplicates(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange
+        user_id = uuid.uuid4()
+        for index in range(5):
+            make_article(db_session, title=f"候補{index}", embedding=make_embedding(index))
+        result = generate_recommendations(
+            db_session, user_id, RecommendationMode.DISCOVER, settings, NOW
+        )
+
+        # Act
+        first_page = load_recommendation_page(db_session, result.run_id, offset=0, limit=2)
+        second_page = load_recommendation_page(db_session, result.run_id, offset=2, limit=2)
+
+        # Assert
+        first_ids = {recommendation.article_id for recommendation, _ in first_page}
+        second_ids = {recommendation.article_id for recommendation, _ in second_page}
+        assert len(first_page) == 2
+        assert len(second_page) == 2
+        assert first_ids.isdisjoint(second_ids)
+        assert [recommendation.rank for recommendation, _ in first_page] == [1, 2]
+        assert [recommendation.rank for recommendation, _ in second_page] == [3, 4]
+
+    def test_returns_empty_for_an_out_of_range_offset(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 受入基準: 範囲外のページ番号はエラーではなく空
+        user_id = uuid.uuid4()
+        make_article(db_session, title="候補", embedding=make_embedding(0))
+        result = generate_recommendations(
+            db_session, user_id, RecommendationMode.DISCOVER, settings, NOW
+        )
+
+        # Act
+        page = load_recommendation_page(db_session, result.run_id, offset=100, limit=20)
+
+        # Assert
+        assert page == ()
+
+
+class TestCountRecommendations:
+    """`count_recommendations`（総件数、Issue #90）を検証する。"""
+
+    def test_counts_the_rows_stored_for_the_run(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        for index in range(3):
+            make_article(db_session, title=f"候補{index}", embedding=make_embedding(index))
+        result = generate_recommendations(
+            db_session, user_id, RecommendationMode.DISCOVER, settings, NOW
+        )
+
+        # Act
+        total = count_recommendations(db_session, result.run_id)
+
+        # Assert
+        assert total == 3
+
+    def test_returns_zero_for_an_unknown_run(self, db_session: Session) -> None:
+        # Act
+        total = count_recommendations(db_session, uuid.uuid4())
+
+        # Assert
+        assert total == 0

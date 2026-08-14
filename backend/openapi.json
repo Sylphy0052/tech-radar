@@ -314,7 +314,7 @@
         "type": "object"
       },
       "FeedResponse": {
-        "description": "Discover フィード（`GET /api/feed`）のレスポンス。",
+        "description": "Discover フィード（`GET /api/feed`）のレスポンス（Issue #90）。\n\nページングは番号付きページ（`page` / `page_size`）に統一する。\n`total_count` は絞り込み後に run へ保存された件数（`count_recommendations`）で、\n`limits.feed_run_size`（`config/scoring.yaml`）を超える候補は元々対象外になる\n（決定済みの設計）。",
         "properties": {
           "items": {
             "items": {
@@ -323,21 +323,29 @@
             "title": "Items",
             "type": "array"
           },
-          "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Cursor"
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total_count": {
+            "title": "Total Count",
+            "type": "integer"
+          },
+          "total_pages": {
+            "title": "Total Pages",
+            "type": "integer"
           }
         },
         "required": [
           "items",
-          "next_cursor"
+          "total_count",
+          "page",
+          "page_size",
+          "total_pages"
         ],
         "title": "FeedResponse",
         "type": "object"
@@ -2029,13 +2037,13 @@
     },
     "/api/feed": {
       "get": {
-        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。\n\n`cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ\n新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。\n`cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、\nページ間で重複が出ないようにする（受入基準）。\n\n`next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で\ncursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が\n非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで\n終端と判断せず、`next_cursor` が null になるまで辿ること。\n\n古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を\n削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。",
+        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。\n\n`q` / `topics` / `technologies` / `published_from` / `published_to` /\n`source_domain` はいずれも省略可能な絞り込み条件で、全候補を対象に推薦を\n作り直す（決定済みの設計、`generate_recommendations` の `feed_filters`）。\n条件を反映したフィンガープリントが一致する直近の DISCOVER run が再利用して\nよい時間内（`config/scoring.yaml` の `limits.feed_run_reuse_seconds`）なら\nその run を再利用し、そうでなければ新しい run を生成する\n（`_resolve_discover_run_id`）。\n\nページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset\nとして扱う。`total_count` は run に保存された件数（Bad 除外前）であり、\n範囲外の `page` はエラーにせず空の `items` を返す。\n\n古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を\n削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。",
         "operationId": "get_feed_api_feed_get",
         "parameters": [
           {
-            "description": "前回レスポンスの next_cursor をそのまま渡す",
+            "description": "検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）",
             "in": "query",
-            "name": "cursor",
+            "name": "q",
             "required": false,
             "schema": {
               "anyOf": [
@@ -2046,8 +2054,119 @@
                   "type": "null"
                 }
               ],
-              "description": "前回レスポンスの next_cursor をそのまま渡す",
-              "title": "Cursor"
+              "description": "検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）",
+              "title": "Q"
+            }
+          },
+          {
+            "description": "トピック。複数指定時は指定した全てを含む記事に絞る（AND）",
+            "in": "query",
+            "name": "topics",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "トピック。複数指定時は指定した全てを含む記事に絞る（AND）",
+              "title": "Topics"
+            }
+          },
+          {
+            "description": "技術タグ。複数指定時は指定した全てを含む記事に絞る（AND）",
+            "in": "query",
+            "name": "technologies",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "技術タグ。複数指定時は指定した全てを含む記事に絞る（AND）",
+              "title": "Technologies"
+            }
+          },
+          {
+            "description": "公開日の下限（published_at、NULLはfetched_atで代替）",
+            "in": "query",
+            "name": "published_from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "公開日の下限（published_at、NULLはfetched_atで代替）",
+              "title": "Published From"
+            }
+          },
+          {
+            "description": "公開日の上限",
+            "in": "query",
+            "name": "published_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "公開日の上限",
+              "title": "Published To"
+            }
+          },
+          {
+            "description": "情報源ドメインの完全一致",
+            "in": "query",
+            "name": "source_domain",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "情報源ドメインの完全一致",
+              "title": "Source Domain"
+            }
+          },
+          {
+            "description": "1始まりのページ番号",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "description": "1始まりのページ番号",
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
             }
           },
           {

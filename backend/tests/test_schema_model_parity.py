@@ -237,6 +237,10 @@ RECOMMENDATION_RUN_SPEC = ModelParitySpec(
         "source_article_id": (
             "記事起点推薦の起点はリクエストのpathパラメータで既知のため、レスポンスには含めない"
         ),
+        "filter_fingerprint": (
+            "検索・絞り込み条件のハッシュ値（Issue #90）。run再利用判定の内部状態であり、"
+            "APIレスポンスへは公開しない"
+        ),
     },
 )
 
@@ -419,8 +423,23 @@ DERIVED_FIELDS: tuple[DerivedField, ...] = (
     ),
     DerivedField(
         FeedResponse,
-        "next_cursor",
-        "run_id+rankを符号化した不透明なページングcursor。モデル列の値そのものではない",
+        "total_count",
+        "runに保存された推薦の総件数（count_recommendations）。単一のモデル列由来ではない集計値",
+    ),
+    DerivedField(
+        FeedResponse,
+        "page",
+        "要求されたページ番号をそのまま返すエコーバック。モデル列由来ではない",
+    ),
+    DerivedField(
+        FeedResponse,
+        "page_size",
+        "要求されたlimitをそのまま返すエコーバック。モデル列由来ではない",
+    ),
+    DerivedField(
+        FeedResponse,
+        "total_pages",
+        "total_countとpage_sizeから計算する総ページ数。単一のモデル列由来ではない集計値",
     ),
     DerivedField(
         InterestArticleListResponse,

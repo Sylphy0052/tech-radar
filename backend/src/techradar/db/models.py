@@ -211,11 +211,21 @@ class RecommendationRun(Base):
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # 検索・絞り込み条件（`recommendation.service.FeedFilters`）を正規化して
+    # ハッシュ化した値（Issue #90）。DISCOVER モードは常に値を持ち（条件無しは
+    # 空条件のフィンガープリント）、run 再利用判定（`_resolve_discover_run_id`）が
+    # user_id + mode に加えてこの列でも絞り込む。ARTICLE_BASED モードは条件という
+    # 概念自体が無いため NULL のまま。
+    filter_fingerprint: Mapped[str | None] = mapped_column(Text)
 
     # 直近 run の再利用判定（`recommendation.service.build_latest_run_select`）は
-    # user_id + mode で絞って generated_at 降順の先頭を取るため、ソート順まで
-    # 含めた複合インデックスにする。user_id 単独のインデックスはこの前方一致で
-    # 代替できるため持たない（Issue #32）。
+    # user_id + mode（+ filter_fingerprint、Issue #90）で絞って generated_at 降順の
+    # 先頭を取るため、ソート順まで含めた複合インデックスにする。user_id 単独の
+    # インデックスはこの前方一致で代替できるため持たない（Issue #32）。
+    # filter_fingerprint は複合インデックスへ含めない。1 ユーザーのローカル実行を
+    # 前提とした run 件数では、user_id + mode の絞り込み後にこの列だけフィルタで
+    # 弾いても実害が無いため（インデックス変更は既存の実行計画検証テストへの
+    # 影響が大きく、得られる効果に見合わないと判断した）。
     # 保持期間ジョブ（`jobs.handlers.purge_recommendation_runs`）の DELETE は
     # user_id で絞らず generated_at だけで範囲を切るため、単独のインデックスを別に持つ。
     __table_args__ = (

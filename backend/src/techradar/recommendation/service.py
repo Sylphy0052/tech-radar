@@ -7,12 +7,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 
 from techradar.config import Settings
@@ -60,6 +62,49 @@ _OWNED_ORIGIN_VALUES = frozenset(
 READ_ORIGIN_VALUES = frozenset(
     origin.value for origin in (ArticleOrigin.READ_FULL, ArticleOrigin.CLICKED)
 )
+
+
+@dataclass(frozen=True)
+class FeedFilters:
+    """`GET /api/feed` の検索・絞り込み条件（Issue #90）。
+
+    絞り込みは表示中の run だけを絞るのではなく、全候補を対象に推薦を作り直す
+    方式を取る（決定済みの設計）。そのため `load_candidates` へそのまま渡し、
+    フィード構成比（`compose_feed_with_stats`）は絞り込み後の候補集合に対して
+    通常どおり適用される。
+
+    `topics` / `technologies` は指定した全てを含む記事に絞る（AND）。
+    `published_from` / `published_to` は `published_at` を基準にし、NULL の
+    記事は `fetched_at` で代替する（`load_candidates` の既存ロジックに揃える）。
+    """
+
+    query: str | None = None
+    topics: tuple[str, ...] = ()
+    technologies: tuple[str, ...] = ()
+    published_from: datetime | None = None
+    published_to: datetime | None = None
+    source_domain: str | None = None
+
+
+def compute_filter_fingerprint(filters: FeedFilters) -> str:
+    """検索・絞り込み条件から run 再利用判定用のフィンガープリントを作る。
+
+    `topics` / `technologies` は指定順序だけが違っても同じ条件とみなすため、
+    重複を除いてソートしてから正規化する（受入基準）。検索語は大文字小文字を
+    区別しない実際の検索仕様（ILIKE）に揃え、前後の空白を除いて小文字化する。
+    SHA-256 のハッシュ値にすることで、検索語の長さに関わらず
+    `recommendation_runs.filter_fingerprint`（Text 列）を扱いやすい固定長に保つ。
+    """
+    canonical = {
+        "query": filters.query.strip().lower() if filters.query else None,
+        "topics": sorted(set(filters.topics)),
+        "technologies": sorted(set(filters.technologies)),
+        "published_from": filters.published_from.isoformat() if filters.published_from else None,
+        "published_to": filters.published_to.isoformat() if filters.published_to else None,
+        "source_domain": filters.source_domain,
+    }
+    encoded = json.dumps(canonical, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -152,6 +197,7 @@ def load_candidates(
     settings: Settings,
     *,
     source_article_id: uuid.UUID | None = None,
+    feed_filters: FeedFilters | None = None,
 ) -> tuple[CandidateSignature, ...]:
     """推薦候補記事を読み込む（`PROJECT_SPEC.md` §6.1, §6.2, §7.2）。
 
@@ -169,6 +215,17 @@ def load_candidates(
     `NOT IN` に渡すのではなく、`article_feedback` / `user_articles` への相関
     サブクエリ（`NOT EXISTS`）で行う。バインドパラメータ数が履歴サイズに比例して
     増え続けるのを避けるため。
+
+    `feed_filters`（`GET /api/feed` の検索・絞り込み条件、Issue #90）を指定すると、
+    上記の除外に加えてさらに絞り込む。絞り込みは表示中の run だけを絞るのではなく
+    候補読み込みの時点で適用する（決定済みの設計）。
+
+    * `query`: title / translated_title / summary_ja のいずれかへの大文字小文字を
+      区別しない部分一致（ILIKE）
+    * `topics` / `technologies`: 指定した全てを含む記事（JSONB `@>` の containment
+      演算子は「左辺の配列が右辺の要素を全て含む」を表すため、そのまま AND 条件になる）
+    * `published_from` / `published_to`: `published_or_fetched_at` に対する範囲
+    * `source_domain`: 完全一致
 
     `user_articles`（is_read 判定用）と `source_registry` は候補記事数に
     関わらず 1 回ずつ取得して辞書化し、N+1 クエリを避ける。
@@ -219,6 +276,26 @@ def load_candidates(
     ]
     if source_article_id is not None:
         filters.append(Article.id != source_article_id)
+    if feed_filters is not None:
+        if feed_filters.query:
+            pattern = f"%{feed_filters.query}%"
+            filters.append(
+                or_(
+                    Article.title.ilike(pattern),
+                    Article.translated_title.ilike(pattern),
+                    Article.summary_ja.ilike(pattern),
+                )
+            )
+        if feed_filters.topics:
+            filters.append(Article.topics.contains(list(feed_filters.topics)))
+        if feed_filters.technologies:
+            filters.append(Article.technologies.contains(list(feed_filters.technologies)))
+        if feed_filters.published_from is not None:
+            filters.append(published_or_fetched_at >= feed_filters.published_from)
+        if feed_filters.published_to is not None:
+            filters.append(published_or_fetched_at <= feed_filters.published_to)
+        if feed_filters.source_domain:
+            filters.append(Article.source_domain == feed_filters.source_domain)
 
     total = session.scalar(select(func.count()).select_from(Article).where(*filters)) or 0
     articles = session.scalars(
@@ -360,16 +437,22 @@ def generate_recommendations(
     now: datetime,
     *,
     source_article_id: uuid.UUID | None = None,
+    feed_filters: FeedFilters | None = None,
 ) -> RecommendationResult:
     """推薦を生成し `recommendation_runs` / `recommendations` へ保存する。
 
     `PROJECT_SPEC.md` §13 の 2 モードに対応する。
 
-    * DISCOVER: `build_interest_profile` の関心プロファイルを使い、構成比
-      （`compose_feed_with_stats`）を適用したうえで `limits.feed_run_size` 件を保存する。
+    * DISCOVER: `build_interest_profile` の関心プロファイルを使い、`feed_filters`
+      （Issue #90）で候補を絞り込んだうえで構成比（`compose_feed_with_stats`）を
+      適用し、`limits.feed_run_size` 件を保存する。`feed_filters` は絞り込み無し
+      （`FeedFilters()`）でも常にフィンガープリントを計算して
+      `recommendation_runs.filter_fingerprint` へ保存する（run 再利用判定
+      `_resolve_discover_run_id` が条件の有無に関わらず同じ規則で照合できるため）。
     * ARTICLE_BASED: 起点記事の embedding / topics から作った関心プロファイルを使い、
-      構成比は適用せず `rank_candidates` の上位 `limits.article_based_run_size` 件を
-      そのまま保存する。
+      構成比・`feed_filters` は適用せず `rank_candidates` の上位
+      `limits.article_based_run_size` 件をそのまま保存する
+      （`filter_fingerprint` は NULL のまま）。
 
     `commit` はしない。呼び出し側の `session_scope` に委ねる（`dedup/service.py` と
     同じ方針）。
@@ -379,12 +462,13 @@ def generate_recommendations(
 
     if mode is RecommendationMode.DISCOVER:
         profile = build_interest_profile(session, user_id, now, settings)
-        candidates = load_candidates(session, user_id, now, settings)
+        candidates = load_candidates(session, user_id, now, settings, feed_filters=feed_filters)
         scored = rank_candidates(candidates, profile, scoring_settings, now)
         composed = compose_feed_with_stats(scored, scoring_settings, config.limits.feed_run_size)
         items = composed.candidates
         composition_stats: CompositionStats | None = composed.stats
         run_source_article_id = None
+        filter_fingerprint: str | None = compute_filter_fingerprint(feed_filters or FeedFilters())
     elif mode is RecommendationMode.ARTICLE_BASED:
         if source_article_id is None:
             message = "article_based モードには source_article_id が必要です"
@@ -397,6 +481,7 @@ def generate_recommendations(
         items = scored[: config.limits.article_based_run_size]
         composition_stats = None
         run_source_article_id = source_article_id
+        filter_fingerprint = None
     else:
         message = f"未対応の推薦モードです: {mode}"
         raise ValueError(message)
@@ -406,6 +491,7 @@ def generate_recommendations(
         source_article_id=run_source_article_id,
         mode=mode.value,
         generated_at=now,
+        filter_fingerprint=filter_fingerprint,
     )
     session.add(run)
     session.flush()
@@ -436,11 +522,19 @@ def load_recommendation_page(
     run_id: uuid.UUID,
     *,
     after_rank: int | None = None,
+    offset: int = 0,
     limit: int,
 ) -> tuple[tuple[Recommendation, Article], ...]:
     """保存済み推薦を `rank` 昇順で読み出す（API のページングで使う）。
 
-    `after_rank` を指定すると、それより大きい rank だけを返す。
+    `after_rank` を指定すると、それより大きい rank だけを返す（記事起点推薦の
+    レスポンス組み立てなど、内部での小刻みな読み出しに使う）。
+
+    `offset` を指定すると、rank 昇順に並べたうえで先頭からその件数だけ読み飛ばす。
+    `GET /api/feed` の番号付きページング（Issue #90）が使う。範囲外の `offset`
+    （総件数を超える値）はエラーにせず空の結果を返す。`after_rank` と同時に
+    指定されることは呼び出し側の使い分け上想定していない（併用時は両方の条件が
+    AND で効く）。
     """
     if limit <= 0:
         message = f"limit は 1 以上にしてください: {limit}"
@@ -455,29 +549,62 @@ def load_recommendation_page(
         .join(Article, Article.id == Recommendation.article_id)
         .where(*filters)
         .order_by(Recommendation.rank.asc())
+        .offset(offset)
         .limit(limit)
     ).all()
     return tuple((recommendation, article) for recommendation, article in rows)
 
 
+def count_recommendations(session: Session, run_id: uuid.UUID) -> int:
+    """指定 run に保存されている推薦の総件数を返す（`GET /api/feed` の総件数、Issue #90）。
+
+    `feed_run_size`（`config/scoring.yaml`）を超える候補は元々 run へ保存されない
+    ため、この件数がそのままページングの総件数になる。存在しない run_id は 0 件。
+    """
+    return (
+        session.scalar(
+            select(func.count()).select_from(Recommendation).where(Recommendation.run_id == run_id)
+        )
+        or 0
+    )
+
+
 def build_latest_run_select(
-    user_id: uuid.UUID, mode: RecommendationMode
+    user_id: uuid.UUID, mode: RecommendationMode, *, fingerprint: str | None = None
 ) -> Select[tuple[RecommendationRun]]:
     """最新 run を1件取る SELECT 文を組み立てる。
 
     `find_latest_run` から分離しているのは、実行計画を検証するテストが実際に
     発行される文と同じものを見られるようにするため（Issue #32）。
+
+    `fingerprint` を指定すると `filter_fingerprint` の一致も条件に加える
+    （Issue #90、`GET /api/feed` の検索・絞り込み条件ごとの run 再利用判定）。
+    複合インデックス（`ix_recommendation_runs_user_id_mode_generated_at`）は
+    `filter_fingerprint` を含まないため、この条件は追加のフィルタとして効く
+    （`models.RecommendationRun` のコメント参照）。省略時（`None`）は既存の
+    user_id + mode だけの挙動を保つ。
     """
+    filters = [RecommendationRun.user_id == user_id, RecommendationRun.mode == mode.value]
+    if fingerprint is not None:
+        filters.append(RecommendationRun.filter_fingerprint == fingerprint)
     return (
         select(RecommendationRun)
-        .where(RecommendationRun.user_id == user_id, RecommendationRun.mode == mode.value)
+        .where(*filters)
         .order_by(RecommendationRun.generated_at.desc(), RecommendationRun.id.desc())
         .limit(1)
     )
 
 
 def find_latest_run(
-    session: Session, user_id: uuid.UUID, mode: RecommendationMode
+    session: Session,
+    user_id: uuid.UUID,
+    mode: RecommendationMode,
+    *,
+    fingerprint: str | None = None,
 ) -> RecommendationRun | None:
-    """その user の最新 run（`generated_at` 降順、同値は `id` 降順）を返す。"""
-    return session.scalars(build_latest_run_select(user_id, mode)).first()
+    """その user の最新 run（`generated_at` 降順、同値は `id` 降順）を返す。
+
+    `fingerprint` を指定すると、同じ `filter_fingerprint` を持つ run だけが対象
+    （Issue #90）。
+    """
+    return session.scalars(build_latest_run_select(user_id, mode, fingerprint=fingerprint)).first()
