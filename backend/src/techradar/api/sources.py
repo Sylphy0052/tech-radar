@@ -45,10 +45,16 @@ class SourceResponse(BaseModel):
     verified: bool
 
 
-# `domain` / `entity_name` の長さ上限（Issue #98）。登録・更新・検索の3経路で
-# 同じ値を使う。検索側だけ緩いと、書き込めない長さの語で検索できることになり、
-# 一致するはずのない問い合わせを DB まで通してしまう。値そのものは
-# `source_registry` の列長に由来する。
+# `domain` / `entity_name` の長さ上限（Issue #98）。書き込み側で先に決めていた値を
+# 検索側にもそろえたもので、**DB の列長に由来する値ではない**。`source_registry` の
+# 該当列はいずれも `Text` で、DB 自体は長さを制限しない（`db/models.py` を参照）。
+# この上限を担保しているのは API 層だけである。
+#
+# 検索側だけ上限が無いと、書き込めない長さの語で検索だけはできることになる。
+# 一致し得ない問い合わせが DB まで通るだけで実害は薄いが、非対称にする理由が無い。
+#
+# 参照箇所は、`entity_name` が登録・更新・検索の3経路、`domain` が登録・検索の
+# 2経路（`domain` は一意制約のキーなので `SourceUpdate` では変更させない）。
 SOURCE_ENTITY_NAME_MAX_LENGTH = 200
 SOURCE_DOMAIN_MAX_LENGTH = 255
 
