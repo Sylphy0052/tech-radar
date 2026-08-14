@@ -16,6 +16,7 @@ from techradar.api.articles import (
     INTEREST_LIST_TEXT_FILTER_MAX_LENGTH,
 )
 from techradar.api.deps import get_session
+from techradar.api.query_filters import MAX_PAGE_NUMBER
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, UserArticle
 from techradar.db.enums import ArticleOrigin, FeedbackAction
@@ -860,6 +861,27 @@ class TestListInterestArticlesPaging:
     def test_rejects_a_page_below_one(self, client: TestClient) -> None:
         # Act / Assert
         assert client.get("/api/articles", params={"page": 0}).status_code == 422
+
+    def test_accepts_a_page_at_the_upper_bound(self, client: TestClient) -> None:
+        """受入基準: page の上限ちょうどは 200 + 空の items（Issue #96）。"""
+        # Act
+        response = client.get("/api/articles", params={"page": MAX_PAGE_NUMBER})
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json()["items"] == []
+
+    def test_rejects_a_page_above_the_upper_bound(self, client: TestClient) -> None:
+        """受入基準: page の上限を超えると 422（Issue #96）。"""
+        # Act / Assert
+        response = client.get("/api/articles", params={"page": MAX_PAGE_NUMBER + 1})
+        assert response.status_code == 422
+
+    def test_rejects_a_page_that_would_overflow_bigint_offset(self, client: TestClient) -> None:
+        """受入基準: bigint を超える offset になる page は 500 ではなく 422（Issue #96）。"""
+        # Act / Assert
+        response = client.get("/api/articles", params={"page": 10**19})
+        assert response.status_code == 422
 
 
 class TestListInterestArticlesInputLimits:

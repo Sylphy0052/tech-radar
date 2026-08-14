@@ -31,7 +31,7 @@ from techradar.api.bulk_import import (
     validate_bulk_import_url,
 )
 from techradar.api.deps import get_current_user_id, get_session
-from techradar.api.query_filters import reject_oversized_list
+from techradar.api.query_filters import MAX_PAGE_NUMBER, reject_oversized_list
 from techradar.db.enums import ArticleOrigin, JobStatus, JobType
 from techradar.db.errors import is_unique_violation
 from techradar.db.models import Article, ArticleRegistration, UserArticle
@@ -684,7 +684,7 @@ def list_interest_articles(
         datetime | None, Query(description="登録日時の期間（上限、含む）")
     ] = None,
     is_primary_source: Annotated[bool | None, Query(description="公式 / 非公式")] = None,
-    page: Annotated[int, Query(ge=1, description="1始まりのページ番号")] = 1,
+    page: Annotated[int, Query(ge=1, le=MAX_PAGE_NUMBER, description="1始まりのページ番号")] = 1,
     limit: Annotated[int, Query(ge=1, le=MAX_INTEREST_LIST_PAGE_SIZE)] = (
         DEFAULT_INTEREST_LIST_PAGE_SIZE
     ),

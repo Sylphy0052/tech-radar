@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_app_settings, get_current_user_id, get_now, get_session
 from techradar.api.feedback import ArticleFeedbackResponse
-from techradar.api.query_filters import reject_oversized_list
+from techradar.api.query_filters import MAX_PAGE_NUMBER, reject_oversized_list
 from techradar.api.rate_limit import RATE_LIMITED_RESPONSES, enforce_recommendation_rate_limit
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, Recommendation, UserArticle
@@ -364,7 +364,7 @@ def get_feed(
             ),
         ),
     ] = DEFAULT_FEED_MAX_AGE_DAYS,
-    page: Annotated[int, Query(ge=1, description="1始まりのページ番号")] = 1,
+    page: Annotated[int, Query(ge=1, le=MAX_PAGE_NUMBER, description="1始まりのページ番号")] = 1,
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
 ) -> FeedResponse:
     """Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。
