@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -13,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from techradar.api.articles import (
-    INTEREST_CURSOR_MAX_LENGTH,
+    INTEREST_LIST_FILTER_MAX_ITEMS,
     INTEREST_LIST_TEXT_FILTER_MAX_LENGTH,
 )
 from techradar.api.deps import get_session
@@ -29,6 +28,10 @@ def make_article(
     session: Session,
     *,
     title: str = "記事タイトル",
+    translated_title: str | None = None,
+    summary_ja: str | None = None,
+    topics: list[str] | None = None,
+    technologies: list[str] | None = None,
     source_domain: str = "example.com",
     language: str | None = "ja",
     domain: str | None = "engineering",
@@ -43,6 +46,10 @@ def make_article(
         canonical_url=canonical_url,
         original_url=canonical_url,
         title=title,
+        translated_title=translated_title,
+        summary_ja=summary_ja,
+        topics=topics if topics is not None else [],
+        technologies=technologies if technologies is not None else [],
         source_domain=source_domain,
         language=language,
         domain=domain,
@@ -505,11 +512,182 @@ class TestListInterestArticlesFilters:
         assert response.status_code == 422
 
 
+class TestListInterestArticlesSearch:
+    """受入基準: 検索語が title / translated_title / summary_ja の部分一致で当たる（Issue #91）。"""
+
+    def test_matches_the_original_title(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        hit = make_article(db_session, title="Rust の所有権")
+        miss = make_article(db_session, title="Python の GIL")
+        for article in (hit, miss):
+            add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles", params={"q": "所有権"})
+
+        # Assert
+        assert [item["article_id"] for item in response.json()["items"]] == [str(hit.id)]
+
+    def test_matches_the_translated_title(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        hit = make_article(db_session, title="Ownership in Rust", translated_title="Rust の所有権")
+        miss = make_article(db_session, title="Python の GIL")
+        for article in (hit, miss):
+            add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles", params={"q": "所有権"})
+
+        # Assert
+        assert [item["article_id"] for item in response.json()["items"]] == [str(hit.id)]
+
+    def test_matches_the_japanese_summary(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        hit = make_article(db_session, title="Ownership", summary_ja="所有権について解説する")
+        miss = make_article(db_session, title="Python の GIL")
+        for article in (hit, miss):
+            add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles", params={"q": "所有権"})
+
+        # Assert
+        assert [item["article_id"] for item in response.json()["items"]] == [str(hit.id)]
+
+    def test_ignores_case(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 受入基準: 大文字小文字を区別しない
+        article = make_article(db_session, title="Rust Ownership")
+        add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles", params={"q": "ownership"})
+
+        # Assert
+        assert [item["article_id"] for item in response.json()["items"]] == [str(article.id)]
+
+    def test_combines_the_query_with_other_filters_by_and(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 検索語に当たっても domain が違えば出ない
+        hit = make_article(db_session, title="Rust 入門", domain="ai")
+        miss = make_article(db_session, title="Rust 入門", domain="web")
+        for article in (hit, miss):
+            add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles", params={"q": "Rust", "domain": "ai"})
+
+        # Assert
+        assert [item["article_id"] for item in response.json()["items"]] == [str(hit.id)]
+
+
+class TestListInterestArticlesTagFilters:
+    """受入基準: topics / technologies は複数指定でき、指定した全てを含む記事に絞る（AND）。"""
+
+    def test_filters_by_a_single_topic(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        hit = make_article(db_session, title="該当", topics=["LLM", "RAG"])
+        miss = make_article(db_session, title="非該当", topics=["DB"])
+        for article in (hit, miss):
+            add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles", params={"topics": ["LLM"]})
+
+        # Assert
+        assert [item["article_id"] for item in response.json()["items"]] == [str(hit.id)]
+
+    def test_requires_all_topics_when_multiple_are_given(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 片方しか持たない記事は落ちる（OR ではなく AND）
+        both = make_article(db_session, title="両方", topics=["LLM", "RAG"])
+        only_one = make_article(db_session, title="片方", topics=["LLM"])
+        for article in (both, only_one):
+            add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles", params={"topics": ["LLM", "RAG"]})
+
+        # Assert
+        assert [item["article_id"] for item in response.json()["items"]] == [str(both.id)]
+
+    def test_requires_all_technologies_when_multiple_are_given(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        both = make_article(db_session, title="両方", technologies=["Python", "FastAPI"])
+        only_one = make_article(db_session, title="片方", technologies=["Python"])
+        for article in (both, only_one):
+            add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles", params={"technologies": ["Python", "FastAPI"]})
+
+        # Assert
+        assert [item["article_id"] for item in response.json()["items"]] == [str(both.id)]
+
+    def test_combines_topics_and_technologies_by_and(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        hit = make_article(db_session, title="該当", topics=["LLM"], technologies=["Python"])
+        miss = make_article(db_session, title="非該当", topics=["LLM"], technologies=["Go"])
+        for article in (hit, miss):
+            add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get(
+            "/api/articles", params={"topics": ["LLM"], "technologies": ["Python"]}
+        )
+
+        # Assert
+        assert [item["article_id"] for item in response.json()["items"]] == [str(hit.id)]
+
+
 class TestListInterestArticlesPaging:
+    """受入基準: 番号付きページングで総件数・総ページ数が返る（Issue #91）。"""
+
+    def test_returns_the_requested_page_with_totals(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 5 件を 2 件ずつに割ると 3 ページ
+        articles = [make_article(db_session, title=f"記事{index}") for index in range(5)]
+        for index, article in enumerate(articles):
+            add_user_article(
+                db_session,
+                settings.default_user_id,
+                article,
+                ArticleOrigin.MANUAL,
+                created_at=NOW + timedelta(minutes=index),
+            )
+
+        # Act
+        response = client.get("/api/articles", params={"page": 2, "limit": 2})
+
+        # Assert — 登録日時の降順で 3 件目・4 件目
+        body = response.json()
+        expected_ids = [str(article.id) for article in reversed(articles)]
+        assert [item["article_id"] for item in body["items"]] == expected_ids[2:4]
+        assert body["total_count"] == 5
+        assert body["page"] == 2
+        assert body["page_size"] == 2
+        assert body["total_pages"] == 3
+
     def test_paginates_without_duplicates_or_gaps(
         self, client: TestClient, db_session: Session, settings: Settings
     ) -> None:
-        # Arrange — 5 件を作り、2 件ずつページングして全件が重複・欠落なく揃うことを確認する
+        # Arrange — 5 件を 2 件ずつ辿って全件が重複・欠落なく揃うことを確認する
         articles = [make_article(db_session, title=f"記事{index}") for index in range(5)]
         for index, article in enumerate(articles):
             add_user_article(
@@ -522,17 +700,9 @@ class TestListInterestArticlesPaging:
 
         # Act
         collected_ids: list[str] = []
-        cursor: str | None = None
-        for _ in range(10):
-            params = {"limit": 2}
-            if cursor is not None:
-                params["cursor"] = cursor
-            response = client.get("/api/articles", params=params)
-            body = response.json()
+        for page in range(1, 4):
+            body = client.get("/api/articles", params={"page": page, "limit": 2}).json()
             collected_ids.extend(item["article_id"] for item in body["items"])
-            cursor = body["next_cursor"]
-            if cursor is None:
-                break
 
         # Assert
         expected_ids = [str(article.id) for article in reversed(articles)]
@@ -553,28 +723,20 @@ class TestListInterestArticlesPaging:
 
         # Act
         collected_ids: list[str] = []
-        cursor: str | None = None
-        for _ in range(10):
-            params = {"limit": 2}
-            if cursor is not None:
-                params["cursor"] = cursor
-            response = client.get("/api/articles", params=params)
-            body = response.json()
+        for page in range(1, 4):
+            body = client.get("/api/articles", params={"page": page, "limit": 2}).json()
             collected_ids.extend(item["article_id"] for item in body["items"])
-            cursor = body["next_cursor"]
-            if cursor is None:
-                break
 
         # Assert
         expected_ids = {str(article.id) for article in articles}
         assert set(collected_ids) == expected_ids
         assert len(collected_ids) == len(expected_ids)
 
-    def test_paginates_correctly_when_a_filter_is_combined_with_cursor_and_limit(
+    def test_counts_only_rows_matching_the_filters(
         self, client: TestClient, db_session: Session, settings: Settings
     ) -> None:
-        """受入基準: フィルター（domain）と cursor/limit を併用しても正しく分割・復元される。"""
-        # Arrange — domain=ai の5件だけをページングで回収する。domain=web は紛れ込まない
+        """受入基準: 総件数はフィルター適用後の件数（ページ内の件数ではない）。"""
+        # Arrange — domain=ai の5件だけが対象。domain=web は総件数にも入らない
         ai_articles = [
             make_article(db_session, title=f"AI記事{index}", domain="ai") for index in range(5)
         ]
@@ -596,66 +758,89 @@ class TestListInterestArticlesPaging:
         )
 
         # Act
-        collected_ids: list[str] = []
-        cursor: str | None = None
-        for _ in range(10):
-            params: dict[str, str | int] = {"limit": 2, "domain": "ai"}
-            if cursor is not None:
-                params["cursor"] = cursor
-            response = client.get("/api/articles", params=params)
-            body = response.json()
-            collected_ids.extend(item["article_id"] for item in body["items"])
-            cursor = body["next_cursor"]
-            if cursor is None:
-                break
+        body = client.get("/api/articles", params={"page": 1, "limit": 2, "domain": "ai"}).json()
 
         # Assert
-        expected_ids = [str(article.id) for article in reversed(ai_articles)]
-        assert collected_ids == expected_ids
-        assert str(web_article.id) not in collected_ids
+        assert body["total_count"] == 5
+        assert body["total_pages"] == 3
+        assert str(web_article.id) not in [item["article_id"] for item in body["items"]]
 
-    def test_returns_a_null_next_cursor_when_there_is_no_more_data(
+    def test_returns_empty_items_for_a_page_beyond_the_last(
         self, client: TestClient, db_session: Session, settings: Settings
     ) -> None:
+        """受入基準: 範囲外のページはエラーにせず空で返す（`GET /api/feed` と同じ）。"""
         # Arrange
         article = make_article(db_session)
         add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
 
         # Act
-        response = client.get("/api/articles", params={"limit": 10})
+        response = client.get("/api/articles", params={"page": 99, "limit": 10})
 
         # Assert
-        assert response.json()["next_cursor"] is None
+        body = response.json()
+        assert response.status_code == 200
+        assert body["items"] == []
+        assert body["total_count"] == 1
+        assert body["total_pages"] == 1
 
-    def test_returns_400_for_a_malformed_cursor(self, client: TestClient) -> None:
-        # Act
-        response = client.get("/api/articles", params={"cursor": "not-a-valid-cursor!!"})
+    def test_returns_zero_totals_when_nothing_matches(self, client: TestClient) -> None:
+        # Act — 1 件も無い状態
+        body = client.get("/api/articles").json()
 
-        # Assert
-        assert response.status_code == 400
+        # Assert — 0 件なら総ページ数も 0（切り上げで 1 にしない）
+        assert body["items"] == []
+        assert body["total_count"] == 0
+        assert body["total_pages"] == 0
 
-    def test_returns_400_for_a_cursor_exceeding_the_max_length(self, client: TestClient) -> None:
-        # Arrange — 受入基準: 上限を超える長さの cursor は 400
-        oversized_cursor = "A" * (INTEREST_CURSOR_MAX_LENGTH + 1)
-
-        # Act
-        response = client.get("/api/articles", params={"cursor": oversized_cursor})
-
-        # Assert
-        assert response.status_code == 400
-
-    def test_returns_400_for_a_cursor_with_an_unparseable_created_at_or_id(
-        self, client: TestClient
+    def test_returns_zero_totals_for_an_origin_outside_the_interest_list(
+        self, client: TestClient, db_session: Session, settings: Settings
     ) -> None:
-        # Arrange — base64 としては復号できるが、created_at/id として不正な cursor
-        raw = "not-a-datetime:not-a-uuid"
-        cursor = base64.urlsafe_b64encode(raw.encode()).decode("ascii").rstrip("=")
+        """一覧対象外の origin だけを指定したときも、ページング用の値が揃って返る。"""
+        # Arrange
+        article = make_article(db_session)
+        add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
 
         # Act
-        response = client.get("/api/articles", params={"cursor": cursor})
+        response = client.get("/api/articles", params={"origin": ["read_full"]})
 
         # Assert
-        assert response.status_code == 400
+        body = response.json()
+        assert response.status_code == 200
+        assert body["items"] == []
+        assert body["total_count"] == 0
+        assert body["total_pages"] == 0
+        assert body["page"] == 1
+
+    def test_rejects_a_page_below_one(self, client: TestClient) -> None:
+        # Act / Assert
+        assert client.get("/api/articles", params={"page": 0}).status_code == 422
+
+
+class TestListInterestArticlesInputLimits:
+    """受入基準: 自由入力の絞り込み条件に上限を課す（`GET /api/feed` と同じ規則）。
+
+    上限値は `api/articles.py` の定数から取り、テスト側で数値を二重管理しない。
+    """
+
+    def test_rejects_a_too_long_query(self, client: TestClient) -> None:
+        # Act / Assert
+        too_long = "a" * (INTEREST_LIST_TEXT_FILTER_MAX_LENGTH + 1)
+        assert client.get("/api/articles", params={"q": too_long}).status_code == 422
+
+    def test_rejects_too_many_topics(self, client: TestClient) -> None:
+        # Act / Assert — 件数の上限は FastAPI の Query では表せないため関数内で検証している
+        too_many = [f"topic{index}" for index in range(INTEREST_LIST_FILTER_MAX_ITEMS + 1)]
+        assert client.get("/api/articles", params={"topics": too_many}).status_code == 422
+
+    def test_rejects_a_too_long_topic_item(self, client: TestClient) -> None:
+        # Act / Assert — 要素ごとの長さも Query では効かないため関数内で検証している
+        too_long = "a" * (INTEREST_LIST_TEXT_FILTER_MAX_LENGTH + 1)
+        assert client.get("/api/articles", params={"topics": [too_long]}).status_code == 422
+
+    def test_rejects_too_many_technologies(self, client: TestClient) -> None:
+        # Act / Assert
+        too_many = [f"tech{index}" for index in range(INTEREST_LIST_FILTER_MAX_ITEMS + 1)]
+        assert client.get("/api/articles", params={"technologies": too_many}).status_code == 422
 
 
 class TestDeleteInterestArticle:

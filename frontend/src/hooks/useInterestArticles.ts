@@ -14,21 +14,18 @@ import { getRequestErrorMessage } from "@/lib/request-error-message";
 interface UseInterestArticlesResult {
   items: InterestArticleItem[];
   isLoading: boolean;
-  isLoadingMore: boolean;
   error: string | null;
-  /** next_cursor が null になったら false。以降 loadMore は何もしない。 */
-  hasMore: boolean;
-  loadMore: () => void;
+  /** 1始まりの現在ページ番号。 */
+  page: number;
+  totalPages: number;
+  totalCount: number;
+  /** ページを移動する。`Pagination` の `onPageChange` へそのまま渡す想定。 */
+  setPage: (page: number) => void;
   /** 記事を関心記事一覧から除外する（`DELETE /api/articles/{article_id}/interest`）。 */
   removeArticle: (articleId: string) => void;
 }
 
-/** 既存項目と新規項目を article_id で重複排除しながら連結する（`useFeed.mergeItems` と同じ狙い）。 */
-function mergeItems(current: InterestArticleItem[], incoming: InterestArticleItem[]): InterestArticleItem[] {
-  const seen = new Set(current.map((item) => item.article_id));
-  const deduped = incoming.filter((item) => !seen.has(item.article_id));
-  return [...current, ...deduped];
-}
+const FIRST_PAGE = 1;
 
 /** 指定 article_id を除いた新しい配列を返す。 */
 function withoutArticle(items: InterestArticleItem[], articleId: string): InterestArticleItem[] {
@@ -38,27 +35,30 @@ function withoutArticle(items: InterestArticleItem[], articleId: string): Intere
 /**
  * 関心記事一覧の状態管理 hook（`useFeed` と同じ構成）。
  *
- * フィルター条件が変わるたびに一覧を取得し直す（先頭ページから。カーソルは
- * フィルターごとに別の並びを指すため使い回せない）。除外操作は `useFeed` の
- * `removeFeedback` と同じく、先にローカル state から消してから API を呼び、
- * 失敗時はもとの位置へ戻す。
+ * Issue #91 で「さらに読み込む」（cursor）から番号付きページングへ書き換えた。
+ * ページは追記せず丸ごと差し替える（backend の `page` は offset で、cursor と違い
+ * 同じページを何度でも取り直せるため、蓄積して重複排除する必要が無くなった）。
  *
- * `loadMore` は `useFeed` と異なり毎レンダーで参照が変わりうる（`nextCursor` /
- * `filters` に依存するため）。`InterestArticleList` はボタン押下でしか呼ばない
- * ため（IntersectionObserver を使わない）、参照の安定性は要らない。
+ * フィルター条件が変わったかどうかは「レンダー中に前回値と比較して直す」React の
+ * 公式パターンで検出し、ページ番号を1へ戻す
+ * （https://react.dev/learn/you-might-not-need-an-effect の
+ * "Adjusting state when a prop changes"）。`useEffect` の本体で setState を
+ * 同期的に呼ぶとカスケード再レンダーになるため（react-hooks/set-state-in-effect
+ * が検出する）、リセットはレンダー中のこちらへ寄せ、`useEffect` 側は非同期の
+ * fetch とその結果を反映する setState だけにする。オブジェクト参照ではなく
+ * クエリ文字列で比較するので、呼び出し側が毎レンダー新しい `filters`
+ * オブジェクトを渡しても（値が同じなら）無駄なリセットは起きない。
  *
- * `filters` は呼び出し側（`InterestArticleList`）が URL から `useMemo` で
- * 導出したオブジェクトを渡す想定。参照が安定していれば無駄な再取得は起きない
- * （内部的にはクエリ文字列で比較するため、安定していなくても正しく動く）。
+ * 除外操作は `useFeed` の `removeFeedback` と同じく、先にローカル state から
+ * 消してから API を呼び、失敗時はもとの位置へ戻す。
  */
 export function useInterestArticles(filters: ArticleFilters): UseInterestArticlesResult {
   const [items, setItems] = useState<InterestArticleItem[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [page, setPageState] = useState(FIRST_PAGE);
+  const [totalCount, setTotalCount] = useState(0);
+  const [pageSize, setPageSize] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const isLoadingMoreRef = useRef(false);
 
   // 送信中（pending）の article_id 集合。連打で二重に DELETE を送らないためのガード
   // （`useFeed.pendingArticleIdsRef` と同じ狙い）。
@@ -72,42 +72,33 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
     [],
   );
 
-  // フィルターが変わったかどうかを「レンダー中に前回値と比較して直す」React の
-  // 公式パターンで検出する（https://react.dev/learn/you-might-not-need-an-effect
-  // の "Adjusting state when a prop changes"）。`useEffect` の本体で setState を
-  // 同期的に呼ぶとカスケード再レンダーになるため（react-hooks/set-state-in-effect
-  // が検出する）、リセットはレンダー中のこちらへ寄せ、`useEffect` 側は非同期の
-  // fetch とその結果を反映する setState だけにする。オブジェクト参照ではなく
-  // クエリ文字列で比較するので、呼び出し側が毎レンダー新しい `filters`
-  // オブジェクトを渡しても（値が同じなら）無駄なリセットは起きない。
+  // 総ページ数は state で持たず総件数から導く。除外操作は総件数をローカルで
+  // 1件ぶん減らすため（下記 `removeArticle`）、応答の `total_pages` をそのまま
+  // 保持すると再取得までページ数だけが古い値で残る。backend の計算式と同じ
+  // （`ceil(total_count / page_size)`）なので、導出しても値は変わらない。
+  const totalPages = pageSize > 0 ? Math.ceil(totalCount / pageSize) : 0;
+
   const filterKey = buildSearchParamsFromFilters(filters).toString();
   const [previousFilterKey, setPreviousFilterKey] = useState(filterKey);
   if (filterKey !== previousFilterKey) {
     setPreviousFilterKey(filterKey);
+    setPageState(FIRST_PAGE);
     setItems([]);
-    setNextCursor(null);
-    setIsLoading(true);
     setError(null);
+    setIsLoading(true);
   }
-
-  // `loadMore` 発行時点の filterKey を捕捉するための最新値 ref。
-  // フィルターが切り替わった後に旧フィルターの loadMore レスポンスが解決しても、
-  // このref越しに世代のずれを検出して破棄できるようにする。
-  const filterKeyRef = useRef(filterKey);
-  useEffect(() => {
-    filterKeyRef.current = filterKey;
-  }, [filterKey]);
 
   useEffect(() => {
     let cancelled = false;
 
-    listInterestArticles(filters)
+    listInterestArticles(filters, { page })
       .then((response) => {
         if (cancelled) {
           return;
         }
         setItems(response.items);
-        setNextCursor(response.next_cursor);
+        setTotalCount(response.total_count);
+        setPageSize(response.page_size);
         setError(null);
       })
       .catch((err: unknown) => {
@@ -126,44 +117,29 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
     return () => {
       cancelled = true;
     };
-  }, [filters]);
+    // `filters` を直接依存に含める。呼び出し側（`InterestArticleList`）が `useMemo` で
+    // 参照を安定させる想定だが、安定していなくても（`filterKey` の値が同じなら
+    // 上のリセットが起きないため）正しく動く。フィルターとページのどちらの変更も
+    // この effect が担い、`cancelled` フラグで古いレスポンスの反映を防ぐ
+    // （`useFeed` と同じ形。書き換え前の `filterKeyRef` による世代判定は、
+    // 追記をやめてページ差し替えにしたため不要になった）。
+  }, [filters, page]);
 
-  const loadMore = useCallback(() => {
-    if (nextCursor === null || isLoadingMoreRef.current) {
-      return;
-    }
-    const cursor = nextCursor;
-    // 発行時点のフィルターを捕捉する。レスポンス到達時にこれと食い違っていれば、
-    // その間にフィルターが切り替わっており（初回取得側の `cancelled` と同じ狙い）、
-    // 新フィルターの一覧へ旧フィルターの記事を混ぜてしまうため破棄する。
-    const requestFilterKey = filterKeyRef.current;
-    const isStaleResponse = () =>
-      !isMountedRef.current || filterKeyRef.current !== requestFilterKey;
-    isLoadingMoreRef.current = true;
-    setIsLoadingMore(true);
-    listInterestArticles(filters, { cursor })
-      .then((response) => {
-        if (isStaleResponse()) {
-          return;
-        }
-        setItems((current) => mergeItems(current, response.items));
-        setNextCursor(response.next_cursor);
-        setError(null);
-      })
-      .catch((err: unknown) => {
-        if (isStaleResponse()) {
-          return;
-        }
-        setError(getRequestErrorMessage(err));
-      })
-      .finally(() => {
-        isLoadingMoreRef.current = false;
-        if (isStaleResponse()) {
-          return;
-        }
-        setIsLoadingMore(false);
-      });
-  }, [nextCursor, filters]);
+  // ページ移動でも読み込み中にする。`useEffect` の本体で `setIsLoading(true)` を
+  // 同期的に呼ぶとカスケード再レンダーになるため、読み込み開始の合図は「取得の
+  // きっかけを作る側」であるここと上のフィルター変更検出へ寄せる（`useFeed` と
+  // 同じ形）。同じページ番号への移動では effect が走らないので、読み込み中のまま
+  // 止まらないよう先に弾く。
+  const setPage = useCallback(
+    (nextPage: number) => {
+      if (nextPage === page) {
+        return;
+      }
+      setPageState(nextPage);
+      setIsLoading(true);
+    },
+    [page],
+  );
 
   const removeArticle = useCallback(
     (articleId: string) => {
@@ -182,7 +158,11 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
       }
       const removedItem = items[index];
 
+      // 総件数も一緒に減らす。`items` だけ減らすと「全件が空なのか、その
+      // ページだけ空なのか」の出し分け（`InterestArticleList`）と「全N件」の
+      // 表示が、次の取得まで古い総件数のまま食い違う。
       setItems((current) => withoutArticle(current, articleId));
+      setTotalCount((current) => Math.max(0, current - 1));
       pendingArticleIdsRef.current.add(articleId);
 
       deleteInterestArticle(articleId)
@@ -201,6 +181,7 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
             restored.splice(index, 0, removedItem);
             return restored;
           });
+          setTotalCount((current) => current + 1);
           setError(getRequestErrorMessage(err));
         })
         .finally(() => {
@@ -213,10 +194,11 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
   return {
     items,
     isLoading,
-    isLoadingMore,
     error,
-    hasMore: nextCursor !== null,
-    loadMore,
+    page,
+    totalPages,
+    totalCount,
+    setPage,
     removeArticle,
   };
 }

@@ -22,6 +22,18 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
 }
 
+/** 1ページに収まる関心記事一覧レスポンス（番号付きページング、Issue #91）。 */
+function listResponse(items: InterestArticleItem[], overrides: Record<string, unknown> = {}): unknown {
+  return {
+    items,
+    total_count: items.length,
+    page: 1,
+    page_size: 20,
+    total_pages: items.length > 0 ? 1 : 0,
+    ...overrides,
+  };
+}
+
 function makeItem(overrides: Partial<InterestArticleItem> & { article_id: string }): InterestArticleItem {
   return {
     canonical_url: `https://example.com/${overrides.article_id}`,
@@ -58,7 +70,7 @@ describe("InterestArticleList", () => {
       makeItem({ article_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", origin: "good", title: "Good記事" }),
       makeItem({ article_id: "cccccccc-cccc-cccc-cccc-cccccccccccc", origin: "saved", title: "保存記事" }),
     ];
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ items, next_cursor: null })));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(listResponse(items))));
 
     // Act
     renderList();
@@ -86,7 +98,7 @@ describe("InterestArticleList", () => {
       source_domain: "blog.example.com",
       content_type: "research",
     });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ items: [item], next_cursor: null })));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(listResponse([item]))));
 
     // Act
     renderList();
@@ -105,7 +117,7 @@ describe("InterestArticleList", () => {
       if (init?.method === "DELETE") {
         return new Response(null, { status: 204 });
       }
-      return jsonResponse({ items: [item], next_cursor: null });
+      return jsonResponse(listResponse([item]));
     });
     vi.stubGlobal("fetch", fetchMock);
     renderList();
@@ -116,6 +128,28 @@ describe("InterestArticleList", () => {
 
     // Assert
     await waitFor(() => expect(screen.queryByText("除外対象")).not.toBeInTheDocument());
+  }, TEST_TIMEOUT_MS);
+
+  it("shows the empty state after the last article on the page is excluded", async () => {
+    // Arrange — 総件数1件の一覧。除外後に総件数が古いままだと「他のページを
+    // 開いてください」という、存在しないページへの案内が出てしまう
+    const item = makeItem({ article_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", title: "最後の1件" });
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(listResponse([item]));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderList();
+    await waitFor(() => expect(screen.getByText("最後の1件")).toBeInTheDocument());
+
+    // Act
+    fireEvent.click(screen.getByRole("button", { name: "関心対象から除外" }));
+
+    // Assert
+    await waitFor(() => expect(screen.getByText("該当する記事がありません。")).toBeInTheDocument());
+    expect(screen.getByText("全0件")).toBeInTheDocument();
   }, TEST_TIMEOUT_MS);
 
   it("removes the article even when clicked in the same tick it appears (Issue #37)", async () => {
@@ -131,7 +165,7 @@ describe("InterestArticleList", () => {
       if (init?.method === "DELETE") {
         return new Response(null, { status: 204 });
       }
-      return jsonResponse({ items: [item], next_cursor: null });
+      return jsonResponse(listResponse([item]));
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -176,7 +210,7 @@ describe("InterestArticleList", () => {
 
   it("shows an empty state message when there are no matching articles", async () => {
     // Arrange
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null })));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(listResponse([]))));
 
     // Act
     renderList();
@@ -187,7 +221,7 @@ describe("InterestArticleList", () => {
 
   it("requests the API with the filters restored from the URL", async () => {
     // Arrange
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(listResponse([])));
     vi.stubGlobal("fetch", fetchMock);
 
     // Act
@@ -199,5 +233,51 @@ describe("InterestArticleList", () => {
     const searchParams = new URL(url).searchParams;
     expect(searchParams.getAll("origin")).toEqual(["good"]);
     expect(searchParams.get("domain")).toBe("ai");
+  }, TEST_TIMEOUT_MS);
+
+  it("moves to the requested page and replaces the shown articles", async () => {
+    // Arrange — 2ページ分の応答を用意する（受入基準: 番号付きページング）
+    const firstPageItem = makeItem({ article_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", title: "1ページ目の記事" });
+    const secondPageItem = makeItem({ article_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", title: "2ページ目の記事" });
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      const page = Number(new URL(url).searchParams.get("page") ?? "1");
+      return jsonResponse(
+        listResponse(page === 2 ? [secondPageItem] : [firstPageItem], {
+          total_count: 2,
+          page,
+          page_size: 1,
+          total_pages: 2,
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderList();
+    await waitFor(() => expect(screen.getByText("1ページ目の記事")).toBeInTheDocument());
+
+    // Act
+    fireEvent.click(screen.getByRole("button", { name: "次のページへ" }));
+
+    // Assert — 追記ではなく差し替わる
+    await waitFor(() => expect(screen.getByText("2ページ目の記事")).toBeInTheDocument());
+    expect(screen.queryByText("1ページ目の記事")).not.toBeInTheDocument();
+    const lastCall = fetchMock.mock.calls.at(-1) as [string];
+    expect(new URL(lastCall[0]).searchParams.get("page")).toBe("2");
+  }, TEST_TIMEOUT_MS);
+
+  it("requests the API with the search query and the tag filters restored from the URL", async () => {
+    // Arrange
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(listResponse([])));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Act
+    renderList("q=Rust&topics=LLM&topics=RAG&technologies=Python");
+
+    // Assert
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const [url] = fetchMock.mock.calls[0] as [string];
+    const searchParams = new URL(url).searchParams;
+    expect(searchParams.get("q")).toBe("Rust");
+    expect(searchParams.getAll("topics")).toEqual(["LLM", "RAG"]);
+    expect(searchParams.getAll("technologies")).toEqual(["Python"]);
   }, TEST_TIMEOUT_MS);
 });

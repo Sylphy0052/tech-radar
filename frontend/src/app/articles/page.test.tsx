@@ -22,6 +22,18 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
 }
 
+/** 1ページに収まる関心記事一覧レスポンス（番号付きページング、Issue #91）。 */
+function listResponse(items: InterestArticleItem[], overrides: Record<string, unknown> = {}): unknown {
+  return {
+    items,
+    total_count: items.length,
+    page: 1,
+    page_size: 20,
+    total_pages: items.length > 0 ? 1 : 0,
+    ...overrides,
+  };
+}
+
 function makeItem(overrides: Partial<InterestArticleItem> & { article_id: string }): InterestArticleItem {
   return {
     canonical_url: `https://example.com/${overrides.article_id}`,
@@ -45,7 +57,7 @@ function makeItem(overrides: Partial<InterestArticleItem> & { article_id: string
 describe("ArticlesPage", () => {
   it("renders the heading", async () => {
     // Arrange
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null })));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(listResponse([]))));
 
     // Act
     render(
@@ -61,7 +73,7 @@ describe("ArticlesPage", () => {
   it("fetches with the filters restored from the URL and shows them in the filter form", async () => {
     // Arrange — URL に既にフィルターが乗った状態でマウントする（リロード相当）
     const item = makeItem({ article_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", title: "絞り込み結果" });
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [item], next_cursor: null }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(listResponse([item])));
     vi.stubGlobal("fetch", fetchMock);
 
     // Act

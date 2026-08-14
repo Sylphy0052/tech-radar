@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_app_settings, get_current_user_id, get_now, get_session
 from techradar.api.feedback import ArticleFeedbackResponse
+from techradar.api.query_filters import reject_oversized_list
 from techradar.api.rate_limit import RATE_LIMITED_RESPONSES, enforce_recommendation_rate_limit
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, Recommendation, UserArticle
@@ -67,12 +68,12 @@ FEED_TEXT_FILTER_MAX_LENGTH = 256
 
 # topics / technologies の要素ごとの長さ上限。`FEED_TEXT_FILTER_MAX_LENGTH` と
 # 同じ値を使うが、FastAPI の `Query(max_length=...)` は `list[str]` の要素単位には
-# 効かない（リスト自体にしか効かない、実機で確認済み）ため、`_reject_oversized_list`
-# で明示的に検証する。
+# 効かない（リスト自体にしか効かない、実機で確認済み）ため、
+# `query_filters.reject_oversized_list` で明示的に検証する。
 FEED_LIST_FILTER_MAX_ITEM_LENGTH = 256
 
 # topics / technologies の件数上限。FastAPI の `Query` には件数の制約を表す機能が
-# 無いため、同様に `_reject_oversized_list` で明示的に検証する。
+# 無いため、同様に `query_filters.reject_oversized_list` で明示的に検証する。
 FEED_LIST_FILTER_MAX_ITEMS = 20
 
 
@@ -225,32 +226,6 @@ def _build_items(
         if feedback_by_article_id.get(article.id) is None
         or feedback_by_article_id[article.id].action != FeedbackAction.BAD.value
     ]
-
-
-def _reject_oversized_list(values: Sequence[str] | None, *, param_name: str) -> None:
-    """`topics` / `technologies` の件数・要素ごとの長さを検証し、超過なら 422。
-
-    FastAPI の `Query(max_length=...)` は `list[str]` の要素単位には効かず、
-    件数の制約を表す機能も無いため（実機で確認済み、`FEED_LIST_FILTER_MAX_ITEMS`
-    のコメント参照）、`api/articles.py` の `_reject_naive_datetime` と同じ
-    「関数本体で明示チェックして `HTTPException` を送出する」方式で検証する
-    （Issue #90 自己レビュー）。
-    """
-    if not values:
-        return
-    if len(values) > FEED_LIST_FILTER_MAX_ITEMS:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(f"{param_name} の件数が上限（{FEED_LIST_FILTER_MAX_ITEMS}件）を超えています"),
-        )
-    for value in values:
-        if len(value) > FEED_LIST_FILTER_MAX_ITEM_LENGTH:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=(
-                    f"{param_name} の要素は{FEED_LIST_FILTER_MAX_ITEM_LENGTH}文字以下にしてください"
-                ),
-            )
 
 
 def _resolve_discover_run_id(
@@ -417,8 +392,13 @@ def get_feed(
     古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を
     削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。
     """
-    _reject_oversized_list(topics, param_name="topics")
-    _reject_oversized_list(technologies, param_name="technologies")
+    for param_name, values in (("topics", topics), ("technologies", technologies)):
+        reject_oversized_list(
+            values,
+            param_name=param_name,
+            max_items=FEED_LIST_FILTER_MAX_ITEMS,
+            max_item_length=FEED_LIST_FILTER_MAX_ITEM_LENGTH,
+        )
 
     feed_filters = FeedFilters(
         query=q,
