@@ -152,6 +152,38 @@ class TestBuildPlan:
         # Assert
         assert [candidate.id for candidate in plan.candidates] == [literal_match.id]
 
+    def test_error_contains_treats_a_backslash_as_literal(self, db_session: Session) -> None:
+        r"""エスケープ文字自体（`\`）もリテラルとして扱われることを固定する（Issue #97）。
+
+        PostgreSQLのLIKEは`ESCAPE`句が無くても`\`をエスケープ文字として扱うため、
+        二重化しないまま`C:\temp`を渡すと`\t`が`t`と解釈され、バックスラッシュを含まない
+        `C:temp`まで一致してしまう。Windowsのパスやスタックトレースを失敗メッセージから
+        コピーして渡す運用では現実に踏みうる。
+
+        既存の`%`・`_`の2件では、この経路は押さえられていない。2026-08-15に実測した
+        （置換の記述はIssue #97の時点のもの）。
+
+        - 二重化の行だけを外す → このテストのみが落ち、`%`・`_`の2件は通る
+        - `%`・`_`を先に処理する順序へ入れ替える → `%`・`_`の2件が落ち、このテストは通る
+
+        つまり置換順序は既存の2件が既に押さえており、このテストが埋めるのは
+        「エスケープ文字自体を二重化すること」の側である。
+
+        `db/query.py`の単体テスト（`test_db_query.py`）は文字列変換の結果だけを見ており、
+        実際にPostgreSQLのLIKEを通した挙動までは見ていない。ここで押さえる。
+        """
+        # Arrange
+        literal_match = _make_failed_job(
+            db_session, JobType.EMBED_ARTICLE, last_error="failed at C:\\temp"
+        )
+        _make_failed_job(db_session, JobType.EMBED_ARTICLE, last_error="failed at C:temp")
+
+        # Act
+        plan = _build_plan(db_session, job_type=JobType.EMBED_ARTICLE, error_contains="C:\\temp")
+
+        # Assert
+        assert [candidate.id for candidate in plan.candidates] == [literal_match.id]
+
 
 class TestCheckMaxRequeue:
     def test_raises_when_candidates_exceed_the_limit(self, db_session: Session) -> None:
