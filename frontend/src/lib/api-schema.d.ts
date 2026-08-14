@@ -13,10 +13,14 @@ export interface paths {
         };
         /**
          * List Interest Articles
-         * @description 関心記事一覧を返す（`PROJECT_SPEC.md` §6.3）。
+         * @description 関心記事一覧を返す（`PROJECT_SPEC.md` §6.3、検索・絞り込み・ページングは Issue #91）。
          *
          *     手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）
-         *     降順で返す。タイブレークに `user_articles.id` を使い、cursor はこの2つの組から作る。
+         *     降順で返す。タイブレークに `user_articles.id` を使う。
+         *
+         *     ページングは番号付き（`page` / `limit`）で、`GET /api/feed` と同じく offset として
+         *     扱う。範囲外の `page` はエラーにせず空の `items` を返す。Issue #91 以前は cursor
+         *     方式だったが、目的のページへ直接移動できるようにするため置き換えた。
          */
         get: operations["list_interest_articles_api_articles_get"];
         put?: never;
@@ -700,13 +704,22 @@ export interface components {
         };
         /**
          * InterestArticleListResponse
-         * @description 関心記事一覧のレスポンス。
+         * @description 関心記事一覧のレスポンス（ページングは Issue #91 で番号付きへ変更）。
+         *
+         *     `GET /api/feed` の `FeedResponse` と同じ形にそろえ、画面側の
+         *     `components/ui/Pagination` を両方から同じように使えるようにする。
          */
         InterestArticleListResponse: {
             /** Items */
             items: components["schemas"]["InterestArticleItem"][];
-            /** Next Cursor */
-            next_cursor: string | null;
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Total Count */
+            total_count: number;
+            /** Total Pages */
+            total_pages: number;
         };
         /**
          * InterestClusterItem
@@ -1094,6 +1107,12 @@ export interface operations {
             query?: {
                 /** @description 登録方法。複数指定可 */
                 origin?: components["schemas"]["ArticleOrigin"][] | null;
+                /** @description 検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない） */
+                q?: string | null;
+                /** @description トピック。複数指定時は指定した全てを含む記事に絞る（AND） */
+                topics?: string[] | null;
+                /** @description 技術タグ。複数指定時は指定した全てを含む記事に絞る（AND） */
+                technologies?: string[] | null;
                 /** @description ジャンル大分類 */
                 domain?: string | null;
                 /** @description ジャンル中分類 */
@@ -1108,8 +1127,8 @@ export interface operations {
                 registered_to?: string | null;
                 /** @description 公式 / 非公式 */
                 is_primary_source?: boolean | null;
-                /** @description 前回レスポンスの next_cursor をそのまま渡す */
-                cursor?: string | null;
+                /** @description 1始まりのページ番号 */
+                page?: number;
                 limit?: number;
             };
             header?: never;

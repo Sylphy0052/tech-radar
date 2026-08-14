@@ -48,6 +48,12 @@ export function originLabel(origin: ArticleOrigin): string {
 
 export interface ArticleFilters {
   origin: ArticleOrigin[];
+  /** 検索語。title/translated_title/summary_jaへの部分一致（Issue #91）。 */
+  q: string | null;
+  /** 複数指定時は指定した全てを含む記事に絞る（AND、backend 側の仕様）。 */
+  topics: string[];
+  /** 複数指定時は指定した全てを含む記事に絞る（AND、backend 側の仕様）。 */
+  technologies: string[];
   domain: string | null;
   category: string | null;
   sourceDomain: string | null;
@@ -61,6 +67,9 @@ export interface ArticleFilters {
 
 export const EMPTY_ARTICLE_FILTERS: ArticleFilters = {
   origin: [],
+  q: null,
+  topics: [],
+  technologies: [],
   domain: null,
   category: null,
   sourceDomain: null,
@@ -98,6 +107,9 @@ export function parseArticleFiltersFromSearchParams(searchParams: URLSearchParam
   const isPrimarySourceRaw = searchParams.get("is_primary_source");
   return {
     origin: searchParams.getAll("origin").filter(isInterestArticleOrigin),
+    q: searchParams.get("q"),
+    topics: searchParams.getAll("topics"),
+    technologies: searchParams.getAll("technologies"),
     domain: searchParams.get("domain"),
     category: searchParams.get("category"),
     sourceDomain: searchParams.get("source_domain"),
@@ -115,6 +127,11 @@ export function parseArticleFiltersFromSearchParams(searchParams: URLSearchParam
 export function buildSearchParamsFromFilters(filters: ArticleFilters): URLSearchParams {
   const params = new URLSearchParams();
   filters.origin.forEach((origin) => params.append("origin", origin));
+  if (filters.q) {
+    params.set("q", filters.q);
+  }
+  filters.topics.forEach((topic) => params.append("topics", topic));
+  filters.technologies.forEach((technology) => params.append("technologies", technology));
   if (filters.domain) {
     params.set("domain", filters.domain);
   }
@@ -174,19 +191,24 @@ export function isoToJstDateInputValue(isoString: string): string {
 }
 
 interface ListInterestArticlesOptions {
-  /** 前回レスポンスの next_cursor をそのまま渡す。省略時は先頭ページを返す。 */
-  cursor?: string | null;
+  /** 1始まりのページ番号。省略時は backend の既定値（1）。 */
+  page?: number;
   limit?: number;
 }
 
-/** 関心記事一覧を取得する（`PROJECT_SPEC.md` §6.3）。 */
+/**
+ * 関心記事一覧を取得する（`PROJECT_SPEC.md` §6.3）。
+ *
+ * ページングは番号付き（`page` / `limit`）。Issue #91 以前は cursor 方式だったが、
+ * 目的のページへ直接移動できるようにするため置き換えた（`getFeed` と同じ形）。
+ */
 export function listInterestArticles(
   filters: ArticleFilters,
-  { cursor, limit }: ListInterestArticlesOptions = {},
+  { page, limit }: ListInterestArticlesOptions = {},
 ): Promise<InterestArticleListResponse> {
   const query = buildSearchParamsFromFilters(filters);
-  if (cursor) {
-    query.set("cursor", cursor);
+  if (page !== undefined) {
+    query.set("page", String(page));
   }
   if (limit !== undefined) {
     query.set("limit", String(limit));

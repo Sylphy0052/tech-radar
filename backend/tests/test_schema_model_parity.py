@@ -448,8 +448,23 @@ DERIVED_FIELDS: tuple[DerivedField, ...] = (
     ),
     DerivedField(
         InterestArticleListResponse,
-        "next_cursor",
-        "user_articles.created_at+idを符号化した不透明なページングcursor",
+        "total_count",
+        "絞り込み条件に一致する関心記事の総件数。単一のモデル列由来ではない集計値",
+    ),
+    DerivedField(
+        InterestArticleListResponse,
+        "page",
+        "要求されたページ番号をそのまま返すエコーバック。モデル列由来ではない",
+    ),
+    DerivedField(
+        InterestArticleListResponse,
+        "page_size",
+        "要求されたlimitをそのまま返すエコーバック。モデル列由来ではない",
+    ),
+    DerivedField(
+        InterestArticleListResponse,
+        "total_pages",
+        "total_countとpage_sizeから計算する総ページ数。単一のモデル列由来ではない集計値",
     ),
     DerivedField(
         CrawlRunCreate,

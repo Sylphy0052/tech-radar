@@ -21,6 +21,11 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
 }
 
+/** 空の関心記事一覧レスポンス（番号付きページングの形、Issue #91）。 */
+function emptyListResponse() {
+  return { items: [], total_count: 0, page: 1, page_size: 20, total_pages: 0 };
+}
+
 describe("parseArticleFiltersFromSearchParams", () => {
   it("returns empty filters when the search params are empty", () => {
     // Arrange
@@ -87,6 +92,21 @@ describe("parseArticleFiltersFromSearchParams", () => {
     expect(filters.registeredTo).toBeNull();
   }, TEST_TIMEOUT_MS);
 
+  it("reads the search query and the tag filters", () => {
+    // Arrange — トピック・技術タグは複数指定できる（backend では AND、Issue #91）
+    const searchParams = new URLSearchParams(
+      "q=Rust&topics=LLM&topics=RAG&technologies=Python",
+    );
+
+    // Act
+    const filters = parseArticleFiltersFromSearchParams(searchParams);
+
+    // Assert
+    expect(filters.q).toBe("Rust");
+    expect(filters.topics).toEqual(["LLM", "RAG"]);
+    expect(filters.technologies).toEqual(["Python"]);
+  }, TEST_TIMEOUT_MS);
+
   it("reads the remaining text and date filters", () => {
     // Arrange
     const searchParams = new URLSearchParams(
@@ -99,6 +119,9 @@ describe("parseArticleFiltersFromSearchParams", () => {
     // Assert
     expect(filters).toEqual({
       origin: [],
+      q: null,
+      topics: [],
+      technologies: [],
       domain: "ai",
       category: "llm",
       sourceDomain: "blog.example.com",
@@ -134,6 +157,9 @@ describe("buildSearchParamsFromFilters", () => {
     // Arrange
     const filters: ArticleFilters = {
       origin: ["manual"],
+      q: "Rust",
+      topics: ["LLM", "RAG"],
+      technologies: ["Python"],
       domain: "ai",
       category: "llm",
       sourceDomain: "blog.example.com",
@@ -148,6 +174,7 @@ describe("buildSearchParamsFromFilters", () => {
 
     // Assert
     expect(Object.fromEntries(params.entries())).toMatchObject({
+      q: "Rust",
       domain: "ai",
       category: "llm",
       source_domain: "blog.example.com",
@@ -157,12 +184,17 @@ describe("buildSearchParamsFromFilters", () => {
       is_primary_source: "true",
     });
     expect(params.getAll("origin")).toEqual(["manual"]);
+    expect(params.getAll("topics")).toEqual(["LLM", "RAG"]);
+    expect(params.getAll("technologies")).toEqual(["Python"]);
   }, TEST_TIMEOUT_MS);
 
   it("round-trips through parseArticleFiltersFromSearchParams", () => {
     // Arrange
     const filters: ArticleFilters = {
       origin: ["good", "saved"],
+      q: "Rust",
+      topics: ["LLM"],
+      technologies: [],
       domain: "ai",
       category: null,
       sourceDomain: null,
@@ -204,7 +236,7 @@ describe("JST date conversion helpers", () => {
 describe("listInterestArticles", () => {
   it("requests /api/articles without a query string when filters are empty", async () => {
     // Arrange
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(emptyListResponse()));
     vi.stubGlobal("fetch", fetchMock);
 
     // Act
@@ -217,9 +249,30 @@ describe("listInterestArticles", () => {
     );
   }, TEST_TIMEOUT_MS);
 
+  it("forwards the search query and the tag filters as query parameters", async () => {
+    // Arrange
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(emptyListResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Act
+    await listInterestArticles({
+      ...EMPTY_ARTICLE_FILTERS,
+      q: "Rust",
+      topics: ["LLM", "RAG"],
+      technologies: ["Python"],
+    });
+
+    // Assert
+    const [url] = fetchMock.mock.calls[0] as [string];
+    const searchParams = new URL(url).searchParams;
+    expect(searchParams.get("q")).toBe("Rust");
+    expect(searchParams.getAll("topics")).toEqual(["LLM", "RAG"]);
+    expect(searchParams.getAll("technologies")).toEqual(["Python"]);
+  }, TEST_TIMEOUT_MS);
+
   it("forwards a single filter as a query parameter", async () => {
     // Arrange
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(emptyListResponse()));
     vi.stubGlobal("fetch", fetchMock);
 
     // Act
@@ -230,15 +283,15 @@ describe("listInterestArticles", () => {
     expect(new URL(url).searchParams.get("domain")).toBe("ai");
   }, TEST_TIMEOUT_MS);
 
-  it("forwards combined filters and cursor/limit as query parameters", async () => {
+  it("forwards combined filters and page/limit as query parameters", async () => {
     // Arrange
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(emptyListResponse()));
     vi.stubGlobal("fetch", fetchMock);
 
     // Act
     await listInterestArticles(
       { ...EMPTY_ARTICLE_FILTERS, origin: ["good", "saved"], language: "ja", isPrimarySource: true },
-      { cursor: "page-2", limit: 50 },
+      { page: 2, limit: 50 },
     );
 
     // Assert
@@ -247,7 +300,7 @@ describe("listInterestArticles", () => {
     expect(searchParams.getAll("origin")).toEqual(["good", "saved"]);
     expect(searchParams.get("language")).toBe("ja");
     expect(searchParams.get("is_primary_source")).toBe("true");
-    expect(searchParams.get("cursor")).toBe("page-2");
+    expect(searchParams.get("page")).toBe("2");
     expect(searchParams.get("limit")).toBe("50");
   }, TEST_TIMEOUT_MS);
 });

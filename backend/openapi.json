@@ -529,7 +529,7 @@
         "type": "object"
       },
       "InterestArticleListResponse": {
-        "description": "関心記事一覧のレスポンス。",
+        "description": "関心記事一覧のレスポンス（ページングは Issue #91 で番号付きへ変更）。\n\n`GET /api/feed` の `FeedResponse` と同じ形にそろえ、画面側の\n`components/ui/Pagination` を両方から同じように使えるようにする。",
         "properties": {
           "items": {
             "items": {
@@ -538,21 +538,29 @@
             "title": "Items",
             "type": "array"
           },
-          "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Cursor"
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total_count": {
+            "title": "Total Count",
+            "type": "integer"
+          },
+          "total_pages": {
+            "title": "Total Pages",
+            "type": "integer"
           }
         },
         "required": [
           "items",
-          "next_cursor"
+          "total_count",
+          "page",
+          "page_size",
+          "total_pages"
         ],
         "title": "InterestArticleListResponse",
         "type": "object"
@@ -1437,7 +1445,7 @@
   "paths": {
     "/api/articles": {
       "get": {
-        "description": "関心記事一覧を返す（`PROJECT_SPEC.md` §6.3）。\n\n手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）\n降順で返す。タイブレークに `user_articles.id` を使い、cursor はこの2つの組から作る。",
+        "description": "関心記事一覧を返す（`PROJECT_SPEC.md` §6.3、検索・絞り込み・ページングは Issue #91）。\n\n手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）\n降順で返す。タイブレークに `user_articles.id` を使う。\n\nページングは番号付き（`page` / `limit`）で、`GET /api/feed` と同じく offset として\n扱う。範囲外の `page` はエラーにせず空の `items` を返す。Issue #91 以前は cursor\n方式だったが、目的のページへ直接移動できるようにするため置き換えた。",
         "operationId": "list_interest_articles_api_articles_get",
         "parameters": [
           {
@@ -1459,6 +1467,67 @@
               ],
               "description": "登録方法。複数指定可",
               "title": "Origin"
+            }
+          },
+          {
+            "description": "検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）",
+              "title": "Q"
+            }
+          },
+          {
+            "description": "トピック。複数指定時は指定した全てを含む記事に絞る（AND）",
+            "in": "query",
+            "name": "topics",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "トピック。複数指定時は指定した全てを含む記事に絞る（AND）",
+              "title": "Topics"
+            }
+          },
+          {
+            "description": "技術タグ。複数指定時は指定した全てを含む記事に絞る（AND）",
+            "in": "query",
+            "name": "technologies",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "技術タグ。複数指定時は指定した全てを含む記事に絞る（AND）",
+              "title": "Technologies"
             }
           },
           {
@@ -1594,21 +1663,16 @@
             }
           },
           {
-            "description": "前回レスポンスの next_cursor をそのまま渡す",
+            "description": "1始まりのページ番号",
             "in": "query",
-            "name": "cursor",
+            "name": "page",
             "required": false,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "前回レスポンスの next_cursor をそのまま渡す",
-              "title": "Cursor"
+              "default": 1,
+              "description": "1始まりのページ番号",
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
             }
           },
           {

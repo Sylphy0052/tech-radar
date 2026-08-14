@@ -5,6 +5,7 @@ import { useMemo } from "react";
 
 import { ErrorMessage } from "@/components/ui/ErrorMessage";
 import { LoadingIndicator } from "@/components/ui/LoadingIndicator";
+import { Pagination } from "@/components/ui/Pagination";
 import { useInterestArticles } from "@/hooks/useInterestArticles";
 import { formatDateTimeJa } from "@/lib/format-date";
 import {
@@ -97,49 +98,53 @@ function InterestArticleCard({ item, onRemove }: InterestArticleCardProps) {
  * フィルターは URL クエリから読む。`ArticleFilterPanel` と同じ
  * `parseArticleFiltersFromSearchParams` を使うため、フィルター条件を
  * コンポーネント間で二重管理することにならない（URL が唯一の情報源）。
+ *
+ * ページ番号は URL には載せず hook の state で持つ（`DiscoverFeed` と同じ）。
+ * 両画面まとめて URL へ載せる作業は Issue #95 で扱う。
  */
 export function InterestArticleList() {
   const searchParams = useSearchParams();
   const filters = useMemo(() => parseArticleFiltersFromSearchParams(searchParams), [searchParams]);
 
-  const { items, isLoading, isLoadingMore, error, hasMore, loadMore, removeArticle } =
+  const { items, isLoading, error, page, totalPages, totalCount, setPage, removeArticle } =
     useInterestArticles(filters);
-
-  if (isLoading) {
-    return <LoadingIndicator label="読み込み中..." />;
-  }
 
   return (
     <section className="flex flex-col gap-4">
       <h2 className="heading text-lg">関心記事一覧</h2>
       {error !== null && <ErrorMessage message={error} />}
 
-      {items.length > 0 && (
-        <div className="flex flex-col gap-4">
-          {items.map((item) => (
-            <InterestArticleCard
-              key={item.article_id}
-              item={item}
-              onRemove={() => removeArticle(item.article_id)}
-            />
-          ))}
-        </div>
-      )}
-
-      {items.length === 0 && !hasMore && (
-        <p className="text-sm text-ink-muted">該当する記事がありません。</p>
-      )}
-
-      {hasMore && (
-        <div className="flex flex-col items-center gap-2 py-2">
-          {isLoadingMore ? (
-            <LoadingIndicator label="さらに読み込み中..." />
+      {isLoading ? (
+        <LoadingIndicator label="読み込み中..." />
+      ) : (
+        <>
+          {items.length > 0 ? (
+            <div className="flex flex-col gap-4">
+              {items.map((item) => (
+                <InterestArticleCard
+                  key={item.article_id}
+                  item={item}
+                  onRemove={() => removeArticle(item.article_id)}
+                />
+              ))}
+            </div>
           ) : (
-            <button type="button" onClick={loadMore} className="btn">
-              さらに読み込む
-            </button>
+            <p className="text-sm text-ink-muted">
+              {/* 総件数が 0 のときと、そのページだけ空のときを区別する
+                  （`DiscoverFeed` と同じ扱い）。 */}
+              {totalCount === 0
+                ? "該当する記事がありません。"
+                : "このページには記事がありません。他のページを開いてください。"}
+            </p>
           )}
-        </div>
+
+          <Pagination
+            currentPage={page}
+            totalPages={totalPages}
+            totalCount={totalCount}
+            onPageChange={setPage}
+          />
+        </>
       )}
     </section>
   );
