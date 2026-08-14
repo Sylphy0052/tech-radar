@@ -17,6 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_current_user_id, get_now, get_session
+from techradar.api.query_filters import MAX_OFFSET
 from techradar.db.models import UserInterestCluster, UserTopicPreference
 from techradar.recommendation.config import get_scoring_config
 
@@ -70,7 +71,7 @@ def list_interest_topics(
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE, description="取得件数")] = (
         DEFAULT_PAGE_SIZE
     ),
-    offset: Annotated[int, Query(ge=0, description="スキップする件数")] = 0,
+    offset: Annotated[int, Query(ge=0, le=MAX_OFFSET, description="スキップする件数")] = 0,
 ) -> InterestTopicListResponse:
     """トピック単位の関心一覧を返す（`PROJECT_SPEC.md` §7.1, §7.2）。
 
