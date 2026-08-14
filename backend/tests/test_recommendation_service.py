@@ -663,6 +663,37 @@ class TestGenerateRecommendationsArticleBased:
         assert source_article.id not in item_ids
         assert related_article.id in item_ids
 
+    def test_novelty_differs_between_candidates_near_and_far_from_the_source(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 起点記事を唯一の中心として novelty に差が付く（Issue #89）。
+        # `cluster_centroids` を空のままにすると `compute_novelty` が既定値を返し、
+        # 記事起点推薦の novelty が候補によらず一律になる
+        user_id = uuid.uuid4()
+        source_article = make_article(
+            db_session, title="起点記事", embedding=make_embedding(0), topics=["llm"]
+        )
+        near_article = make_article(
+            db_session, title="起点に近い記事", embedding=make_embedding(0), topics=["llm"]
+        )
+        far_article = make_article(
+            db_session, title="起点から遠い記事", embedding=make_embedding(5), topics=["db"]
+        )
+
+        # Act
+        result = generate_recommendations(
+            db_session,
+            user_id,
+            RecommendationMode.ARTICLE_BASED,
+            settings,
+            NOW,
+            source_article_id=source_article.id,
+        )
+
+        # Assert
+        novelty_by_article_id = {item.candidate.id: item.breakdown.novelty for item in result.items}
+        assert novelty_by_article_id[near_article.id] < novelty_by_article_id[far_article.id]
+
     def test_works_when_the_source_article_has_no_embedding(
         self, db_session: Session, settings: Settings
     ):

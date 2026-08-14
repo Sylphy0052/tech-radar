@@ -20,6 +20,9 @@ dependencies = [
     "charset-normalizer>=3.4",
     "sentence-transformers>=3.3",
     "scikit-learn>=1.5",
+    # scikit-learn 経由の推移依存でしか入っていなかったが、`recommendation/ranking.py`
+    # が最近傍類似度の一括計算（Issue #89）で直接 import するため明示する。
+    "numpy>=2.0",
     "torch==2.13.0",
     # torch の XPU ビルドが要求する推移依存だが、PyPI には無く XPU インデックスにしか
     # 置かれていない。`explicit = true` のインデックスは直接依存しか解決しないため、

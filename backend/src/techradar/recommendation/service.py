@@ -28,12 +28,14 @@ from techradar.db import (
     UserSourcePreference,
 )
 from techradar.db.enums import ArticleOrigin, FeedbackAction, RecommendationMode
+from techradar.interest.clusters import build_interest_clusters
 from techradar.interest.service import (
+    load_cluster_sources,
     load_weighted_interest_articles,
     order_by_recency_and_truncate,
 )
 from techradar.recommendation.composition import CompositionStats, compose_feed_with_stats
-from techradar.recommendation.config import get_scoring_config
+from techradar.recommendation.config import clustering_settings_from_config, get_scoring_config
 from techradar.recommendation.ranking import (
     CandidateSignature,
     InterestProfile,
@@ -198,6 +200,18 @@ def build_interest_profile(
     `InterestProfile.bad_embeddings` へ別途集める（`_load_bad_embeddings`）。
     件数上限は `config/scoring.yaml` の `interest.max_bad_profile_articles`
     で管理し、新しい順に打ち切る。
+
+    `InterestProfile.cluster_centroids`（新規性の判定に使う、Issue #89）は
+    `user_interest_clusters` テーブルからは読まず、`interest.service.
+    load_cluster_sources` と `interest.clusters.build_interest_clusters` を
+    その場で呼んでその都度構築する。テーブルの中身は `rebuild_interest_clusters`
+    （Good/Bad のたびに非同期実行、`jobs/handlers/rebuild_interest_clusters.py`）
+    を回さないと更新されないため、そこから読むと未構築・古いままの状態で
+    推薦を回すことがあり、`compute_novelty` の `cluster_part` が
+    `default_when_no_embedding` へ張り付いたまま動かなくなる（Issue #87 と
+    同じ形の縮退を、テーブル未更新という別の経路で踏む）。KMeans の計算コスト
+    （実データ 69 件で数百 ms 程度）は Discover 生成 1 回あたりで許容できる範囲
+    のため、都度構築を選んだ。
     """
     del settings  # 現時点では未使用（呼び出し側との引数統一のために残す）。
 
@@ -214,9 +228,15 @@ def build_interest_profile(
         session, user_id, config.interest.max_bad_profile_articles
     )
 
+    cluster_sources = load_cluster_sources(session, user_id, now)
+    clustering_settings = clustering_settings_from_config(config)
+    clusters = build_interest_clusters(cluster_sources, clustering_settings)
+    cluster_centroids = tuple(cluster.centroid for cluster in clusters)
+
     return InterestProfile(
         embeddings=tuple(weighted_embeddings),
         bad_embeddings=bad_embeddings,
+        cluster_centroids=cluster_centroids,
     )
 
 
@@ -443,20 +463,26 @@ def _build_article_based_profile(
     起点記事を経由した推薦であっても、ユーザーが明示的に Bad と判断した
     記事に近い候補を勧めるべきではないのは Discover と共通の要件のため。
 
-    記事起点推薦では `embeddings` が起点記事自身の embedding 1 件だけになるため、
-    `compute_novelty`（新規性、Issue #87 以降は embedding ベース）は「候補が
-    起点記事の embedding からどれだけ離れているか」として働く。つまりここでの
-    novelty は一般的な「ユーザーにとって未知のテーマか」ではなく「起点記事と
-    意味的にどれだけ離れているか」を表す。
+    `cluster_centroids`（Issue #89 以降の `compute_novelty` が使う、`build_interest_profile`
+    参照）には起点記事の embedding を 1 件だけ入れる。記事起点推薦に「関心クラスタ」
+    という概念は無いが、この推薦にとって既知の中心は起点記事そのもの 1 点であり、
+    そこからの距離を新規性とみなすのは `build_interest_profile`（関心クラスタ群の
+    重心からの距離）と同じ意味になる。`build_interest_clusters` は呼ばない（起点
+    記事 1 件に KMeans を掛けても得られるのは同じ 1 点のため）。空のままにすると
+    `compute_novelty` が `default_when_no_embedding` を返し、候補ごとの差が全く
+    付かなくなる（`reasons.novelty` も一律になる）ため、埋めない選択は取らない。
     """
     source_article = session.get(Article, source_article_id)
     if source_article is None:
         message = f"起点記事が見つかりません: {source_article_id}"
         raise ValueError(message)
 
+    source_embedding = (
+        tuple(source_article.embedding) if source_article.embedding is not None else None
+    )
     embeddings = (
-        (WeightedEmbedding(vector=tuple(source_article.embedding), weight=_SOURCE_ARTICLE_WEIGHT),)
-        if source_article.embedding is not None
+        (WeightedEmbedding(vector=source_embedding, weight=_SOURCE_ARTICLE_WEIGHT),)
+        if source_embedding is not None
         else ()
     )
     config = get_scoring_config()
@@ -466,6 +492,7 @@ def _build_article_based_profile(
     return InterestProfile(
         embeddings=embeddings,
         bad_embeddings=bad_embeddings,
+        cluster_centroids=(source_embedding,) if source_embedding is not None else (),
     )
 
 

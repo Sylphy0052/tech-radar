@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from techradar.analysis.service import MAX_ANALYSIS_BODY_CHARACTERS
 from techradar.config import Settings
-from techradar.interest.clusters import ClusteringSettings, build_interest_clusters
+from techradar.interest.clusters import build_interest_clusters
 from techradar.interest.service import load_cluster_sources
 from techradar.measure.body_length import load_body_lengths, summarize_body_lengths
 from techradar.measure.clusters import summarize_clusters
@@ -26,7 +26,7 @@ from techradar.measure.feed_slots import summarize_feed_slots
 from techradar.measure.novelty import summarize_novelty
 from techradar.measure.report import Measurements
 from techradar.recommendation.composition import compose_feed_with_stats
-from techradar.recommendation.config import get_scoring_config
+from techradar.recommendation.config import clustering_settings_from_config, get_scoring_config
 from techradar.recommendation.ranking import rank_candidates
 from techradar.recommendation.service import build_interest_profile, load_candidates
 
@@ -53,13 +53,7 @@ def collect_measurements(
     )
 
     sources = load_cluster_sources(session, target_user_id, now)
-    clustering_settings = ClusteringSettings(
-        min_clusters=config.clustering.min_clusters,
-        max_clusters=config.clustering.max_clusters,
-        min_articles_per_cluster=config.clustering.min_articles_per_cluster,
-        label_topic_count=config.clustering.label_topic_count,
-        random_state=config.clustering.random_state,
-    )
+    clustering_settings = clustering_settings_from_config(config)
     clusters = summarize_clusters(sources, build_interest_clusters(sources, clustering_settings))
 
     profile = build_interest_profile(session, target_user_id, now, settings)

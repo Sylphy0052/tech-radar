@@ -27,7 +27,7 @@ from techradar.db.models import (
     UserTopicPreference,
 )
 from techradar.interest import sources
-from techradar.interest.clusters import ClusteringSettings, ClusterSource, build_interest_clusters
+from techradar.interest.clusters import ClusterSource, build_interest_clusters
 from techradar.interest.preferences import PreferenceDecaySettings, compute_negative_weight
 from techradar.interest.sources import SourceWeights
 from techradar.interest.topics import (
@@ -44,7 +44,11 @@ from techradar.interest.weights import (
     compute_recency_decay,
     explicit_weight_for_origin,
 )
-from techradar.recommendation.config import ScoringConfig, get_scoring_config
+from techradar.recommendation.config import (
+    ScoringConfig,
+    clustering_settings_from_config,
+    get_scoring_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -733,13 +737,7 @@ def rebuild_interest_clusters(session: Session, user_id: uuid.UUID, now: datetim
     """
     sources = load_cluster_sources(session, user_id, now)
     config = get_scoring_config()
-    clustering_settings = ClusteringSettings(
-        min_clusters=config.clustering.min_clusters,
-        max_clusters=config.clustering.max_clusters,
-        min_articles_per_cluster=config.clustering.min_articles_per_cluster,
-        label_topic_count=config.clustering.label_topic_count,
-        random_state=config.clustering.random_state,
-    )
+    clustering_settings = clustering_settings_from_config(config)
     clusters = build_interest_clusters(sources, clustering_settings)
 
     session.execute(delete(UserInterestCluster).where(UserInterestCluster.user_id == user_id))

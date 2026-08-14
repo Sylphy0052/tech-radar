@@ -383,92 +383,147 @@ class TestComputeFreshness:
 
 
 class TestComputeNovelty:
-    """embedding ベースの新規性を検証する（Issue #87）。
+    """クラスタ重心距離 × 候補集合内孤立度の新規性を検証する（Issue #89）。
 
-    旧実装は `topics` が既知トピック集合と1件も重ならないかどうかで判定して
-    おり、記事ごとの topics 語彙が少しでも揃わないと候補間の
-    novelty が軒並み 1.0 で飽和し、diversity 枠が構造的に選ばれなくなっていた。
-    新実装は候補の embedding と関心プロファイルの embedding 群とのコサイン
-    類似度の最大値を基準にする。
+    Issue #87 時点の実装は候補の embedding と関心記事群（`profile.embeddings`）
+    との最大コサイン類似度を裏返した値で、`compute_interest_similarity`
+    （上位 `top_k` 加重平均）とほぼ完全な相補になっていた（実データでの
+    Spearman 順位相関 -0.991）。実データ（関心記事 69 件 / 候補 163 件 /
+    クラスタ 8 個）で 6 式を比較し、`cluster_part`（関心クラスタ重心群との
+    距離）と `neighbor_part`（採点対象の他候補との孤立度）の min を採用した
+    （Spearman -0.687、分布 min 0.094 / p25 0.320 / p50 0.429 / p75 0.501 /
+    max 0.738）。`neighbor_part` は `rank_candidates` が
+    `_compute_neighbor_similarities` で一括計算し `neighbor_similarity` として
+    渡すため、ここでは既に計算済みの値として直接渡す。
     """
 
     def test_returns_the_default_when_the_candidate_has_no_embedding(self):
         # Arrange
-        profile = InterestProfile(
-            embeddings=make_weighted_embeddings((1.0, 0.0)),
-            bad_embeddings=(),
-        )
+        profile = InterestProfile(embeddings=(), bad_embeddings=(), cluster_centroids=((1.0, 0.0),))
         candidate = make_candidate(embedding=None)
 
         # Act / Assert
-        assert compute_novelty(candidate, profile, NOVELTY_SETTINGS) == (
+        assert compute_novelty(candidate, profile, NOVELTY_SETTINGS, neighbor_similarity=0.9) == (
             NOVELTY_SETTINGS.default_when_no_embedding
         )
 
-    def test_returns_the_default_when_the_interest_profile_has_no_embeddings(self):
-        # Arrange
+    def test_returns_the_default_when_cluster_centroids_is_empty(self):
+        # Arrange — クラスタ未構築・記事起点推薦などクラスタ概念が無いプロファイル
+        profile = InterestProfile(embeddings=(), bad_embeddings=(), cluster_centroids=())
         candidate = make_candidate(embedding=(1.0, 0.0))
 
         # Act / Assert
-        assert compute_novelty(candidate, EMPTY_PROFILE, NOVELTY_SETTINGS) == (
+        assert compute_novelty(candidate, profile, NOVELTY_SETTINGS, neighbor_similarity=0.9) == (
             NOVELTY_SETTINGS.default_when_no_embedding
         )
 
-    def test_returns_one_minus_the_cosine_similarity_to_the_closest_interest_embedding(self):
-        # Arrange — 直交ベクトル（類似度 0.0）なので新規性は 1.0
-        profile = InterestProfile(
-            embeddings=make_weighted_embeddings((1.0, 0.0)),
-            bad_embeddings=(),
-        )
-        candidate = make_candidate(embedding=(0.0, 1.0))
-
-        # Act / Assert
-        assert compute_novelty(candidate, profile, NOVELTY_SETTINGS) == pytest.approx(1.0)
-
-    def test_lowers_novelty_when_the_embedding_is_close_even_if_topics_never_overlap(self):
-        # Arrange — Issue #87 の核心の固定: どちらの候補も topics が
-        # 旧実装の既知トピック集合と1件も重ならない（旧実装なら両方とも
-        # novelty=1.0 で飽和していた）。embedding が近い候補だけ novelty が
-        # 下がることを固定する
-        profile = InterestProfile(
-            embeddings=make_weighted_embeddings((1.0, 0.0)),
-            bad_embeddings=(),
-        )
-        close_candidate = make_candidate(embedding=(1.0, 0.0), topics=("量子コンピュータ",))
-        far_candidate = make_candidate(embedding=(0.0, 1.0), topics=("量子コンピュータ",))
+    def test_is_higher_the_farther_the_candidate_is_from_the_nearest_cluster_centroid(self):
+        # Arrange — neighbor_similarity を揃え、cluster_centroids との距離だけ変える
+        profile = InterestProfile(embeddings=(), bad_embeddings=(), cluster_centroids=((1.0, 0.0),))
+        near_candidate = make_candidate(embedding=(1.0, 0.0))
+        far_candidate = make_candidate(embedding=(0.0, 1.0))
 
         # Act
-        close_novelty = compute_novelty(close_candidate, profile, NOVELTY_SETTINGS)
-        far_novelty = compute_novelty(far_candidate, profile, NOVELTY_SETTINGS)
+        near_novelty = compute_novelty(
+            near_candidate, profile, NOVELTY_SETTINGS, neighbor_similarity=0.0
+        )
+        far_novelty = compute_novelty(
+            far_candidate, profile, NOVELTY_SETTINGS, neighbor_similarity=0.0
+        )
 
         # Assert
-        assert close_novelty == pytest.approx(0.0)
+        assert far_novelty > near_novelty
+        assert near_novelty == pytest.approx(0.0)
         assert far_novelty == pytest.approx(1.0)
-        assert close_novelty < far_novelty
 
-    def test_uses_the_maximum_similarity_across_multiple_interest_embeddings(self):
-        # Arrange — 遠い関心記事が大量にあっても、最も近い1件が効く
-        # （top_k 加重平均ではなく最大値を使うことの固定）
-        profile = InterestProfile(
-            embeddings=make_weighted_embeddings((0.0, 1.0), (0.0, 1.0), (1.0, 0.0)),
-            bad_embeddings=(),
-        )
+    def test_is_higher_the_more_isolated_the_candidate_is_within_the_candidate_set(self):
+        # Arrange — cluster_centroids を候補と直交させ cluster_part を天井（1.0）に
+        # 固定し、neighbor_similarity だけを変える
+        profile = InterestProfile(embeddings=(), bad_embeddings=(), cluster_centroids=((0.0, 1.0),))
         candidate = make_candidate(embedding=(1.0, 0.0))
 
-        # Act / Assert — 最も近い1件（類似度 1.0）を基準にするため新規性はほぼ 0
-        assert compute_novelty(candidate, profile, NOVELTY_SETTINGS) == pytest.approx(0.0)
-
-    def test_does_not_exceed_one_when_the_cosine_similarity_is_negative(self):
-        # Arrange — 完全に逆向き（類似度 -1.0）だと 1 - (-1.0) = 2.0 になり
-        # [0.0, 1.0] を超えるため、1.0 に丸められることを固定する
-        profile = InterestProfile(
-            embeddings=make_weighted_embeddings((1.0, 0.0)),
-            bad_embeddings=(),
+        # Act
+        isolated_novelty = compute_novelty(
+            candidate, profile, NOVELTY_SETTINGS, neighbor_similarity=0.0
         )
+        crowded_novelty = compute_novelty(
+            candidate, profile, NOVELTY_SETTINGS, neighbor_similarity=0.99
+        )
+
+        # Assert
+        assert isolated_novelty > crowded_novelty
+
+    def test_is_the_minimum_of_cluster_part_and_neighbor_part(self):
+        # Arrange — cluster_part が低ければ neighbor_part（孤立度）が高くても
+        # 全体は低いまま（min であることの固定）
+        profile = InterestProfile(embeddings=(), bad_embeddings=(), cluster_centroids=((1.0, 0.0),))
+        candidate = make_candidate(embedding=(1.0, 0.0))  # cluster_part = 1 - 1.0 = 0.0
+
+        # Act — neighbor_similarity=0.0 なら neighbor_part = 1.0（完全に孤立）
+        novelty = compute_novelty(candidate, profile, NOVELTY_SETTINGS, neighbor_similarity=0.0)
+
+        # Assert
+        assert novelty == pytest.approx(0.0)
+
+    def test_returns_cluster_part_alone_when_there_is_no_other_candidate_to_compare(self):
+        # Arrange — 受入基準: 他の候補が無い（採点対象が自分だけ、または他が
+        # 全て embedding 無し）とき、既定値 0.5 との min にはならず
+        # cluster_part がそのまま返る
+        profile = InterestProfile(embeddings=(), bad_embeddings=(), cluster_centroids=((1.0, 0.0),))
+        candidate = make_candidate(embedding=(0.0, 1.0))  # cluster_part = 1 - 0.0 = 1.0
+
+        # Act
+        novelty = compute_novelty(candidate, profile, NOVELTY_SETTINGS, neighbor_similarity=None)
+
+        # Assert
+        assert novelty == pytest.approx(1.0)
+
+    def test_does_not_exceed_one_when_a_similarity_is_negative(self):
+        # Arrange — cluster_part / neighbor_part とも、コサイン類似度が負だと
+        # `1 - s` が 1.0 を超えるため clamp されることを固定する
+        profile = InterestProfile(embeddings=(), bad_embeddings=(), cluster_centroids=((1.0, 0.0),))
         candidate = make_candidate(embedding=(-1.0, 0.0))
 
         # Act / Assert
-        assert compute_novelty(candidate, profile, NOVELTY_SETTINGS) == 1.0
+        assert (
+            compute_novelty(candidate, profile, NOVELTY_SETTINGS, neighbor_similarity=-1.0) == 1.0
+        )
+
+    def test_interest_similarity_and_novelty_can_vary_independently(self):
+        """Issue #89 の回帰テスト。
+
+        Issue #87 時点の実装では novelty が interest_similarity の裏返しで
+        あり、interest_similarity を揃えたまま novelty が異なる候補の組を
+        作れなかった（実データでの Spearman 順位相関 -0.991）。新式では
+        interest_similarity（関心記事群との一致度）と novelty（関心クラスタ
+        重心群との距離）が別々のベクトル集合を参照するため、この組を作れる。
+        """
+        # Arrange — candidate_a / candidate_b は関心記事 (1.0, 0.0) に対して
+        # 同じ角度（45度、cos ≈ 0.7071）だが向きが逆で、クラスタ重心
+        # （candidate_a と同じ向き）からの距離は大きく異なる
+        interest_profile = InterestProfile(
+            embeddings=make_weighted_embeddings((1.0, 0.0)),
+            bad_embeddings=(),
+            cluster_centroids=((0.7071067812, 0.7071067812),),
+        )
+        candidate_a = make_candidate(embedding=(0.7071067812, 0.7071067812))
+        candidate_b = make_candidate(embedding=(0.7071067812, -0.7071067812))
+
+        # Act
+        interest_a = compute_interest_similarity(interest_profile, candidate_a, INTEREST_SETTINGS)
+        interest_b = compute_interest_similarity(interest_profile, candidate_b, INTEREST_SETTINGS)
+        novelty_a = compute_novelty(
+            candidate_a, interest_profile, NOVELTY_SETTINGS, neighbor_similarity=None
+        )
+        novelty_b = compute_novelty(
+            candidate_b, interest_profile, NOVELTY_SETTINGS, neighbor_similarity=None
+        )
+
+        # Assert — interest_similarity は同じだが novelty は異なる
+        assert interest_a == pytest.approx(interest_b, rel=1e-3)
+        assert novelty_a == pytest.approx(0.0, abs=1e-3)
+        assert novelty_b == pytest.approx(1.0, abs=1e-3)
+        assert novelty_a != pytest.approx(novelty_b)
 
 
 class TestComputeBadSimilarityPenalty:
@@ -577,8 +632,8 @@ class TestScoreCandidate:
         )
 
         # Act
-        first = score_candidate(candidate, profile, SETTINGS, NOW)
-        second = score_candidate(candidate, profile, SETTINGS, NOW)
+        first = score_candidate(candidate, profile, SETTINGS, NOW, neighbor_similarity=None)
+        second = score_candidate(candidate, profile, SETTINGS, NOW, neighbor_similarity=None)
 
         # Assert
         assert first == second
@@ -588,7 +643,9 @@ class TestScoreCandidate:
         candidate = make_candidate(embedding=None, topics=())
 
         # Act
-        breakdown = score_candidate(candidate, EMPTY_PROFILE, SETTINGS, NOW)
+        breakdown = score_candidate(
+            candidate, EMPTY_PROFILE, SETTINGS, NOW, neighbor_similarity=None
+        )
 
         # Assert
         assert breakdown.interest_similarity == 0.0
@@ -600,8 +657,8 @@ class TestScoreCandidate:
         profile = InterestProfile(embeddings=(), bad_embeddings=())
 
         # Act
-        good_breakdown = score_candidate(good, profile, SETTINGS, NOW)
-        bad_breakdown = score_candidate(bad, profile, SETTINGS, NOW)
+        good_breakdown = score_candidate(good, profile, SETTINGS, NOW, neighbor_similarity=None)
+        bad_breakdown = score_candidate(bad, profile, SETTINGS, NOW, neighbor_similarity=None)
 
         # Assert
         assert bad_breakdown.bad_penalty == PENALTIES.bad
@@ -614,8 +671,8 @@ class TestScoreCandidate:
         profile = InterestProfile(embeddings=(), bad_embeddings=())
 
         # Act
-        unread_breakdown = score_candidate(unread, profile, SETTINGS, NOW)
-        read_breakdown = score_candidate(read, profile, SETTINGS, NOW)
+        unread_breakdown = score_candidate(unread, profile, SETTINGS, NOW, neighbor_similarity=None)
+        read_breakdown = score_candidate(read, profile, SETTINGS, NOW, neighbor_similarity=None)
 
         # Assert
         assert read_breakdown.read_penalty == PENALTIES.read
@@ -628,8 +685,12 @@ class TestScoreCandidate:
         profile = InterestProfile(embeddings=(), bad_embeddings=())
 
         # Act
-        original_breakdown = score_candidate(original, profile, SETTINGS, NOW)
-        duplicate_breakdown = score_candidate(duplicate, profile, SETTINGS, NOW)
+        original_breakdown = score_candidate(
+            original, profile, SETTINGS, NOW, neighbor_similarity=None
+        )
+        duplicate_breakdown = score_candidate(
+            duplicate, profile, SETTINGS, NOW, neighbor_similarity=None
+        )
 
         # Assert
         assert duplicate_breakdown.duplicate_penalty == 0.6
@@ -642,8 +703,12 @@ class TestScoreCandidate:
         profile = InterestProfile(embeddings=(), bad_embeddings=((1.0, 0.0),))
 
         # Act
-        near_breakdown = score_candidate(near_bad_candidate, profile, SETTINGS, NOW)
-        far_breakdown = score_candidate(far_from_bad_candidate, profile, SETTINGS, NOW)
+        near_breakdown = score_candidate(
+            near_bad_candidate, profile, SETTINGS, NOW, neighbor_similarity=None
+        )
+        far_breakdown = score_candidate(
+            far_from_bad_candidate, profile, SETTINGS, NOW, neighbor_similarity=None
+        )
 
         # Assert
         assert near_breakdown.bad_similarity_penalty == pytest.approx(
@@ -659,7 +724,7 @@ class TestScoreCandidate:
         profile = InterestProfile(embeddings=(), bad_embeddings=())
 
         # Act
-        breakdown = score_candidate(candidate, profile, SETTINGS, NOW)
+        breakdown = score_candidate(candidate, profile, SETTINGS, NOW, neighbor_similarity=None)
 
         # Assert
         assert breakdown.technical_quality == expected
@@ -679,7 +744,7 @@ class TestScoreCandidate:
         )
 
         # Act
-        breakdown = score_candidate(candidate, profile, SETTINGS, NOW)
+        breakdown = score_candidate(candidate, profile, SETTINGS, NOW, neighbor_similarity=None)
         reasons = breakdown.to_reasons()
 
         # Assert
@@ -724,7 +789,7 @@ class TestAuthorityGate:
         )
 
         # Act
-        breakdown = score_candidate(candidate, profile, settings, NOW)
+        breakdown = score_candidate(candidate, profile, settings, NOW, neighbor_similarity=None)
 
         # Assert
         assert breakdown.interest_similarity < 0.0
@@ -739,7 +804,7 @@ class TestAuthorityGate:
         )
 
         # Act
-        breakdown = score_candidate(candidate, profile, SETTINGS, NOW)
+        breakdown = score_candidate(candidate, profile, SETTINGS, NOW, neighbor_similarity=None)
 
         # Assert
         assert breakdown.authority_gate_factor == 1.0
@@ -756,7 +821,7 @@ class TestAuthorityGate:
         )
 
         # Act
-        breakdown = score_candidate(candidate, profile, SETTINGS, NOW)
+        breakdown = score_candidate(candidate, profile, SETTINGS, NOW, neighbor_similarity=None)
 
         # Assert
         assert breakdown.interest_similarity == pytest.approx(0.0)
@@ -776,7 +841,7 @@ class TestAuthorityGate:
         )
 
         # Act
-        breakdown = score_candidate(candidate, profile, SETTINGS, NOW)
+        breakdown = score_candidate(candidate, profile, SETTINGS, NOW, neighbor_similarity=None)
 
         # Assert
         assert breakdown.authority_gate_factor == pytest.approx(AUTHORITY_GATE.min_factor)
@@ -794,7 +859,7 @@ class TestAuthorityGate:
         )
 
         # Act
-        breakdown = score_candidate(candidate, profile, settings, NOW)
+        breakdown = score_candidate(candidate, profile, settings, NOW, neighbor_similarity=None)
 
         # Assert
         assert breakdown.interest_similarity == pytest.approx(0.4, rel=1e-3)
@@ -852,8 +917,12 @@ class TestSourcePreferenceInScore:
         neutral = make_candidate(embedding=(1.0, 0.0), source_authority=0.8)
 
         # Act
-        preferred_breakdown = score_candidate(preferred, self._profile(), SETTINGS, NOW)
-        neutral_breakdown = score_candidate(neutral, self._profile(), SETTINGS, NOW)
+        preferred_breakdown = score_candidate(
+            preferred, self._profile(), SETTINGS, NOW, neighbor_similarity=None
+        )
+        neutral_breakdown = score_candidate(
+            neutral, self._profile(), SETTINGS, NOW, neighbor_similarity=None
+        )
 
         # Assert
         assert preferred_breakdown.total > neutral_breakdown.total
@@ -867,8 +936,12 @@ class TestSourcePreferenceInScore:
         neutral = make_candidate(embedding=(1.0, 0.0), source_authority=0.8)
 
         # Act
-        suppressed_breakdown = score_candidate(suppressed, self._profile(), SETTINGS, NOW)
-        neutral_breakdown = score_candidate(neutral, self._profile(), SETTINGS, NOW)
+        suppressed_breakdown = score_candidate(
+            suppressed, self._profile(), SETTINGS, NOW, neighbor_similarity=None
+        )
+        neutral_breakdown = score_candidate(
+            neutral, self._profile(), SETTINGS, NOW, neighbor_similarity=None
+        )
 
         # Assert
         assert suppressed_breakdown.total < neutral_breakdown.total
@@ -884,7 +957,9 @@ class TestSourcePreferenceInScore:
         )
 
         # Act
-        breakdown = score_candidate(candidate, self._profile(), SETTINGS, NOW)
+        breakdown = score_candidate(
+            candidate, self._profile(), SETTINGS, NOW, neighbor_similarity=None
+        )
 
         # Assert
         assert breakdown.source_preference_factor == pytest.approx(1.3)
@@ -900,7 +975,9 @@ class TestSourcePreferenceInScore:
         candidate = make_candidate(embedding=(1.0, 0.0), source_authority=0.8)
 
         # Act
-        breakdown = score_candidate(candidate, self._profile(), SETTINGS, NOW)
+        breakdown = score_candidate(
+            candidate, self._profile(), SETTINGS, NOW, neighbor_similarity=None
+        )
 
         # Assert
         assert breakdown.source_preference_factor == pytest.approx(1.0)
@@ -1026,6 +1103,43 @@ class TestRankCandidates:
         assert default_ranked[0].candidate.id == strong_interest_stale.id
         assert freshness_ranked[0].candidate.id == weak_interest_fresh.id
 
+    def test_lowers_novelty_for_a_candidate_crowded_by_near_duplicates(self):
+        # Arrange — 受入基準: rank_candidates 経由で neighbor_part（Issue #89）が
+        # 実際に効いている。cluster_centroids を全候補と直交させて cluster_part を
+        # 天井（1.0）に固定し、neighbor_part だけで novelty が決まるようにする
+        profile = InterestProfile(
+            embeddings=(), bad_embeddings=(), cluster_centroids=((0.0, 0.0, 1.0),)
+        )
+        isolated = make_candidate(embedding=(1.0, 0.0, 0.0))
+        duplicate_a = make_candidate(embedding=(0.0, 1.0, 0.0))
+        duplicate_b = make_candidate(embedding=(0.0, 1.0, 0.0))
+
+        # Act
+        ranked = rank_candidates((isolated, duplicate_a, duplicate_b), profile, SETTINGS, NOW)
+        novelty_by_id = {item.candidate.id: item.breakdown.novelty for item in ranked}
+
+        # Assert — 孤立した候補は novelty が高く、集合内で重複した候補は低い
+        assert novelty_by_id[isolated.id] == pytest.approx(1.0)
+        assert novelty_by_id[duplicate_a.id] == pytest.approx(0.0)
+        assert novelty_by_id[duplicate_b.id] == pytest.approx(0.0)
+
+    def test_does_not_raise_when_candidate_embedding_dimensions_differ(self):
+        # Arrange — 次元の異なる embedding が混ざっても例外にならず、
+        # 次元の合わない候補は最近傍比較の対象から外れる（`_compute_neighbor_similarities`
+        # の仕様、Issue #89）。cluster_centroids は次元不一致なら
+        # `cosine_similarity` が 0.0 を返す仕様のため cluster_part は 1.0 になる
+        profile = InterestProfile(embeddings=(), bad_embeddings=(), cluster_centroids=((0.0, 1.0),))
+        normal_a = make_candidate(embedding=(1.0, 0.0))
+        normal_b = make_candidate(embedding=(1.0, 0.0))
+        odd_dimension = make_candidate(embedding=(1.0, 0.0, 0.0))
+
+        # Act
+        ranked = rank_candidates((normal_a, normal_b, odd_dimension), profile, SETTINGS, NOW)
+        novelty_by_id = {item.candidate.id: item.breakdown.novelty for item in ranked}
+
+        # Assert
+        assert novelty_by_id[odd_dimension.id] == pytest.approx(1.0)
+
 
 class TestBuildReasonSummary:
     def test_returns_a_japanese_sentence_citing_the_top_two_contributions(self):
@@ -1035,7 +1149,7 @@ class TestBuildReasonSummary:
             embeddings=make_weighted_embeddings((1.0, 0.0)),
             bad_embeddings=(),
         )
-        breakdown = score_candidate(candidate, profile, SETTINGS, NOW)
+        breakdown = score_candidate(candidate, profile, SETTINGS, NOW, neighbor_similarity=None)
 
         # Act
         summary = build_reason_summary(breakdown)

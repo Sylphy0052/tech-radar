@@ -102,15 +102,20 @@ feed_composition:
   # 一致度の分布は p50 0.456 / p95 0.669 / max 0.755 で、この閾値を超える候補が
   # 67 件あり定員 55 を満たす（ADR 0006）
   strong_interest_min_similarity: 0.5
-  # novelty は「関心プロファイル中、最も近い記事1件からの embedding 距離」
-  # （1 - 最大コサイン類似度、0〜1）。最も近い関心記事とも半分以上離れている
-  # 記事を「新規テーマ探索」枠の対象にする。
-  # 2026-08-14 に実データ（関心記事 69 件 / 候補 169 件）で確認し、据え置いた。
-  # novelty の分布は p25 0.430 / p50 0.523 / p75 0.610 / max 0.754。閾値を
-  # 0.1 刻みで動かすと exploration / diversity の件数は 0.5 で 34 / 5、
-  # 0.6 で 16 / 23、0.7 で 1 / 38 となる。定員は exploration 15 / diversity 5
-  # なので、両枠が自前の候補で埋まるのは 0.6 だけである（ADR 0007）
-  exploration_min_novelty: 0.6
+  # novelty は「関心クラスタ重心からの距離」と「同じ採点対象の他候補との
+  # 孤立度」の min（0〜1、`ranking.compute_novelty`、Issue #89）。旧式
+  # （関心プロファイル中、最も近い記事1件からの embedding 距離）は
+  # interest_similarity と Spearman 順位相関 -0.991 とほぼ完全な相補で、
+  # 枠判定が実質 1 軸になっていたため置き換えた。
+  # 2026-08-14 に実データ（関心記事 69 件 / 候補 163 件 / クラスタ 8 個）で
+  # 新式を確認した。新式の novelty と interest_similarity の Spearman は
+  # -0.687、分布は min 0.094 / p25 0.320 / p50 0.429 / p75 0.501 / max 0.738。
+  # strong_interest（上位2枠）を外れた候補 37 件で閾値を 0.1 刻みに動かすと
+  # exploration / diversity の件数は 0.3 で 32 / 5、0.4 で 31 / 6、0.5 で
+  # 19 / 18、0.6 で 2 / 35、0.7 で 1 / 36 となる。定員は exploration 15 /
+  # diversity 5 で、両枠が自前の候補で埋まるのは 0.4 と 0.5 だけであり、
+  # 0.5 の方が diversity 側の余裕（定員 5 に対し 18 件）が大きいため採用した
+  exploration_min_novelty: 0.5
 
 limits:
   # 1 回の実行で採点する候補数の上限。dedup.yaml の max_articles_per_run と
