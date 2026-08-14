@@ -90,13 +90,12 @@ describe("useInterestArticles", () => {
     const fetchMock = stubListPages();
 
     // Act
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS, 1));
 
     // Assert
     expect(result.current.isLoading).toBe(true);
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.items).toEqual([itemA, itemB]);
-    expect(result.current.page).toBe(1);
     expect(result.current.totalPages).toBe(2);
     expect(result.current.totalCount).toBe(4);
     expect(result.current.error).toBeNull();
@@ -107,35 +106,62 @@ describe("useInterestArticles", () => {
   it("replaces items with the requested page instead of appending", async () => {
     // Arrange
     stubListPages();
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result, rerender } = renderHook(
+      ({ page }) => useInterestArticles(EMPTY_ARTICLE_FILTERS, page),
+      { initialProps: { page: 1 } },
+    );
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
-    // Act
-    act(() => {
-      result.current.setPage(2);
-    });
-    await waitFor(() => expect(result.current.page).toBe(2));
+    // Act — ページ番号は URL 由来で、呼び出し側が渡し直す（Issue #100、`useFeed` と同じ）
+    rerender({ page: 2 });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Assert — 2ページ目の内容にまるごと差し替わる（追記ではない）
     expect(result.current.items).toEqual([itemB, itemC]);
   }, TEST_TIMEOUT_MS);
 
-  it("requests the API again with the new page number when setPage is called", async () => {
+  it("requests the API again when the page argument changes", async () => {
     // Arrange
     const fetchMock = stubListPages({ 1: [itemA], 2: [itemB] });
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result, rerender } = renderHook(
+      ({ page }) => useInterestArticles(EMPTY_ARTICLE_FILTERS, page),
+      { initialProps: { page: 1 } },
+    );
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
-    act(() => {
-      result.current.setPage(2);
-    });
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    rerender({ page: 2 });
 
-    // Assert
+    // Assert — 渡し直した直後から読み込み中になる（`InterestArticleList` がページャを
+    // 押した瞬間にローディング表示へ切り替わる）
+    expect(result.current.isLoading).toBe(true);
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
     const lastCall = fetchMock.mock.calls.at(-1) as [string];
     expect(pageFromUrl(lastCall[0])).toBe(2);
+  }, TEST_TIMEOUT_MS);
+
+  it("refetches with the new filters and the page it is given", async () => {
+    // ページ番号を1へ戻すのはこの hook の役目ではない（Issue #100 で URL 側へ移した、
+    // `useFeed` と同じ設計）。`ArticleFilterPanel` がフィルター変更時に URL を
+    // 組み立て直すと `page` が落ちるため、ここには1ページ目が渡ってくる。hook は
+    // それをそのまま使って取り直す。URL から `page` が消えることの検証は
+    // `InterestArticleList.test.tsx` にある。
+    const fetchMock = stubListPages({ 1: [itemA], 2: [itemB] });
+    const { result, rerender } = renderHook(
+      ({ filters, page }: { filters: ArticleFilters; page: number }) =>
+        useInterestArticles(filters, page),
+      { initialProps: { filters: EMPTY_ARTICLE_FILTERS, page: 2 } },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act — 条件を変え、あわせて1ページ目を渡す（URL 側で `page` が落ちた状態）
+    rerender({ filters: { ...EMPTY_ARTICLE_FILTERS, language: "ja" }, page: 1 });
+
+    // Assert
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    const lastCall = fetchMock.mock.calls.at(-1) as [string];
+    expect(pageFromUrl(lastCall[0])).toBe(1);
+    expect(new URL(lastCall[0]).searchParams.get("language")).toBe("ja");
   }, TEST_TIMEOUT_MS);
 
   it("discards a stale response when the page changes again before the first request resolves", async () => {
@@ -157,16 +183,15 @@ describe("useInterestArticles", () => {
       });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result, rerender } = renderHook(
+      ({ page }) => useInterestArticles(EMPTY_ARTICLE_FILTERS, page),
+      { initialProps: { page: 1 } },
+    );
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
-    act(() => {
-      result.current.setPage(2);
-    });
-    act(() => {
-      result.current.setPage(3);
-    });
+    rerender({ page: 2 });
+    rerender({ page: 3 });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // ページ2の応答が（3へ移った）後から解決しても反映されない
@@ -175,7 +200,6 @@ describe("useInterestArticles", () => {
     );
 
     // Assert
-    expect(result.current.page).toBe(3);
     expect(result.current.items).toEqual([itemC]);
   }, TEST_TIMEOUT_MS);
 
@@ -184,7 +208,7 @@ describe("useInterestArticles", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(listResponse([]))));
 
     // Act
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS, 1));
 
     // Assert
     await waitFor(() => expect(result.current.isLoading).toBe(false));
@@ -199,7 +223,7 @@ describe("useInterestArticles", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
 
     // Act
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS, 1));
 
     // Assert
     await waitFor(() => expect(result.current.isLoading).toBe(false));
@@ -212,7 +236,7 @@ describe("useInterestArticles", () => {
     const filters: ArticleFilters = { ...EMPTY_ARTICLE_FILTERS, origin: ["good"], domain: "ai" };
 
     // Act
-    renderHook(() => useInterestArticles(filters));
+    renderHook(() => useInterestArticles(filters, 1));
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
 
     // Assert
@@ -222,42 +246,21 @@ describe("useInterestArticles", () => {
     expect(searchParams.get("domain")).toBe("ai");
   }, TEST_TIMEOUT_MS);
 
-  it("resets to page 1 and refetches when the filters change", async () => {
-    // Arrange
-    const fetchMock = stubListPages({ 1: [itemA], 2: [itemB] });
-    const { result, rerender } = renderHook(({ filters }) => useInterestArticles(filters), {
-      initialProps: { filters: EMPTY_ARTICLE_FILTERS },
-    });
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-    act(() => {
-      result.current.setPage(2);
-    });
-    await waitFor(() => expect(result.current.page).toBe(2));
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-
-    // Act — 条件を変える
-    rerender({ filters: { ...EMPTY_ARTICLE_FILTERS, language: "ja" } });
-
-    // Assert — 受入基準: 条件を変えたらページ番号が1へ戻る
-    await waitFor(() => expect(result.current.page).toBe(1));
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-    const lastCall = fetchMock.mock.calls.at(-1) as [string];
-    expect(pageFromUrl(lastCall[0])).toBe(1);
-    expect(new URL(lastCall[0]).searchParams.get("language")).toBe("ja");
-  }, TEST_TIMEOUT_MS);
-
   it("sends the search query and the tag filters as query parameters", async () => {
     // Arrange — 受入基準: 検索語・topics・technologies が API まで届く（Issue #91）
     const fetchMock = stubListPages();
 
     // Act
     renderHook(() =>
-      useInterestArticles({
-        ...EMPTY_ARTICLE_FILTERS,
-        q: "Rust",
-        topics: ["LLM", "RAG"],
-        technologies: ["Python"],
-      }),
+      useInterestArticles(
+        {
+          ...EMPTY_ARTICLE_FILTERS,
+          q: "Rust",
+          topics: ["LLM", "RAG"],
+          technologies: ["Python"],
+        },
+        1,
+      ),
     );
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
 
@@ -278,7 +281,7 @@ describe("useInterestArticles", () => {
       return jsonResponse(listResponse([itemA, itemB]));
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
@@ -306,7 +309,7 @@ describe("useInterestArticles", () => {
       return jsonResponse(listResponse([itemA]));
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.totalCount).toBe(1);
 
@@ -329,7 +332,7 @@ describe("useInterestArticles", () => {
       return jsonResponse(listResponse([itemA, itemB]));
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
@@ -358,7 +361,7 @@ describe("useInterestArticles", () => {
       return jsonResponse(listResponse([itemA]));
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
@@ -375,7 +378,7 @@ describe("useInterestArticles", () => {
     // Arrange
     const fetchMock = stubListPages();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const callCountBefore = fetchMock.mock.calls.length;
 
@@ -396,7 +399,7 @@ describe("useInterestArticles", () => {
     // （`useFeed` の同名テストと同じ狙い。Issue #45）。
     stubListPages();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS, 1));
     const removeArticleWhileEmpty = result.current.removeArticle;
     expect(result.current.items).toEqual([]);
 
@@ -423,7 +426,7 @@ describe("useInterestArticles", () => {
     // 固定する（`useFeed` の同名テストと対になる。Issue #45）。
     stubListPages();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS, 1));
     const removeArticleWhileEmpty = result.current.removeArticle;
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
