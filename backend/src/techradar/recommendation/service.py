@@ -29,7 +29,7 @@ from techradar.db import (
     UserSourcePreference,
 )
 from techradar.db.enums import ArticleOrigin, FeedbackAction, RecommendationMode
-from techradar.db.query import escape_like_pattern
+from techradar.db.query import LIKE_ESCAPE_CHAR, escape_like_pattern
 from techradar.interest.clusters import InterestCluster, build_interest_clusters
 from techradar.interest.service import (
     load_cluster_sources,
@@ -364,9 +364,9 @@ def load_candidates(
             pattern = f"%{escape_like_pattern(feed_filters.query)}%"
             filters.append(
                 or_(
-                    Article.title.ilike(pattern, escape="\\"),
-                    Article.translated_title.ilike(pattern, escape="\\"),
-                    Article.summary_ja.ilike(pattern, escape="\\"),
+                    Article.title.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+                    Article.translated_title.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+                    Article.summary_ja.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
                 )
             )
         if feed_filters.topics:

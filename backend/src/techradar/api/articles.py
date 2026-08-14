@@ -35,7 +35,7 @@ from techradar.api.query_filters import reject_oversized_list
 from techradar.db.enums import ArticleOrigin, JobStatus, JobType
 from techradar.db.errors import is_unique_violation
 from techradar.db.models import Article, ArticleRegistration, UserArticle
-from techradar.db.query import escape_like_pattern
+from techradar.db.query import LIKE_ESCAPE_CHAR, escape_like_pattern
 from techradar.fetcher.url import normalize_url
 from techradar.jobs.queue import enqueue
 
@@ -612,9 +612,9 @@ def _build_interest_article_filters(
         pattern = f"%{escape_like_pattern(query)}%"
         filters.append(
             or_(
-                Article.title.ilike(pattern, escape="\\"),
-                Article.translated_title.ilike(pattern, escape="\\"),
-                Article.summary_ja.ilike(pattern, escape="\\"),
+                Article.title.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+                Article.translated_title.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+                Article.summary_ja.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
             )
         )
     if topics:
