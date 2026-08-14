@@ -4,9 +4,11 @@
 どちらも自由入力の検索語と topics / technologies を受け取る。上限の値そのものは
 エンドポイントごとに定数で持つが、検証の規則は同じなのでここへ集約する。
 
-ただし `page` の上限（`MAX_PAGE_NUMBER`）だけはこの方針の例外で、値そのものを
-ここで共有する。DB の bigint に収まる OFFSET かどうかという制約から決まる値であり、
-エンドポイントごとの事情で変わらないため（Issue #96）。
+ただし OFFSET の大きさに関する上限（`MAX_PAGE_NUMBER` と `MAX_OFFSET`）は
+この方針の例外で、値そのものをここで共有する。DB の bigint に収まるかどうかという
+制約から決まる値であり、エンドポイントごとの事情で変わらないため（Issue #96、#99）。
+この2つは `page` を持つ2エンドポイントと、`offset` を直接受け取る
+`GET /api/sources` / `GET /api/interests` にそれぞれ効く。
 """
 
 from __future__ import annotations
@@ -32,6 +34,24 @@ from fastapi import HTTPException, status
 # offset が 10**8 に収まり、実測どおり DB が即座に返せる範囲であることから
 # 決めた安全弁。現在の記事数は261件で、実用上はまず到達しない。
 MAX_PAGE_NUMBER = 1_000_000
+
+# `GET /api/sources` と `GET /api/interests` が受け取る `offset` 直指定の上限
+# （Issue #99）。この2エンドポイントは `page` を持たず `offset` を直接クエリ
+# パラメータとして受け取るため、`MAX_PAGE_NUMBER` と同じ理屈がそのまま
+# `offset` 自身にも当てはまる：上限が無いと巨大な `offset` がそのまま DB へ渡り、
+# bigint（signed 64bit）を超えたところで `MAX_PAGE_NUMBER` のコメントに書いた
+# 同じ `DataError`（`NumericValueOutOfRange`）が素通りで 500 になる。422 で弾く
+# 方式にする理由も同じ（`limit` 側の `le` と扱いを揃える、上限が OpenAPI へ出る、
+# 黙って結果をすり替えない）。
+#
+# 値は `page` 経由で到達できる範囲に合わせた。`page` 側で作れる最大 OFFSET は
+# `(MAX_PAGE_NUMBER - 1) * 100`（= 99,999,900）で、これを丸めた 10**8 にしてある。
+# 経路が `page` でも `offset` 直指定でも、到達できる範囲がほぼ揃うようにするため
+# （同じ bigint 制約から導かれる値であり、エンドポイントごとの事情で変える理由が無い）。
+#
+# 掛け算を挟まない分、`MAX_PAGE_NUMBER` と違って安全性が `limit` の最大値に
+# 依存しない。`config/scoring.yaml` を書き換えてもこの値の妥当性は変わらない。
+MAX_OFFSET = 100_000_000
 
 
 def reject_oversized_list(

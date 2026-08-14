@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_session
+from techradar.api.query_filters import MAX_OFFSET
 from techradar.config import Settings
 from techradar.db import SourceRegistry
 from techradar.db.enums import SourceType
@@ -146,6 +147,27 @@ class TestList:
         response = client.get("/api/sources", params={"limit": 10_000})
 
         # Assert
+        assert response.status_code == 422
+
+    def test_accepts_an_offset_at_the_upper_bound(self, client: TestClient) -> None:
+        """受入基準: offset の上限ちょうどは 200 + 空のリスト（Issue #99）。"""
+        # Act
+        response = client.get("/api/sources", params={"offset": MAX_OFFSET})
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_rejects_an_offset_above_the_upper_bound(self, client: TestClient) -> None:
+        """受入基準: offset の上限を超えると 422（Issue #99）。"""
+        # Act / Assert
+        response = client.get("/api/sources", params={"offset": MAX_OFFSET + 1})
+        assert response.status_code == 422
+
+    def test_rejects_an_offset_that_would_overflow_bigint(self, client: TestClient) -> None:
+        """受入基準: bigint を超える offset は 500 ではなく 422（Issue #99）。"""
+        # Act / Assert
+        response = client.get("/api/sources", params={"offset": 10**19})
         assert response.status_code == 422
 
 

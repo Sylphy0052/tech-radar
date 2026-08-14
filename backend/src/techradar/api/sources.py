@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_session
+from techradar.api.query_filters import MAX_OFFSET
 from techradar.db import SourceRegistry
 from techradar.db.enums import SourceType
 from techradar.db.errors import is_unique_violation
@@ -86,7 +87,7 @@ def list_sources(
         str | None, Query(description="企業・OSS 名の部分一致で絞り込む")
     ] = None,
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: Annotated[int, Query(ge=0, le=MAX_OFFSET)] = 0,
 ) -> list[SourceRegistry]:
     """登録済みの情報源を一覧する。"""
     statement = select(SourceRegistry).order_by(SourceRegistry.domain, SourceRegistry.path_pattern)
