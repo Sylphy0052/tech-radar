@@ -48,6 +48,46 @@ export const MIN_FEED_MAX_AGE_DAYS = 1;
 /** 対象期間として指定できる日数の上限（`api/recommendations.py` と揃える）。 */
 export const MAX_FEED_MAX_AGE_DAYS = 180;
 
+/** 1始まりのページ番号の下限（`Pagination` と backend の `page` は 1 始まり）。 */
+export const FIRST_FEED_PAGE = 1;
+
+/**
+ * ページ番号の上限（`api/query_filters.py` の `MAX_PAGE_NUMBER` と揃える）。
+ *
+ * backend 側は `page * limit` が bigint に収まらなくなると OFFSET で 500 になるため、
+ * この値を超える `page` を 422 で弾いている（Issue #96）。UI からは押せない値だが、
+ * URL は手で書けるので、送る前にここでも弾く。
+ */
+export const MAX_FEED_PAGE = 1_000_000;
+
+/**
+ * 10進の正の整数リテラルだけを受け付ける。`Number()` は `1e2` / `0x10` / `+3` /
+ * ` 3 ` / `007` も数値へ変換するが、いずれもページ番号として打ち込まれたものでは
+ * ないため、素通しさせず1ページ目へ落とす（ページャの表示と URL が食い違う）。
+ * 先頭が `0` の桁を許さないので、`0` と `007` はここで落ちる。
+ */
+const DECIMAL_PAGE_PATTERN = /^[1-9][0-9]*$/;
+
+/**
+ * URL の `page` クエリを 1 始まりのページ番号として読む。10進の整数でない値・
+ * 範囲外は1ページ目へ落とす。
+ *
+ * `parseMaxAgeDaysOrNull` と同じ狙いで、壊れた URL クエリをそのまま
+ * `GET /api/feed` へ送って 422 にしないための防御である。共有リンク・ブラウザ履歴・
+ * 手動編集でクエリは容易に壊れる。「エラーを見せる」より「1ページ目を見せる」方が、
+ * 共有された URL の末尾が欠けていたときの体験として素直だと判断した。
+ */
+export function parseFeedPageOrFirst(value: string | null): number {
+  if (value === null || !DECIMAL_PAGE_PATTERN.test(value)) {
+    return FIRST_FEED_PAGE;
+  }
+  const page = Number(value);
+  if (page < FIRST_FEED_PAGE || page > MAX_FEED_PAGE) {
+    return FIRST_FEED_PAGE;
+  }
+  return page;
+}
+
 export const EMPTY_FEED_FILTERS: FeedFilters = {
   q: null,
   topics: [],

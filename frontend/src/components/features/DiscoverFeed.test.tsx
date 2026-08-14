@@ -2,6 +2,7 @@ import { configure, fireEvent, render, screen, waitFor } from "@testing-library/
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DiscoverFeed } from "@/components/features/DiscoverFeed";
+import { MAX_FEED_PAGE } from "@/lib/feed";
 import type { FeedItem } from "@/lib/feed";
 import { NavigationTestProvider, useNavigationTestContext } from "@/test-utils/next-navigation-test-context";
 import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
@@ -52,10 +53,63 @@ function pageFromUrl(url: string): number {
   return page ? Number(page) : 1;
 }
 
+/**
+ * どのページを要求されても同じ件数の items を返す fetch のスタブ（Issue #95）。
+ *
+ * ページングの検証では「どのページが要求されたか」だけを見たいので、記事の中身は
+ * ページごとに変えない。中身の差し替わりは既存の
+ * 「requests the next page and replaces the articles when a pager button is clicked」
+ * が押さえている。
+ */
+function stubFeedPages({
+  totalPages = 2,
+  totalCount = 4,
+}: { totalPages?: number; totalCount?: number } = {}): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+    const page = pageFromUrl(url);
+    return jsonResponse({
+      items: makeItems(2, `page${page}`),
+      total_count: totalCount,
+      page,
+      page_size: 2,
+      total_pages: totalPages,
+    });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+/**
+ * ブラウザ URL とナビゲーションの種別をテストから読むためのプローブ（Issue #95）。
+ *
+ * `DiscoverFeed` はページ移動で URL を書き換えるが、その結果は fetch の URL からは
+ * 分からない（1ページ目では `page` を URL に出さないが、API へは `page=1` を送る）。
+ * ブラウザ側の URL そのものを見る必要があるため、同じ Provider の下に置いて覗く。
+ */
+function NavigationProbe() {
+  const { searchParams, navigations } = useNavigationTestContext();
+  return (
+    <span
+      data-testid="navigation-probe"
+      data-query={searchParams.toString()}
+      data-kinds={navigations.map((navigation) => navigation.kind).join(",")}
+    />
+  );
+}
+
+function browserQuery(): string {
+  return screen.getByTestId("navigation-probe").getAttribute("data-query") ?? "";
+}
+
+function navigationKinds(): string {
+  return screen.getByTestId("navigation-probe").getAttribute("data-kinds") ?? "";
+}
+
 function renderFeed(initialSearch = ""): ReturnType<typeof render> {
   return render(
     <NavigationTestProvider initialSearch={initialSearch} pathname="/">
       <DiscoverFeed />
+      <NavigationProbe />
     </NavigationTestProvider>,
   );
 }
@@ -223,6 +277,134 @@ describe("DiscoverFeed", () => {
       expect(query.get("q")).toBe("rust");
       expect(pageFromUrl(lastCall[0])).toBe(1);
     });
+  }, TEST_TIMEOUT_MS);
+
+  it("puts the page number into the URL when a pager button is clicked", async () => {
+    // Arrange
+    stubFeedPages({ totalPages: 3, totalCount: 6 });
+    renderFeed();
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+
+    // Act
+    fireEvent.click(screen.getByRole("button", { name: "2ページ目へ" }));
+
+    // Assert — リロードと共有で再現するよう、URL に載る
+    await waitFor(() => expect(browserQuery()).toBe("page=2"));
+  }, TEST_TIMEOUT_MS);
+
+  // このテストダブルは History スタックを持たないため、「戻ると本当に前のページへ
+  // 帰る」ことそのものは見られない。`replace` だと戻れないので、`push` を使っている
+  // ことを見るのが、この層で押さえられる一番近いところになる（Issue #95 の背景）。
+  it("pushes a new history entry instead of replacing the current one", async () => {
+    // Arrange
+    stubFeedPages({ totalPages: 3, totalCount: 6 });
+    renderFeed();
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+
+    // Act
+    fireEvent.click(screen.getByRole("button", { name: "2ページ目へ" }));
+
+    // Assert
+    await waitFor(() => expect(navigationKinds()).toBe("push"));
+  }, TEST_TIMEOUT_MS);
+
+  it("does not touch the history when the current page button is clicked", async () => {
+    // `Pagination` が無効化するのは「前へ」「次へ」だけで、今見ているページ番号の
+    // ボタンは押せる。弾かないと URL が変わらないまま履歴だけが積まれ、戻るボタンを
+    // 余計に押さないと前のページへ帰れなくなる。
+    // Arrange
+    stubFeedPages({ totalPages: 3, totalCount: 6 });
+    renderFeed("page=2");
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+
+    // Act — 今いる2ページ目のボタンをもう一度押す
+    fireEvent.click(screen.getByRole("button", { name: "2ページ目へ" }));
+
+    // Assert
+    await waitFor(() => expect(browserQuery()).toBe("page=2"));
+    expect(navigationKinds()).toBe("");
+  }, TEST_TIMEOUT_MS);
+
+  it("opens the page given in the URL on mount", async () => {
+    // Arrange
+    const fetchMock = stubFeedPages({ totalPages: 3, totalCount: 6 });
+
+    // Act
+    renderFeed("page=3");
+
+    // Assert — 共有された URL を開いた側にも同じページが出る
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(pageFromUrl(url)).toBe(3);
+  }, TEST_TIMEOUT_MS);
+
+  it("keeps the page number out of the URL on the first page", async () => {
+    // Arrange
+    stubFeedPages({ totalPages: 3, totalCount: 6 });
+    renderFeed("page=2");
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+
+    // Act
+    fireEvent.click(screen.getByRole("button", { name: "1ページ目へ" }));
+
+    // Assert — 既定値は URL に出さない（他の絞り込み条件と同じ扱い）
+    await waitFor(() => expect(browserQuery()).toBe(""));
+  }, TEST_TIMEOUT_MS);
+
+  it("keeps the other filters in the URL when the page changes", async () => {
+    // Arrange
+    stubFeedPages({ totalPages: 3, totalCount: 6 });
+    renderFeed("q=rust");
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+
+    // Act
+    fireEvent.click(screen.getByRole("button", { name: "2ページ目へ" }));
+
+    // Assert — ページ移動で絞り込み条件を落とさない
+    await waitFor(() => {
+      const query = new URLSearchParams(browserQuery());
+      expect(query.get("q")).toBe("rust");
+      expect(query.get("page")).toBe("2");
+    });
+  }, TEST_TIMEOUT_MS);
+
+  it("drops the page number from the URL when the filters change", async () => {
+    // Arrange
+    stubFeedPages({ totalPages: 3, totalCount: 6 });
+    renderFeed("page=3");
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+
+    // Act
+    fireEvent.change(screen.getByLabelText("検索語"), { target: { value: "rust" } });
+    fireEvent.click(screen.getByRole("button", { name: "絞り込む" }));
+
+    // Assert — 条件を変えたら1ページ目へ戻る（絞り込みで件数が減ると
+    // 3ページ目が存在しなくなるため）
+    await waitFor(() => {
+      const query = new URLSearchParams(browserQuery());
+      expect(query.get("q")).toBe("rust");
+      expect(query.get("page")).toBeNull();
+    });
+  }, TEST_TIMEOUT_MS);
+
+  // 共有リンク・履歴・手動編集で URL のクエリは容易に壊れる。そのまま
+  // `GET /api/feed` へ送ると 422 になるので、1ページ目へ落として表示は成立させる。
+  it.each([
+    ["a negative page", "page=-1"],
+    ["a fractional page", "page=1.5"],
+    ["a non-numeric page", "page=abc"],
+    ["a page above the backend upper bound", `page=${MAX_FEED_PAGE + 1}`],
+  ])("shows the first page for a URL with %s", async (_label, search) => {
+    // Arrange
+    const fetchMock = stubFeedPages({ totalPages: 3, totalCount: 6 });
+
+    // Act
+    renderFeed(search);
+
+    // Assert
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(pageFromUrl(url)).toBe(1);
   }, TEST_TIMEOUT_MS);
 
   it("marks the Good button as pressed optimistically when clicked", async () => {
