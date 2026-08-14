@@ -193,6 +193,21 @@ describe("parseFeedPageOrFirst", () => {
   ])("falls back to the first page for %s", (_label, value) => {
     expect(parseFeedPageOrFirst(value)).toBe(FIRST_FEED_PAGE);
   }, TEST_TIMEOUT_MS);
+
+  // `Number()` は10進の整数リテラル以外も数値へ変換する。これらはページ番号として
+  // 打ち込まれたものではなく、壊れた URL とみなして1ページ目へ落とす。素通しすると
+  // `page=1e2` のような URL が backend へそのまま渡り、ページャの表示と URL が
+  // 食い違ったまま100ページ目が出る。
+  it.each([
+    ["exponent notation", "1e2"],
+    ["hexadecimal notation", "0x10"],
+    ["a leading plus sign", "+3"],
+    ["surrounding whitespace", " 3 "],
+    ["leading zeros", "007"],
+    ["a numeric separator", "1_000"],
+  ])("falls back to the first page for %s", (_label, value) => {
+    expect(parseFeedPageOrFirst(value)).toBe(FIRST_FEED_PAGE);
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("MAX_FEED_PAGE", () => {

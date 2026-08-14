@@ -61,8 +61,16 @@ export const FIRST_FEED_PAGE = 1;
 export const MAX_FEED_PAGE = 1_000_000;
 
 /**
- * URL の `page` クエリを 1 始まりのページ番号として読む。整数でない値・範囲外は
- * 1ページ目へ落とす。
+ * 10進の正の整数リテラルだけを受け付ける。`Number()` は `1e2` / `0x10` / `+3` /
+ * ` 3 ` / `007` も数値へ変換するが、いずれもページ番号として打ち込まれたものでは
+ * ないため、素通しさせず1ページ目へ落とす（ページャの表示と URL が食い違う）。
+ * 先頭が `0` の桁を許さないので、`0` と `007` はここで落ちる。
+ */
+const DECIMAL_PAGE_PATTERN = /^[1-9][0-9]*$/;
+
+/**
+ * URL の `page` クエリを 1 始まりのページ番号として読む。10進の整数でない値・
+ * 範囲外は1ページ目へ落とす。
  *
  * `parseMaxAgeDaysOrNull` と同じ狙いで、壊れた URL クエリをそのまま
  * `GET /api/feed` へ送って 422 にしないための防御である。共有リンク・ブラウザ履歴・
@@ -70,11 +78,11 @@ export const MAX_FEED_PAGE = 1_000_000;
  * 共有された URL の末尾が欠けていたときの体験として素直だと判断した。
  */
 export function parseFeedPageOrFirst(value: string | null): number {
-  if (value === null) {
+  if (value === null || !DECIMAL_PAGE_PATTERN.test(value)) {
     return FIRST_FEED_PAGE;
   }
   const page = Number(value);
-  if (!Number.isInteger(page) || page < FIRST_FEED_PAGE || page > MAX_FEED_PAGE) {
+  if (page < FIRST_FEED_PAGE || page > MAX_FEED_PAGE) {
     return FIRST_FEED_PAGE;
   }
   return page;
