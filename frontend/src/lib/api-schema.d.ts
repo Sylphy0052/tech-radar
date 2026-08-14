@@ -214,18 +214,27 @@ export interface paths {
         };
         /**
          * Get Feed
-         * @description Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。
+         * @description Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。
          *
-         *     `cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の
-         *     `limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ
-         *     新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。
-         *     `cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、
-         *     ページ間で重複が出ないようにする（受入基準）。
+         *     `q` / `topics` / `technologies` / `published_from` / `published_to` /
+         *     `source_domain` / `max_age_days` はいずれも省略可能な絞り込み条件で、全候補を
+         *     対象に推薦を作り直す（決定済みの設計、`generate_recommendations` の
+         *     `feed_filters`）。条件を反映したフィンガープリントが一致する直近の DISCOVER
+         *     run が再利用してよい時間内（`config/scoring.yaml` の
+         *     `limits.feed_run_reuse_seconds`）ならその run を再利用し、そうでなければ
+         *     新しい run を生成する（`_resolve_discover_run_id`）。
          *
-         *     `next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で
-         *     cursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が
-         *     非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで
-         *     終端と判断せず、`next_cursor` が null になるまで辿ること。
+         *     `max_age_days` はフィードの対象期間そのもの（候補の絞り込み）を変える
+         *     パラメータで、freshness スコアの減衰基準（`ranking.compute_freshness`）とは
+         *     無関係（Issue #90 自己レビュー、`FeedFilters.max_age_days` のコメント参照）。
+         *     従来は `config/scoring.yaml` の `freshness.max_age_days`（既定 7 日）を
+         *     超える公開日で `published_from` / `published_to` を指定すると、この
+         *     ハード除外の内側でしか絞り込みが効かず黙って 0 件になっていた
+         *     （Issue #90 自己レビューで判明した不具合そのもの）。
+         *
+         *     ページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset
+         *     として扱う。`total_count` は run に保存された件数（Bad 除外前）であり、
+         *     範囲外の `page` はエラーにせず空の `items` を返す。
          *
          *     古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を
          *     削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。
@@ -606,13 +615,24 @@ export interface components {
         };
         /**
          * FeedResponse
-         * @description Discover フィード（`GET /api/feed`）のレスポンス。
+         * @description Discover フィード（`GET /api/feed`）のレスポンス（Issue #90）。
+         *
+         *     ページングは番号付きページ（`page` / `page_size`）に統一する。
+         *     `total_count` は絞り込み後に run へ保存された件数（`count_recommendations`）で、
+         *     `limits.feed_run_size`（`config/scoring.yaml`）を超える候補は元々対象外になる
+         *     （決定済みの設計）。
          */
         FeedResponse: {
             /** Items */
             items: components["schemas"]["RecommendationItem"][];
-            /** Next Cursor */
-            next_cursor: string | null;
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Total Count */
+            total_count: number;
+            /** Total Pages */
+            total_pages: number;
         };
         /**
          * FeedbackAction
@@ -1404,8 +1424,22 @@ export interface operations {
     get_feed_api_feed_get: {
         parameters: {
             query?: {
-                /** @description 前回レスポンスの next_cursor をそのまま渡す */
-                cursor?: string | null;
+                /** @description 検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない） */
+                q?: string | null;
+                /** @description トピック。複数指定時は指定した全てを含む記事に絞る（AND） */
+                topics?: string[] | null;
+                /** @description 技術タグ。複数指定時は指定した全てを含む記事に絞る（AND） */
+                technologies?: string[] | null;
+                /** @description 公開日の下限（published_at、NULLはfetched_atで代替） */
+                published_from?: string | null;
+                /** @description 公開日の上限 */
+                published_to?: string | null;
+                /** @description 情報源ドメインの完全一致 */
+                source_domain?: string | null;
+                /** @description フィード対象期間（日数）。省略時はconfig/scoring.yamlのfreshness.max_age_daysを使う。freshnessスコアの減衰基準（新しさの点数）はこの値を変えても変わらない */
+                max_age_days?: number;
+                /** @description 1始まりのページ番号 */
+                page?: number;
                 limit?: number;
             };
             header?: never;

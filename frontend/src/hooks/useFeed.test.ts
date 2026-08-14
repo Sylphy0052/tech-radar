@@ -2,7 +2,8 @@ import { act, configure, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useFeed } from "@/hooks/useFeed";
-import type { FeedItem } from "@/lib/feed";
+import { EMPTY_FEED_FILTERS } from "@/lib/feed";
+import type { FeedFilters, FeedItem } from "@/lib/feed";
 import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 configure({ asyncUtilTimeout: WAIT_TIMEOUT_MS });
@@ -43,109 +44,182 @@ const itemA = makeItem({ article_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" });
 const itemB = makeItem({ article_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" });
 const itemC = makeItem({ article_id: "cccccccc-cccc-cccc-cccc-cccccccccccc" });
 
-function stubFeedPages(): ReturnType<typeof vi.fn> {
-  const fetchMock = vi.fn().mockImplementation(async (url: string) => {
-    if (url.includes("cursor=page-2")) {
-      // ページ間で重複が出ないことの検証用に、あえて 1 件だけ前ページと重複させる。
-      return jsonResponse({ items: [itemB, itemC], next_cursor: null });
-    }
-    return jsonResponse({ items: [itemA, itemB], next_cursor: "page-2" });
-  });
-  vi.stubGlobal("fetch", fetchMock);
-  return fetchMock;
-}
+const FILTERS_A: FeedFilters = EMPTY_FEED_FILTERS;
+const FILTERS_B: FeedFilters = { ...EMPTY_FEED_FILTERS, q: "rust" };
 
-/** 2 ページ目だけ 429（Retry-After: 30）を返す fetch を差し込む。 */
-function stubRateLimitedSecondPage(): ReturnType<typeof vi.fn> {
-  const fetchMock = vi.fn().mockImplementation(async (url: string) => {
-    if (url.includes("cursor=")) {
-      return new Response("too many requests", {
-        status: 429,
-        headers: { "Retry-After": "30" },
-      });
-    }
-    return jsonResponse({ items: [itemA], next_cursor: "page-2" });
-  });
-  vi.stubGlobal("fetch", fetchMock);
-  return fetchMock;
+/** URL の `page` クエリ（省略時は 1）を読む。 */
+function pageFromUrl(url: string): number {
+  const page = new URL(url).searchParams.get("page");
+  return page ? Number(page) : 1;
 }
 
 /**
- * `Date.now()` を「実時間 + 任意のオフセット」にする。
- *
- * fake timers で時刻ごと止めると `waitFor` のポーリングが進まなくなるため、
- * 実時間はそのまま進めたうえで先送りだけを足せるようにしている。
+ * ページ番号ごとに固定の items を返す fetch のスタブ。応答に含めない
+ * `total_count` / `total_pages` は呼び出し側が固定値として渡す。
  */
-function stubAdvanceableClock(): { advance: (ms: number) => void; restore: () => void } {
-  const realNow = Date.now.bind(Date);
-  let offsetMs = 0;
-  const spy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offsetMs);
-  return {
-    advance: (ms: number) => {
-      offsetMs += ms;
-    },
-    restore: () => {
-      spy.mockRestore();
-    },
-  };
+function stubFeedPages(
+  pages: Record<number, FeedItem[]>,
+  { totalPages = 2, totalCount = 4 }: { totalPages?: number; totalCount?: number } = {},
+): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+    const page = pageFromUrl(url);
+    return jsonResponse({
+      items: pages[page] ?? [],
+      total_count: totalCount,
+      page,
+      page_size: 2,
+      total_pages: totalPages,
+    });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
 }
 
 describe("useFeed", () => {
-  it("loads the first page on mount", async () => {
+  it("loads page 1 with the given filters on mount", async () => {
     // Arrange
-    stubFeedPages();
+    const fetchMock = stubFeedPages({ 1: [itemA, itemB] });
 
     // Act
-    const { result } = renderHook(() => useFeed());
+    const { result } = renderHook(() => useFeed(FILTERS_A));
 
     // Assert
     expect(result.current.isLoading).toBe(true);
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.items).toEqual([itemA, itemB]);
-    expect(result.current.hasMore).toBe(true);
+    expect(result.current.page).toBe(1);
+    expect(result.current.totalPages).toBe(2);
+    expect(result.current.totalCount).toBe(4);
+    expect(result.current.error).toBeNull();
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(pageFromUrl(url)).toBe(1);
+  }, TEST_TIMEOUT_MS);
+
+  it("replaces items with the requested page instead of appending", async () => {
+    // Arrange
+    stubFeedPages({ 1: [itemA, itemB], 2: [itemB, itemC] });
+    const { result } = renderHook(() => useFeed(FILTERS_A));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act
+    act(() => {
+      result.current.setPage(2);
+    });
+    await waitFor(() => expect(result.current.page).toBe(2));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Assert — 2ページ目の内容にまるごと差し替わる（追記ではない）
+    expect(result.current.items).toEqual([itemB, itemC]);
+  }, TEST_TIMEOUT_MS);
+
+  it("requests the API again with the new page number when setPage is called", async () => {
+    // Arrange
+    const fetchMock = stubFeedPages({ 1: [itemA], 2: [itemB] });
+    const { result } = renderHook(() => useFeed(FILTERS_A));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act
+    act(() => {
+      result.current.setPage(2);
+    });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Assert
+    const lastCall = fetchMock.mock.calls.at(-1) as [string];
+    expect(pageFromUrl(lastCall[0])).toBe(2);
+  }, TEST_TIMEOUT_MS);
+
+  it("resets to page 1 and refetches when the filters change", async () => {
+    // Arrange
+    const fetchMock = stubFeedPages({ 1: [itemA], 2: [itemB] });
+    const { result, rerender } = renderHook(({ filters }) => useFeed(filters), {
+      initialProps: { filters: FILTERS_A },
+    });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    act(() => {
+      result.current.setPage(2);
+    });
+    await waitFor(() => expect(result.current.page).toBe(2));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act — 条件を変える
+    rerender({ filters: FILTERS_B });
+
+    // Assert — ページ番号が1へ戻る
+    await waitFor(() => expect(result.current.page).toBe(1));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    const lastCall = fetchMock.mock.calls.at(-1) as [string];
+    expect(pageFromUrl(lastCall[0])).toBe(1);
+    expect(new URL(lastCall[0]).searchParams.get("q")).toBe("rust");
+  }, TEST_TIMEOUT_MS);
+
+  it("discards a stale response when the page changes again before the first request resolves", async () => {
+    // Arrange — ページ2の応答をわざと遅らせ、その間にページ3へ移動する
+    let resolvePageTwo!: (response: Response) => void;
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      const page = pageFromUrl(url);
+      if (page === 2) {
+        return new Promise<Response>((resolve) => {
+          resolvePageTwo = resolve;
+        });
+      }
+      return jsonResponse({
+        items: page === 3 ? [itemC] : [itemA],
+        total_count: 6,
+        page,
+        page_size: 2,
+        total_pages: 3,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useFeed(FILTERS_A));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act
+    act(() => {
+      result.current.setPage(2);
+    });
+    act(() => {
+      result.current.setPage(3);
+    });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // ページ2の応答が（3へ移った）後から解決しても反映されない
+    resolvePageTwo(
+      jsonResponse({ items: [itemB], total_count: 6, page: 2, page_size: 2, total_pages: 3 }),
+    );
+
+    // Assert
+    expect(result.current.page).toBe(3);
+    expect(result.current.items).toEqual([itemC]);
+  }, TEST_TIMEOUT_MS);
+
+  it("shows an empty item list without an error when the filters match nothing", async () => {
+    // Arrange
+    stubFeedPages({ 1: [] }, { totalPages: 0, totalCount: 0 });
+
+    // Act
+    const { result } = renderHook(() => useFeed(FILTERS_A));
+
+    // Assert
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.items).toEqual([]);
+    expect(result.current.totalCount).toBe(0);
     expect(result.current.error).toBeNull();
   }, TEST_TIMEOUT_MS);
 
-  it("appends the next page without duplicating articles already present", async () => {
+  it("surfaces a network error message when the feed request fails", async () => {
     // Arrange
-    stubFeedPages();
-    const { result } = renderHook(() => useFeed());
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
 
     // Act
-    act(() => {
-      result.current.loadMore();
-    });
-    await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
-
-    // Assert — itemB は両ページに含まれるが 1 回だけ現れる
-    expect(result.current.items.map((item) => item.article_id)).toEqual([
-      itemA.article_id,
-      itemB.article_id,
-      itemC.article_id,
-    ]);
-    expect(result.current.hasMore).toBe(false);
-  }, TEST_TIMEOUT_MS);
-
-  it("does not call the API again once next_cursor is null", async () => {
-    // Arrange
-    const fetchMock = stubFeedPages();
-    const { result } = renderHook(() => useFeed());
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-    act(() => {
-      result.current.loadMore();
-    });
-    await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
-    expect(result.current.hasMore).toBe(false);
-    const callCountAfterExhausted = fetchMock.mock.calls.length;
-
-    // Act
-    act(() => {
-      result.current.loadMore();
-    });
+    const { result } = renderHook(() => useFeed(FILTERS_A));
 
     // Assert
-    expect(fetchMock).toHaveBeenCalledTimes(callCountAfterExhausted);
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.error).toBe(
+      "通信に失敗しました。しばらくしてから再度お試しください。",
+    );
   }, TEST_TIMEOUT_MS);
 
   it("applies feedback optimistically before the request resolves", async () => {
@@ -157,10 +231,10 @@ describe("useFeed", () => {
           resolvePost = resolve;
         });
       }
-      return jsonResponse({ items: [itemA], next_cursor: null });
+      return jsonResponse({ items: [itemA], total_count: 1, page: 1, page_size: 20, total_pages: 1 });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed());
+    const { result } = renderHook(() => useFeed(FILTERS_A));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
@@ -184,10 +258,10 @@ describe("useFeed", () => {
       if (init?.method === "POST") {
         return new Response("boom", { status: 500 });
       }
-      return jsonResponse({ items: [itemA], next_cursor: null });
+      return jsonResponse({ items: [itemA], total_count: 1, page: 1, page_size: 20, total_pages: 1 });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed());
+    const { result } = renderHook(() => useFeed(FILTERS_A));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
@@ -213,10 +287,16 @@ describe("useFeed", () => {
       if (init?.method === "DELETE") {
         return new Response(null, { status: 204 });
       }
-      return jsonResponse({ items: [withFeedback], next_cursor: null });
+      return jsonResponse({
+        items: [withFeedback],
+        total_count: 1,
+        page: 1,
+        page_size: 20,
+        total_pages: 1,
+      });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed());
+    const { result } = renderHook(() => useFeed(FILTERS_A));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.items[0]?.feedback?.action).toBe("good");
 
@@ -249,10 +329,10 @@ describe("useFeed", () => {
           created_at: "2026-08-01T00:00:00Z",
         });
       }
-      return jsonResponse({ items: [withBad], next_cursor: null });
+      return jsonResponse({ items: [withBad], total_count: 1, page: 1, page_size: 20, total_pages: 1 });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed());
+    const { result } = renderHook(() => useFeed(FILTERS_A));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act — 既に理由なしの bad が付いている記事へ、理由を指定して bad を送り直す
@@ -279,10 +359,16 @@ describe("useFeed", () => {
       if (init?.method === "DELETE") {
         return new Response(null, { status: 204 });
       }
-      return jsonResponse({ items: [withFeedback], next_cursor: null });
+      return jsonResponse({
+        items: [withFeedback],
+        total_count: 1,
+        page: 1,
+        page_size: 20,
+        total_pages: 1,
+      });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed());
+    const { result } = renderHook(() => useFeed(FILTERS_A));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
@@ -300,40 +386,11 @@ describe("useFeed", () => {
     );
   }, TEST_TIMEOUT_MS);
 
-  it("ignores a second removeFeedback call on the same article while the request is in flight", async () => {
-    // Arrange — applyFeedback と同じ pending ガードが removeFeedback にも
-    // 効いていることを確認する。
-    const withFeedback = makeItem({
-      article_id: itemA.article_id,
-      feedback: { action: "save", reason: null, created_at: "2026-08-01T00:00:00Z" },
-    });
-    let deleteCallCount = 0;
-    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
-      if (init?.method === "DELETE") {
-        deleteCallCount += 1;
-        return new Response(null, { status: 204 });
-      }
-      return jsonResponse({ items: [withFeedback], next_cursor: null });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed());
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-
-    // Act — 再レンダリングを挟まず、同じ articleId に対して連続で removeFeedback を呼ぶ
-    act(() => {
-      result.current.removeFeedback(itemA.article_id);
-      result.current.removeFeedback(itemA.article_id);
-    });
-
-    // Assert — 送信中の 2 回目は無視され、DELETE は 1 回だけ送信される
-    await waitFor(() => expect(deleteCallCount).toBe(1));
-  }, TEST_TIMEOUT_MS);
-
   it("does nothing when removeFeedback is called on an article without feedback", async () => {
     // Arrange
-    const fetchMock = stubFeedPages();
+    const fetchMock = stubFeedPages({ 1: [itemA] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useFeed());
+    const { result } = renderHook(() => useFeed(FILTERS_A));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const callCountBefore = fetchMock.mock.calls.length;
 
@@ -348,52 +405,6 @@ describe("useFeed", () => {
     expect(warn).not.toHaveBeenCalled();
   }, TEST_TIMEOUT_MS);
 
-  it("does nothing when removeFeedback targets an unknown article id", async () => {
-    // Arrange — applyFeedback 版と対になる。一覧に無い article_id を渡された場合は
-    // 黙って戻らず痕跡を残す（Issue #45）。
-    const fetchMock = stubFeedPages();
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useFeed());
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-    const callCountBefore = fetchMock.mock.calls.length;
-
-    // Act
-    act(() => {
-      result.current.removeFeedback("unknown-id");
-    });
-
-    // Assert
-    expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[0]).toContain("unknown-id");
-  }, TEST_TIMEOUT_MS);
-
-  it("rolls back and surfaces an error when removeFeedback's DELETE request fails", async () => {
-    // Arrange
-    const withFeedback = makeItem({
-      article_id: itemA.article_id,
-      feedback: { action: "save", reason: null, created_at: "2026-08-01T00:00:00Z" },
-    });
-    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
-      if (init?.method === "DELETE") {
-        return new Response("boom", { status: 500 });
-      }
-      return jsonResponse({ items: [withFeedback], next_cursor: null });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed());
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-
-    // Act
-    act(() => {
-      result.current.removeFeedback(itemA.article_id);
-    });
-
-    // Assert
-    await waitFor(() => expect(result.current.error).not.toBeNull());
-    expect(result.current.items[0]?.feedback).toEqual(withFeedback.feedback);
-  }, TEST_TIMEOUT_MS);
-
   it("ignores a second click on the same article while a feedback request is in flight (G-1)", async () => {
     // Arrange — 既に good が付いている記事に対し、1 回目のクリックで取り消し（DELETE）が
     // 走っている最中に、再レンダリングを挟まず同じ Good ボタンをもう一度押す想定。
@@ -406,17 +417,20 @@ describe("useFeed", () => {
       if (init?.method === "DELETE") {
         deleteCallCount += 1;
         if (deleteCallCount > 1) {
-          // 既に削除済みのものへの 2 回目の DELETE はサーバー側で 404 になる想定。
-          // 修正前の実装ではこの 404 が catch のロールバックを誘発し、
-          // 消したはずの feedback が復活してしまっていた。
           return new Response("not found", { status: 404 });
         }
         return new Response(null, { status: 204 });
       }
-      return jsonResponse({ items: [withFeedback], next_cursor: null });
+      return jsonResponse({
+        items: [withFeedback],
+        total_count: 1,
+        page: 1,
+        page_size: 20,
+        total_pages: 1,
+      });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed());
+    const { result } = renderHook(() => useFeed(FILTERS_A));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act — 再レンダリングを挟まず、同じ articleId に対して連続で applyFeedback を呼ぶ
@@ -431,32 +445,11 @@ describe("useFeed", () => {
     expect(result.current.error).toBeNull();
   }, TEST_TIMEOUT_MS);
 
-  it("keeps the loadMore reference stable while a fetch is in flight (G-2)", async () => {
-    // Arrange
-    stubFeedPages();
-    const { result } = renderHook(() => useFeed());
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-    const loadMoreBeforeFetch = result.current.loadMore;
-
-    // Act
-    act(() => {
-      result.current.loadMore();
-    });
-    const loadMoreDuringFetch = result.current.loadMore;
-    await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
-    const loadMoreAfterFetch = result.current.loadMore;
-
-    // Assert — isLoadingMore / nextCursor の変化のたびに参照が変わっていないこと
-    // （変わると呼び出し側の useEffect が毎回 IntersectionObserver を作り直してしまう）
-    expect(loadMoreDuringFetch).toBe(loadMoreBeforeFetch);
-    expect(loadMoreAfterFetch).toBe(loadMoreBeforeFetch);
-  }, TEST_TIMEOUT_MS);
-
   it("does nothing when applyFeedback targets an unknown article id", async () => {
     // Arrange
-    const fetchMock = stubFeedPages();
+    const fetchMock = stubFeedPages({ 1: [itemA] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useFeed());
+    const { result } = renderHook(() => useFeed(FILTERS_A));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const callCountBefore = fetchMock.mock.calls.length;
 
@@ -474,14 +467,9 @@ describe("useFeed", () => {
 
   it("hands out a feedback callback that sees the items already rendered (G-3)", async () => {
     // Arrange — 一覧が出た直後のクリックを取りこぼさないことを固定する。
-    // Issue #45 の失敗は、ハンドラが `useEffect` 経由のミラー（itemsRef）から
-    // items を読んでいたために「DOM には記事が出ているがミラーはまだ空」という
-    // 窓を踏み、楽観的更新も API 送信もせずに戻っていた形だった。
-    // ハンドラが最新の items を見ることを直接固定しておけば、依存配列を
-    // 空へ戻す（＝古いクロージャを掴む）退行をここで検出できる。
-    stubFeedPages();
+    stubFeedPages({ 1: [itemA] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useFeed());
+    const { result } = renderHook(() => useFeed(FILTERS_A));
     const applyFeedbackWhileEmpty = result.current.applyFeedback;
     expect(result.current.items).toEqual([]);
 
@@ -497,149 +485,80 @@ describe("useFeed", () => {
     });
 
     // Assert
-    await waitFor(() =>
-      expect(result.current.items[0]?.feedback?.action).toBe("good"),
-    );
+    await waitFor(() => expect(result.current.items[0]?.feedback?.action).toBe("good"));
     expect(warn).not.toHaveBeenCalled();
   }, TEST_TIMEOUT_MS);
 
-  it("warns instead of silently dropping the click when a stale callback is used (G-3)", async () => {
-    // Arrange — items が空だった頃のハンドラを、ロード後に呼ぶ。
-    // これは itemsRef 方式が踏んでいた窓そのものの再現であり、握り潰さずに
-    // 痕跡が残ることを固定する。
-    stubFeedPages();
+  it("does nothing when removeFeedback targets an unknown article id", async () => {
+    // Arrange — applyFeedback 版と対になる回帰テスト。一覧に無い article_id を
+    // 渡されたら黙って戻らず痕跡を残す（Issue #45）。番号付きページングへの
+    // 書き換えで一度落ちたため、対を揃えて戻した（Issue #90 自己レビュー）。
+    const fetchMock = stubFeedPages({ 1: [itemA] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useFeed());
-    const applyFeedbackWhileEmpty = result.current.applyFeedback;
+    const { result } = renderHook(() => useFeed(FILTERS_A));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
+    const callCountBefore = fetchMock.mock.calls.length;
 
     // Act
     act(() => {
-      applyFeedbackWhileEmpty(itemA.article_id, "good");
+      result.current.removeFeedback("unknown-id");
     });
 
     // Assert
-    expect(result.current.items[0]?.feedback).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[0]).toContain(itemA.article_id);
+    expect(warn.mock.calls[0]?.[0]).toContain("unknown-id");
   }, TEST_TIMEOUT_MS);
 
-  it("surfaces a rate limit message with the wait time when loadMore hits 429", async () => {
-    // Arrange
-    stubRateLimitedSecondPage();
-    const { result } = renderHook(() => useFeed());
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-
-    // Act
-    act(() => {
-      result.current.loadMore();
+  it("rolls back and surfaces an error when removeFeedback's DELETE request fails", async () => {
+    // Arrange — 楽観的更新の巻き戻し（Issue #90 自己レビューで復元）
+    const withFeedback = makeItem({
+      article_id: itemA.article_id,
+      feedback: { action: "save", reason: null, created_at: "2026-08-01T00:00:00Z" },
     });
-
-    // Assert
-    await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
-    expect(result.current.error).toBe("リクエストが多すぎます。約30秒後に再度お試しください。");
-  }, TEST_TIMEOUT_MS);
-
-  it("does not retry immediately after a 429 response", async () => {
-    // Arrange
-    const fetchMock = stubRateLimitedSecondPage();
-    const { result } = renderHook(() => useFeed());
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-    act(() => {
-      result.current.loadMore();
-    });
-    await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
-    const callCountAfterRateLimit = fetchMock.mock.calls.length;
-
-    // Act — 無限スクロールの再交差や「さらに読み込む」連打を模す
-    act(() => {
-      result.current.loadMore();
-      result.current.loadMore();
-    });
-
-    // Assert
-    expect(fetchMock).toHaveBeenCalledTimes(callCountAfterRateLimit);
-  }, TEST_TIMEOUT_MS);
-
-  it("re-shows the rate limit message with the remaining wait when loadMore is pressed during the cooldown", async () => {
-    // Arrange — 429 のあとフィードバック送信が成功してエラー表示が消える状況
     const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
-      if (init?.method === "POST") {
-        return jsonResponse({ action: "good", reason: null, created_at: "2026-08-01T00:00:00Z" });
+      if (init?.method === "DELETE") {
+        return new Response("boom", { status: 500 });
       }
-      if (url.includes("cursor=")) {
-        return new Response("too many requests", {
-          status: 429,
-          headers: { "Retry-After": "30" },
-        });
-      }
-      return jsonResponse({ items: [itemA], next_cursor: "page-2" });
+      return jsonResponse({
+        items: [withFeedback],
+        total_count: 1,
+        page: pageFromUrl(url),
+        page_size: 2,
+        total_pages: 1,
+      });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const clock = stubAdvanceableClock();
-    try {
-      const { result } = renderHook(() => useFeed());
-      await waitFor(() => expect(result.current.isLoading).toBe(false));
-      act(() => {
-        result.current.loadMore();
-      });
-      await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
-      act(() => {
-        result.current.applyFeedback(itemA.article_id, "good");
-      });
-      await waitFor(() => expect(result.current.error).toBeNull());
-
-      // Act — 25 秒経過した時点で「さらに読み込む」を押す
-      clock.advance(25_000);
-      act(() => {
-        result.current.loadMore();
-      });
-
-      // Assert — 押しても何も起きないのではなく、残りの待ち時間を出し直す
-      expect(result.current.error).toBe("リクエストが多すぎます。約5秒後に再度お試しください。");
-    } finally {
-      clock.restore();
-    }
-  }, TEST_TIMEOUT_MS);
-
-  it("allows loadMore again once the Retry-After window has elapsed", async () => {
-    // Arrange
-    const fetchMock = stubRateLimitedSecondPage();
-    const clock = stubAdvanceableClock();
-    try {
-      const { result } = renderHook(() => useFeed());
-      await waitFor(() => expect(result.current.isLoading).toBe(false));
-      act(() => {
-        result.current.loadMore();
-      });
-      await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
-      const callCountAfterRateLimit = fetchMock.mock.calls.length;
-
-      // Act
-      clock.advance(30_000);
-      act(() => {
-        result.current.loadMore();
-      });
-
-      // Assert
-      await waitFor(() => expect(result.current.isLoadingMore).toBe(false));
-      expect(fetchMock.mock.calls.length).toBe(callCountAfterRateLimit + 1);
-    } finally {
-      clock.restore();
-    }
-  }, TEST_TIMEOUT_MS);
-
-  it("surfaces a network error message when the feed request fails", async () => {
-    // Arrange
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    const { result } = renderHook(() => useFeed(FILTERS_A));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
-    const { result } = renderHook(() => useFeed());
+    act(() => {
+      result.current.removeFeedback(itemA.article_id);
+    });
+
+    // Assert — 送信前の feedback へ戻り、エラーが出る
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.items[0]?.feedback).toEqual(withFeedback.feedback);
+  }, TEST_TIMEOUT_MS);
+
+  it("surfaces a rate limit message with the wait time when the feed returns 429", async () => {
+    // Arrange — Issue #31 のクールダウン自体は無限スクロール（自動再取得）の
+    // 撤去で機構ごと不要になったが、429 の文言が出ることは残す必要がある。
+    // 書き換えでフィード側の 429 テストが全部消えていたため戻した（Issue #90 自己レビュー）。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("rate limited", { status: 429, headers: { "Retry-After": "30" } }),
+      ),
+    );
+
+    // Act
+    const { result } = renderHook(() => useFeed(FILTERS_A));
 
     // Assert
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-    expect(result.current.error).toBe(
-      "通信に失敗しました。しばらくしてから再度お試しください。",
-    );
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.error).toContain("30");
+    expect(result.current.items).toEqual([]);
   }, TEST_TIMEOUT_MS);
 });

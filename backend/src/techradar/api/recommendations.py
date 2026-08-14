@@ -1,13 +1,12 @@
 """記事起点推薦と Discover フィードの API（`PROJECT_SPEC.md` §6.1, §13, §20）。
 
 推薦の生成・保存自体は `recommendation/service.py`（T1〜T3）に委ね、ここでは
-リクエストの受け口・レスポンス整形・cursor ページングだけを担う。
+リクエストの受け口・レスポンス整形・検索/絞り込み条件の受け渡し・番号付き
+ページング（Issue #90）だけを担う。
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
 import logging
 import math
 import uuid
@@ -24,11 +23,14 @@ from techradar.api.deps import get_app_settings, get_current_user_id, get_now, g
 from techradar.api.feedback import ArticleFeedbackResponse
 from techradar.api.rate_limit import RATE_LIMITED_RESPONSES, enforce_recommendation_rate_limit
 from techradar.config import Settings
-from techradar.db import Article, ArticleFeedback, Recommendation, RecommendationRun, UserArticle
+from techradar.db import Article, ArticleFeedback, Recommendation, UserArticle
 from techradar.db.enums import FeedbackAction, RecommendationMode
 from techradar.recommendation.config import get_scoring_config
 from techradar.recommendation.service import (
     READ_ORIGIN_VALUES,
+    FeedFilters,
+    compute_filter_fingerprint,
+    count_recommendations,
     find_latest_run,
     generate_recommendations,
     load_recommendation_page,
@@ -49,22 +51,29 @@ _page_size_limits = get_scoring_config().limits
 DEFAULT_PAGE_SIZE = _page_size_limits.default_page_size
 MAX_PAGE_SIZE = _page_size_limits.max_page_size
 
-# cursor 文字列（デコード後）中の run_id と rank の区切り文字。
-_CURSOR_SEPARATOR = ":"
+# GET /api/feed の対象期間（`max_age_days`）の範囲・既定値（Issue #90 自己レビュー）。
+# 既定は `config/scoring.yaml` の `freshness.max_age_days`（int へ丸める。同ファイルの
+# 型は float だが、実運用値は整数日のため小数へ揃える意味が無い）。180 日は
+# 「絞り込みなしに近い、実用上十分に広い期間」という目安で、コードから読み取れる
+# 制約ではないため上限として明記する（未定義な巨大値を候補読み込みへ渡さない安全弁）。
+MIN_FEED_MAX_AGE_DAYS = 1
+MAX_FEED_MAX_AGE_DAYS = 180
+DEFAULT_FEED_MAX_AGE_DAYS = int(get_scoring_config().freshness.max_age_days)
 
-# cursor がデコード後に含む rank 部分の桁数上限。実際の rank は
-# limits.feed_run_size（config/scoring.yaml）以下に収まるため十分な余裕を
-# 持たせつつ、極端に長い数字列を int() へ渡さないための安全弁。
-_MAX_CURSOR_RANK_DIGITS = 10
+# 検索語・情報源ドメインの入力長上限（`api/articles.py` の
+# `INTEREST_LIST_TEXT_FILTER_MAX_LENGTH` と同じ方針、Issue #90 自己レビュー）。
+# 際限なく長い文字列を ILIKE / 等価比較へ渡さないための安全弁。
+FEED_TEXT_FILTER_MAX_LENGTH = 256
 
-# cursor（デコード前の raw 文字列: UUID 36 文字 + 区切り 1 文字 + rank 桁数上限）
-# の最大長。
-_MAX_CURSOR_RAW_LENGTH = 36 + len(_CURSOR_SEPARATOR) + _MAX_CURSOR_RANK_DIGITS
-# base64（パディング無し）へエンコードした cursor 文字列の最大長。3 バイトごとに
-# 4 文字になるため切り上げで計算する。FastAPI の `Query(max_length=...)` は超過時
-# に 422 を返すが、他の壊れた cursor と同じ 400 に統一したいため、上限チェックは
-# `_decode_cursor` 内で行い、ここでは定数としてのみ持つ。
-CURSOR_MAX_LENGTH = math.ceil(_MAX_CURSOR_RAW_LENGTH / 3) * 4
+# topics / technologies の要素ごとの長さ上限。`FEED_TEXT_FILTER_MAX_LENGTH` と
+# 同じ値を使うが、FastAPI の `Query(max_length=...)` は `list[str]` の要素単位には
+# 効かない（リスト自体にしか効かない、実機で確認済み）ため、`_reject_oversized_list`
+# で明示的に検証する。
+FEED_LIST_FILTER_MAX_ITEM_LENGTH = 256
+
+# topics / technologies の件数上限。FastAPI の `Query` には件数の制約を表す機能が
+# 無いため、同様に `_reject_oversized_list` で明示的に検証する。
+FEED_LIST_FILTER_MAX_ITEMS = 20
 
 
 class RecommendationItem(BaseModel):
@@ -108,15 +117,24 @@ class ArticleRecommendationsResponse(BaseModel):
 
 
 class FeedResponse(BaseModel):
-    """Discover フィード（`GET /api/feed`）のレスポンス。"""
+    """Discover フィード（`GET /api/feed`）のレスポンス（Issue #90）。
+
+    ページングは番号付きページ（`page` / `page_size`）に統一する。
+    `total_count` は絞り込み後に run へ保存された件数（`count_recommendations`）で、
+    `limits.feed_run_size`（`config/scoring.yaml`）を超える候補は元々対象外になる
+    （決定済みの設計）。
+    """
 
     items: list[RecommendationItem]
-    # 次ページが無ければ null。
-    next_cursor: str | None
-
-
-class InvalidCursorError(Exception):
-    """壊れた cursor 文字列を検出したときの例外。"""
+    # run に保存された総件数（Bad 除外前。`_build_items` の Bad 除外は表示時だけの
+    # ものなので `total_count` には影響しない）。
+    total_count: int
+    # 要求されたページ番号（1 始まり）。範囲外でもそのまま返す。
+    page: int
+    # 1 ページあたりの件数（`limit` クエリパラメータの値）。
+    page_size: int
+    # `total_count` を `page_size` で割って切り上げた総ページ数。0 件なら 0。
+    total_pages: int
 
 
 def _build_item(
@@ -209,58 +227,53 @@ def _build_items(
     ]
 
 
-def _encode_cursor(run_id: uuid.UUID, rank: int) -> str:
-    """run_id と直前ページ最後の rank から、不透明な cursor 文字列を作る。
+def _reject_oversized_list(values: Sequence[str] | None, *, param_name: str) -> None:
+    """`topics` / `technologies` の件数・要素ごとの長さを検証し、超過なら 422。
 
-    URL セーフな base64 にし、末尾の `=` パディングは取り除く（クエリ文字列に
-    そのまま載せやすくするため）。
+    FastAPI の `Query(max_length=...)` は `list[str]` の要素単位には効かず、
+    件数の制約を表す機能も無いため（実機で確認済み、`FEED_LIST_FILTER_MAX_ITEMS`
+    のコメント参照）、`api/articles.py` の `_reject_naive_datetime` と同じ
+    「関数本体で明示チェックして `HTTPException` を送出する」方式で検証する
+    （Issue #90 自己レビュー）。
     """
-    raw = f"{run_id}{_CURSOR_SEPARATOR}{rank}".encode()
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
-def _decode_cursor(cursor: str) -> tuple[uuid.UUID, int]:
-    """cursor 文字列を run_id と rank へ復元する。
-
-    壊れた cursor（長すぎる・base64 として不正・区切り文字が無い・rank の桁数が
-    異常・UUID/整数として不正）はすべて `InvalidCursorError` にまとめる。
-    呼び出し側で 400 に変換する。
-    """
-    if len(cursor) > CURSOR_MAX_LENGTH:
-        raise InvalidCursorError
-
-    padding = "=" * (-len(cursor) % 4)
-    try:
-        raw = base64.urlsafe_b64decode(cursor + padding).decode("utf-8")
-        run_id_text, rank_text = raw.rsplit(_CURSOR_SEPARATOR, 1)
-    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
-        raise InvalidCursorError from exc
-
-    # 極端に長い桁数の文字列を int() へ渡さないよう、変換前に桁数を検証する。
-    # `CURSOR_MAX_LENGTH` はこの桁数から導出しているため、桁数超過の大半は
-    # 手前の長さ検証で弾かれる。ここで実際に弾けるのは base64 の端数ぶんだけ
-    # 長さ上限に収まってしまうケースで、独立した防御層ではない。
-    if len(rank_text.removeprefix("-")) > _MAX_CURSOR_RANK_DIGITS:
-        raise InvalidCursorError
-
-    try:
-        return uuid.UUID(run_id_text), int(rank_text)
-    except ValueError as exc:
-        raise InvalidCursorError from exc
+    if not values:
+        return
+    if len(values) > FEED_LIST_FILTER_MAX_ITEMS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(f"{param_name} の件数が上限（{FEED_LIST_FILTER_MAX_ITEMS}件）を超えています"),
+        )
+    for value in values:
+        if len(value) > FEED_LIST_FILTER_MAX_ITEM_LENGTH:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"{param_name} の要素は{FEED_LIST_FILTER_MAX_ITEM_LENGTH}文字以下にしてください"
+                ),
+            )
 
 
 def _resolve_discover_run_id(
-    session: Session, settings: Settings, user_id: uuid.UUID, now: datetime
+    session: Session,
+    settings: Settings,
+    user_id: uuid.UUID,
+    now: datetime,
+    feed_filters: FeedFilters,
 ) -> uuid.UUID:
-    """cursor 無しの `GET /api/feed` が使う run の id を決める。
+    """`GET /api/feed` が使う run の id を決める（Issue #90）。
 
-    直近の DISCOVER run が再利用してよい時間内（`config/scoring.yaml` の
+    `feed_filters` から計算したフィンガープリント（`compute_filter_fingerprint`）が
+    一致する直近の DISCOVER run が再利用してよい時間内（`config/scoring.yaml` の
     `limits.feed_run_reuse_seconds`）なら新規生成せずその run を再利用し、
     そうでなければ新規生成する。`feed_run_reuse_seconds` が 0 の場合は常に
-    新規生成する（無効化）。
+    新規生成する（無効化）。絞り込み無し（`FeedFilters()`）でも同じ規則で判定する
+    （空条件のフィンガープリントで一致させる）。
+
+    絞り込みは表示中の run だけを絞るのではなく、`generate_recommendations` が
+    候補読み込みの時点から絞り込んで推薦を作り直す（決定済みの設計）。
 
     直近 run の読み取りと生成の間に排他制御は掛けないため、ほぼ同時に届いた
-    cursor 無しのリクエストは、いずれも「再利用できる run が無い」と判断して
+    同一条件のリクエストは、いずれも「再利用できる run が無い」と判断して
     それぞれ run を作りうる。単一ユーザー・ローカル実行の前提では実害が小さい
     ため許容する。古い run は `jobs/handlers/purge_recommendation_runs.py` が
     保持期間超過分を削除し、この関数自体の呼び出し過多は `rate_limit.py` の
@@ -268,13 +281,18 @@ def _resolve_discover_run_id(
     """
     reuse_seconds = get_scoring_config().limits.feed_run_reuse_seconds
     if reuse_seconds > 0:
-        latest_run = find_latest_run(session, user_id, RecommendationMode.DISCOVER)
+        fingerprint = compute_filter_fingerprint(feed_filters)
+        latest_run = find_latest_run(
+            session, user_id, RecommendationMode.DISCOVER, fingerprint=fingerprint
+        )
         if latest_run is not None and now - latest_run.generated_at <= timedelta(
             seconds=reuse_seconds
         ):
             return latest_run.id
 
-    result = generate_recommendations(session, user_id, RecommendationMode.DISCOVER, settings, now)
+    result = generate_recommendations(
+        session, user_id, RecommendationMode.DISCOVER, settings, now, feed_filters=feed_filters
+    )
     return result.run_id
 
 
@@ -336,56 +354,92 @@ def get_feed(
     settings: SettingsDep,
     user_id: UserIdDep,
     now: NowDep,
-    cursor: Annotated[
-        str | None, Query(description="前回レスポンスの next_cursor をそのまま渡す")
+    q: Annotated[
+        str | None,
+        Query(
+            description="検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）",
+            max_length=FEED_TEXT_FILTER_MAX_LENGTH,
+        ),
     ] = None,
+    topics: Annotated[
+        list[str] | None,
+        Query(description="トピック。複数指定時は指定した全てを含む記事に絞る（AND）"),
+    ] = None,
+    technologies: Annotated[
+        list[str] | None,
+        Query(description="技術タグ。複数指定時は指定した全てを含む記事に絞る（AND）"),
+    ] = None,
+    published_from: Annotated[
+        datetime | None, Query(description="公開日の下限（published_at、NULLはfetched_atで代替）")
+    ] = None,
+    published_to: Annotated[datetime | None, Query(description="公開日の上限")] = None,
+    source_domain: Annotated[
+        str | None,
+        Query(description="情報源ドメインの完全一致", max_length=FEED_TEXT_FILTER_MAX_LENGTH),
+    ] = None,
+    max_age_days: Annotated[
+        int,
+        Query(
+            ge=MIN_FEED_MAX_AGE_DAYS,
+            le=MAX_FEED_MAX_AGE_DAYS,
+            description=(
+                "フィード対象期間（日数）。省略時はconfig/scoring.yamlのfreshness."
+                "max_age_daysを使う。freshnessスコアの減衰基準（新しさの点数）は"
+                "この値を変えても変わらない"
+            ),
+        ),
+    ] = DEFAULT_FEED_MAX_AGE_DAYS,
+    page: Annotated[int, Query(ge=1, description="1始まりのページ番号")] = 1,
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
 ) -> FeedResponse:
-    """Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。
+    """Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。
 
-    `cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の
-    `limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ
-    新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。
-    `cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、
-    ページ間で重複が出ないようにする（受入基準）。
+    `q` / `topics` / `technologies` / `published_from` / `published_to` /
+    `source_domain` / `max_age_days` はいずれも省略可能な絞り込み条件で、全候補を
+    対象に推薦を作り直す（決定済みの設計、`generate_recommendations` の
+    `feed_filters`）。条件を反映したフィンガープリントが一致する直近の DISCOVER
+    run が再利用してよい時間内（`config/scoring.yaml` の
+    `limits.feed_run_reuse_seconds`）ならその run を再利用し、そうでなければ
+    新しい run を生成する（`_resolve_discover_run_id`）。
 
-    `next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で
-    cursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が
-    非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで
-    終端と判断せず、`next_cursor` が null になるまで辿ること。
+    `max_age_days` はフィードの対象期間そのもの（候補の絞り込み）を変える
+    パラメータで、freshness スコアの減衰基準（`ranking.compute_freshness`）とは
+    無関係（Issue #90 自己レビュー、`FeedFilters.max_age_days` のコメント参照）。
+    従来は `config/scoring.yaml` の `freshness.max_age_days`（既定 7 日）を
+    超える公開日で `published_from` / `published_to` を指定すると、この
+    ハード除外の内側でしか絞り込みが効かず黙って 0 件になっていた
+    （Issue #90 自己レビューで判明した不具合そのもの）。
+
+    ページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset
+    として扱う。`total_count` は run に保存された件数（Bad 除外前）であり、
+    範囲外の `page` はエラーにせず空の `items` を返す。
 
     古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を
     削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。
     """
-    if cursor is None:
-        run_id = _resolve_discover_run_id(session, settings, user_id, now)
-        after_rank: int | None = None
-    else:
-        try:
-            run_id, after_rank = _decode_cursor(cursor)
-        except InvalidCursorError as exc:
-            logger.warning("cursor のデコードに失敗しました")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="cursor が不正です"
-            ) from exc
+    _reject_oversized_list(topics, param_name="topics")
+    _reject_oversized_list(technologies, param_name="technologies")
 
-        run = session.get(RecommendationRun, run_id)
-        # 別ユーザーの run・記事起点推薦の run（mode が違う）を指す cursor も、
-        # このフィードの続きとしては無効として扱う。
-        if run is None or run.user_id != user_id or run.mode != RecommendationMode.DISCOVER.value:
-            logger.warning("cursor が指す run が見つからないか一致しません: run_id=%s", run_id)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="cursor が指す推薦結果が見つかりません",
-            )
+    feed_filters = FeedFilters(
+        query=q,
+        topics=tuple(topics) if topics else (),
+        technologies=tuple(technologies) if technologies else (),
+        published_from=published_from,
+        published_to=published_to,
+        source_domain=source_domain,
+        max_age_days=max_age_days,
+    )
+    run_id = _resolve_discover_run_id(session, settings, user_id, now, feed_filters)
 
-    # 次ページの有無を判定するため、要求件数より 1 件多く取得する。
-    rows = load_recommendation_page(session, run_id, after_rank=after_rank, limit=limit + 1)
-    has_next_page = len(rows) > limit
-    page_rows = rows[:limit]
+    total_count = count_recommendations(session, run_id)
+    total_pages = math.ceil(total_count / limit) if total_count > 0 else 0
+    offset = (page - 1) * limit
+    rows = load_recommendation_page(session, run_id, offset=offset, limit=limit)
 
-    next_cursor = _encode_cursor(run_id, page_rows[-1][0].rank) if has_next_page else None
     return FeedResponse(
-        items=_build_items(session, user_id, page_rows),
-        next_cursor=next_cursor,
+        items=_build_items(session, user_id, rows),
+        total_count=total_count,
+        page=page,
+        page_size=limit,
+        total_pages=total_pages,
     )
