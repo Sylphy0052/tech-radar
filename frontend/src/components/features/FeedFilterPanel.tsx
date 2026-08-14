@@ -11,6 +11,7 @@ import {
   jstDateToPublishedFromIso,
   jstDateToPublishedToIso,
   parseFeedFiltersFromSearchParams,
+  parseMaxAgeDaysOrNull,
 } from "@/lib/feed";
 import type { FeedFilters } from "@/lib/feed";
 
@@ -42,16 +43,16 @@ function parseCommaSeparatedList(value: FormDataEntryValue | null): string[] {
  * 対象期間の入力値を日数へ変換する。空欄・整数でない値・範囲外は `null`
  * （backend の既定に任せる）へ落とす。`<input type="number">` は min/max を
  * 付けても手入力やブラウザによっては範囲外の値を送れるため、ここでも確かめる。
+ *
+ * 判定そのものは URL から復元するときと同じ `parseMaxAgeDaysOrNull` に任せ、
+ * ここは `FormData` の値を文字列へ均すだけにする（境界値を二重に持たない）。
  */
 function parseMaxAgeDaysField(value: FormDataEntryValue | null): number | null {
-  if (typeof value !== "string" || value.trim() === "") {
+  if (typeof value !== "string") {
     return null;
   }
-  const days = Number(value);
-  if (!Number.isInteger(days) || days < MIN_FEED_MAX_AGE_DAYS || days > MAX_FEED_MAX_AGE_DAYS) {
-    return null;
-  }
-  return days;
+  const trimmed = value.trim();
+  return parseMaxAgeDaysOrNull(trimmed === "" ? null : trimmed);
 }
 
 /**

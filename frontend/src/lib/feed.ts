@@ -79,8 +79,11 @@ function parseValidIsoDateOrNull(value: string | null): string | null {
  * `parseValidIsoDateOrNull` と同じ狙いで、壊れた URL クエリをそのまま
  * `GET /api/feed` へ送って 422 にしないための防御。範囲外は「指定なし」として
  * backend の既定へ落とす。
+ *
+ * URL からの復元（この下の `parseFeedFiltersFromSearchParams`）と、フォーム送信時の
+ * 検証（`FeedFilterPanel`）の両方から使う。境界値の判定を1箇所に置くため export する。
  */
-function parseMaxAgeDaysOrNull(value: string | null): number | null {
+export function parseMaxAgeDaysOrNull(value: string | null): number | null {
   if (value === null) {
     return null;
   }
