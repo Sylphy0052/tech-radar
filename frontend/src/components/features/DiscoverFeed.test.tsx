@@ -2,6 +2,7 @@ import { configure, fireEvent, render, screen, waitFor } from "@testing-library/
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DiscoverFeed } from "@/components/features/DiscoverFeed";
+import { MAX_FEED_PAGE } from "@/lib/feed";
 import type { FeedItem } from "@/lib/feed";
 import { NavigationTestProvider, useNavigationTestContext } from "@/test-utils/next-navigation-test-context";
 import { TEST_TIMEOUT_MS, WAIT_TIMEOUT_MS } from "@/test-utils/timeouts";
@@ -291,7 +292,10 @@ describe("DiscoverFeed", () => {
     await waitFor(() => expect(browserQuery()).toBe("page=2"));
   }, TEST_TIMEOUT_MS);
 
-  it("adds the page number to the browser history so back returns to the previous page", async () => {
+  // このテストダブルは History スタックを持たないため、「戻ると本当に前のページへ
+  // 帰る」ことそのものは見られない。`replace` だと戻れないので、`push` を使っている
+  // ことを見るのが、この層で押さえられる一番近いところになる（Issue #95 の背景）。
+  it("pushes a new history entry instead of replacing the current one", async () => {
     // Arrange
     stubFeedPages({ totalPages: 3, totalCount: 6 });
     renderFeed();
@@ -300,8 +304,25 @@ describe("DiscoverFeed", () => {
     // Act
     fireEvent.click(screen.getByRole("button", { name: "2ページ目へ" }));
 
-    // Assert — `replace` だと戻るでページを1つ戻れない（Issue #95 の背景）
+    // Assert
     await waitFor(() => expect(navigationKinds()).toBe("push"));
+  }, TEST_TIMEOUT_MS);
+
+  it("does not touch the history when the current page button is clicked", async () => {
+    // `Pagination` が無効化するのは「前へ」「次へ」だけで、今見ているページ番号の
+    // ボタンは押せる。弾かないと URL が変わらないまま履歴だけが積まれ、戻るボタンを
+    // 余計に押さないと前のページへ帰れなくなる。
+    // Arrange
+    stubFeedPages({ totalPages: 3, totalCount: 6 });
+    renderFeed("page=2");
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(2));
+
+    // Act — 今いる2ページ目のボタンをもう一度押す
+    fireEvent.click(screen.getByRole("button", { name: "2ページ目へ" }));
+
+    // Assert
+    await waitFor(() => expect(browserQuery()).toBe("page=2"));
+    expect(navigationKinds()).toBe("");
   }, TEST_TIMEOUT_MS);
 
   it("opens the page given in the URL on mount", async () => {
@@ -372,7 +393,7 @@ describe("DiscoverFeed", () => {
     ["a negative page", "page=-1"],
     ["a fractional page", "page=1.5"],
     ["a non-numeric page", "page=abc"],
-    ["a page above the backend upper bound", "page=1000001"],
+    ["a page above the backend upper bound", `page=${MAX_FEED_PAGE + 1}`],
   ])("shows the first page for a URL with %s", async (_label, search) => {
     // Arrange
     const fetchMock = stubFeedPages({ totalPages: 3, totalCount: 6 });

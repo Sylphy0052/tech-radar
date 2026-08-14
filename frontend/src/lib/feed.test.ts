@@ -195,6 +195,35 @@ describe("parseFeedPageOrFirst", () => {
   }, TEST_TIMEOUT_MS);
 });
 
+describe("MAX_FEED_PAGE", () => {
+  // backend の `MAX_PAGE_NUMBER` を写経した値なので、片方だけ変えるとずれる。ずれても
+  // 型チェックも lint も通り、気付くのは実際に 422 が出たときになる。openapi.json は
+  // backend の実装から生成しているため、そこに出た上限と突き合わせれば機械で押さえられる
+  // （`check.sh` の「openapi.jsonの鮮度」が openapi.json 自体の古さを見ているので、
+  // 生成が古いまま通り抜けることもない）。
+  it("matches the upper bound the backend advertises for GET /api/feed", async () => {
+    // Arrange
+    const { readFile } = await import("node:fs/promises");
+    const { resolve } = await import("node:path");
+    // `import.meta.url` は vite の変換後に file: スキームでなくなるため使えない。
+    // vitest は `frontend/` から起動する（`package.json` の `test` を `check.sh` が
+    // その位置で叩く）ので、そこからの相対で解決する。
+    const openapi = JSON.parse(
+      await readFile(resolve(process.cwd(), "../backend/openapi.json"), "utf-8"),
+    ) as {
+      paths: Record<string, { get: { parameters: { name: string; schema: { maximum?: number } }[] } }>;
+    };
+
+    // Act
+    const pageParameter = openapi.paths["/api/feed"]?.get.parameters.find(
+      (parameter) => parameter.name === "page",
+    );
+
+    // Assert
+    expect(pageParameter?.schema.maximum).toBe(MAX_FEED_PAGE);
+  }, TEST_TIMEOUT_MS);
+});
+
 describe("buildSearchParamsFromFilters", () => {
   it("returns empty params for empty filters", () => {
     // Act

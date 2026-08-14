@@ -39,6 +39,14 @@ export function DiscoverFeed() {
   // スクロール位置を動かさないため。`push` の既定は先頭へスクロールする。
   const handlePageChange = useCallback(
     (nextPage: number) => {
+      if (nextPage === page) {
+        // 今見ているページ番号のボタンは押せる（`Pagination` が無効化するのは
+        // 「前へ」「次へ」だけ）。ここで弾かないと、URL が変わらないまま履歴だけが
+        // 積まれ、戻るボタンを余計に押さないと前のページへ帰れなくなる。
+        // 書き換え前は `useFeed` の `setPage` が同じガードを持っていた。
+        return;
+      }
+
       const params = new URLSearchParams(searchParams);
       if (nextPage === FIRST_FEED_PAGE) {
         // 1ページ目では `page` を URL に出さない（既定値を URL に出さないのは
@@ -50,7 +58,7 @@ export function DiscoverFeed() {
       const query = params.toString();
       router.push(query ? `${pathname}?${query}` : pathname, { scroll: false });
     },
-    [pathname, router, searchParams],
+    [page, pathname, router, searchParams],
   );
 
   const { items, isLoading, error, totalPages, totalCount, applyFeedback, removeFeedback } =
