@@ -6,6 +6,7 @@
 
 import { apiFetch } from "@/lib/api";
 import type { components } from "@/lib/api-schema";
+import { FIRST_PAGE, MAX_PAGE, parsePageOrFirst } from "@/lib/pagination";
 
 export type FeedResponse = components["schemas"]["FeedResponse"];
 
@@ -48,45 +49,18 @@ export const MIN_FEED_MAX_AGE_DAYS = 1;
 /** 対象期間として指定できる日数の上限（`api/recommendations.py` と揃える）。 */
 export const MAX_FEED_MAX_AGE_DAYS = 180;
 
-/** 1始まりのページ番号の下限（`Pagination` と backend の `page` は 1 始まり）。 */
-export const FIRST_FEED_PAGE = 1;
-
 /**
- * ページ番号の上限（`api/query_filters.py` の `MAX_PAGE_NUMBER` と揃える）。
- *
- * backend 側は `page * limit` が bigint に収まらなくなると OFFSET で 500 になるため、
- * この値を超える `page` を 422 で弾いている（Issue #96）。UI からは押せない値だが、
- * URL は手で書けるので、送る前にここでも弾く。
+ * ページングの定数とパーサの実体は `pagination.ts`（Issue #100 で関心記事一覧と
+ * 共有した）。名前を `Feed` 接頭辞のまま再export するのは、`DiscoverFeed.tsx` を
+ * はじめ呼び出し側の多くが既にこの名前を import しており、フィード固有の値である
+ * ように読める（実際に `getFeed` のオプションとして直接渡す）ため、置き換えると
+ * 差分が呼び出し側全体へ広がる一方で得るものが無いと判断したため。関心記事一覧側は
+ * 新設のため、こちらは `pagination.ts` の名前をそのまま使う（`useInterestArticles.ts`
+ * 等）。
  */
-export const MAX_FEED_PAGE = 1_000_000;
-
-/**
- * 10進の正の整数リテラルだけを受け付ける。`Number()` は `1e2` / `0x10` / `+3` /
- * ` 3 ` / `007` も数値へ変換するが、いずれもページ番号として打ち込まれたものでは
- * ないため、素通しさせず1ページ目へ落とす（ページャの表示と URL が食い違う）。
- * 先頭が `0` の桁を許さないので、`0` と `007` はここで落ちる。
- */
-const DECIMAL_PAGE_PATTERN = /^[1-9][0-9]*$/;
-
-/**
- * URL の `page` クエリを 1 始まりのページ番号として読む。10進の整数でない値・
- * 範囲外は1ページ目へ落とす。
- *
- * `parseMaxAgeDaysOrNull` と同じ狙いで、壊れた URL クエリをそのまま
- * `GET /api/feed` へ送って 422 にしないための防御である。共有リンク・ブラウザ履歴・
- * 手動編集でクエリは容易に壊れる。「エラーを見せる」より「1ページ目を見せる」方が、
- * 共有された URL の末尾が欠けていたときの体験として素直だと判断した。
- */
-export function parseFeedPageOrFirst(value: string | null): number {
-  if (value === null || !DECIMAL_PAGE_PATTERN.test(value)) {
-    return FIRST_FEED_PAGE;
-  }
-  const page = Number(value);
-  if (page < FIRST_FEED_PAGE || page > MAX_FEED_PAGE) {
-    return FIRST_FEED_PAGE;
-  }
-  return page;
-}
+export const FIRST_FEED_PAGE = FIRST_PAGE;
+export const MAX_FEED_PAGE = MAX_PAGE;
+export const parseFeedPageOrFirst = parsePageOrFirst;
 
 export const EMPTY_FEED_FILTERS: FeedFilters = {
   q: null,

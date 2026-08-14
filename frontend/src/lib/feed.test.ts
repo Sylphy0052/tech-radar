@@ -14,6 +14,7 @@ import {
   parseFeedPageOrFirst,
 } from "@/lib/feed";
 import type { FeedFilters, FeedResponse } from "@/lib/feed";
+import { FIRST_PAGE, MAX_PAGE, parsePageOrFirst } from "@/lib/pagination";
 import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 afterEach(() => {
@@ -167,75 +168,16 @@ describe("parseFeedFiltersFromSearchParams", () => {
   }, TEST_TIMEOUT_MS);
 });
 
-describe("parseFeedPageOrFirst", () => {
-  it("falls back to the first page when the query is absent", () => {
-    expect(parseFeedPageOrFirst(null)).toBe(FIRST_FEED_PAGE);
-  }, TEST_TIMEOUT_MS);
-
-  it("reads a valid page number", () => {
-    expect(parseFeedPageOrFirst("3")).toBe(3);
-  }, TEST_TIMEOUT_MS);
-
-  it("accepts the upper bound shared with the backend", () => {
-    expect(parseFeedPageOrFirst(String(MAX_FEED_PAGE))).toBe(MAX_FEED_PAGE);
-  }, TEST_TIMEOUT_MS);
-
-  // 壊れた URL をそのまま `GET /api/feed` へ送ると 422 になる。共有リンク・履歴・
-  // 手動編集でクエリは容易に壊れるため、1ページ目へ落として表示だけは成立させる
-  // （`parseMaxAgeDaysOrNull` と同じ狙い）。
-  it.each([
-    ["a negative page", "-1"],
-    ["zero", "0"],
-    ["a fractional page", "1.5"],
-    ["a non-numeric page", "abc"],
-    ["an empty string", ""],
-    ["a page above the backend upper bound", String(MAX_FEED_PAGE + 1)],
-  ])("falls back to the first page for %s", (_label, value) => {
-    expect(parseFeedPageOrFirst(value)).toBe(FIRST_FEED_PAGE);
-  }, TEST_TIMEOUT_MS);
-
-  // `Number()` は10進の整数リテラル以外も数値へ変換する。これらはページ番号として
-  // 打ち込まれたものではなく、壊れた URL とみなして1ページ目へ落とす。素通しすると
-  // `page=1e2` のような URL が backend へそのまま渡り、ページャの表示と URL が
-  // 食い違ったまま100ページ目が出る。
-  it.each([
-    ["exponent notation", "1e2"],
-    ["hexadecimal notation", "0x10"],
-    ["a leading plus sign", "+3"],
-    ["surrounding whitespace", " 3 "],
-    ["leading zeros", "007"],
-    ["a numeric separator", "1_000"],
-  ])("falls back to the first page for %s", (_label, value) => {
-    expect(parseFeedPageOrFirst(value)).toBe(FIRST_FEED_PAGE);
-  }, TEST_TIMEOUT_MS);
-});
-
-describe("MAX_FEED_PAGE", () => {
-  // backend の `MAX_PAGE_NUMBER` を写経した値なので、片方だけ変えるとずれる。ずれても
-  // 型チェックも lint も通り、気付くのは実際に 422 が出たときになる。openapi.json は
-  // backend の実装から生成しているため、そこに出た上限と突き合わせれば機械で押さえられる
-  // （`check.sh` の「openapi.jsonの鮮度」が openapi.json 自体の古さを見ているので、
-  // 生成が古いまま通り抜けることもない）。
-  it("matches the upper bound the backend advertises for GET /api/feed", async () => {
-    // Arrange
-    const { readFile } = await import("node:fs/promises");
-    const { resolve } = await import("node:path");
-    // `import.meta.url` は vite の変換後に file: スキームでなくなるため使えない。
-    // vitest は `frontend/` から起動する（`package.json` の `test` を `check.sh` が
-    // その位置で叩く）ので、そこからの相対で解決する。
-    const openapi = JSON.parse(
-      await readFile(resolve(process.cwd(), "../backend/openapi.json"), "utf-8"),
-    ) as {
-      paths: Record<string, { get: { parameters: { name: string; schema: { maximum?: number } }[] } }>;
-    };
-
-    // Act
-    const pageParameter = openapi.paths["/api/feed"]?.get.parameters.find(
-      (parameter) => parameter.name === "page",
-    );
-
-    // Assert
-    expect(pageParameter?.schema.maximum).toBe(MAX_FEED_PAGE);
+// `parseFeedPageOrFirst` / `FIRST_FEED_PAGE` / `MAX_FEED_PAGE` の実体は
+// `pagination.ts` の `parsePageOrFirst` / `FIRST_PAGE` / `MAX_PAGE`（Issue #100 で
+// 関心記事一覧と共有した）。境界値の検証と openapi.json との突き合わせは
+// `pagination.test.ts` に寄せてあるため、ここでは feed.ts が同じものを指している
+// ことだけを確認する（二重に境界値を書き写さない）。
+describe("parseFeedPageOrFirst / FIRST_FEED_PAGE / MAX_FEED_PAGE", () => {
+  it("re-export the shared pagination.ts constants and parser as-is", () => {
+    expect(parseFeedPageOrFirst).toBe(parsePageOrFirst);
+    expect(FIRST_FEED_PAGE).toBe(FIRST_PAGE);
+    expect(MAX_FEED_PAGE).toBe(MAX_PAGE);
   }, TEST_TIMEOUT_MS);
 });
 
