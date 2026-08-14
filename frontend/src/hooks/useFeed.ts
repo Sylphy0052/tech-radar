@@ -13,17 +13,11 @@ interface UseFeedResult {
   items: FeedItem[];
   isLoading: boolean;
   error: string | null;
-  /** 1始まりの現在ページ番号。 */
-  page: number;
   totalPages: number;
   totalCount: number;
-  /** ページを移動する。`Pagination` の `onPageChange` へそのまま渡す想定。 */
-  setPage: (page: number) => void;
   applyFeedback: (articleId: string, action: FeedbackAction, reason?: BadReason) => void;
   removeFeedback: (articleId: string) => void;
 }
-
-const FIRST_PAGE = 1;
 
 /** 指定 article_id の項目だけ feedback を書き換えた新しい配列を返す。 */
 function withFeedback(
@@ -42,23 +36,33 @@ function withFeedback(
  * rank に対する offset で、cursor と違い同じページを何度でも取り直せる設計の
  * ため、蓄積して重複排除する必要が無くなった）。
  *
- * フィルターが変わったかどうかは `useInterestArticles` と同じ「レンダー中に
- * 前回値と比較して直す」パターンで検出し、ページ番号を1へ戻す
+ * ページ番号はこの hook では持たず、呼び出し側（`DiscoverFeed`）が URL から読んで
+ * 引数で渡す（Issue #95）。URL を唯一の情報源にすることで、リロード・共有・戻る操作で
+ * ページが再現する。フィルター条件が URL クエリだけを情報源にしているのと同じ扱いで、
+ * 状態の持ち方が非対称でなくなる。
+ *
+ * そのため「フィルターが変わったらページを1へ戻す」処理はここには無い。`page` を
+ * `buildSearchParamsFromFilters` の対象に含めていないため、`FeedFilterPanel` が
+ * フィルター変更時に URL を組み立て直すと `page` は自然に落ちる。**将来
+ * `buildSearchParamsFromFilters` へ `page` を足すとこの性質が壊れる**（フィルターを
+ * 変えてもページ番号が残り、範囲外のページを見せてしまう）。
+ *
+ * フィルターとページのどちらが変わったかは `useInterestArticles` と同じ「レンダー中に
+ * 前回値と比較して直す」パターンで検出し、読み込み中の表示へ切り替える
  * （https://react.dev/learn/you-might-not-need-an-effect の
- * "Adjusting state when a prop changes"）。フィルター・ページのどちらの変更も
- * 同じ effect が取得を担い、`cancelled` フラグで古いレスポンスの反映を防ぐ
- * （`filters` か `page` が変わるたびに cleanup が走り、直前のフェッチの結果を
- * 無効化する。`useInterestArticles.loadMore` の `filterKeyRef` と同じ「古い
- * レスポンスを破棄する」狙いを、こちらは effect の cleanup で満たす）。
+ * "Adjusting state when a prop changes"）。どちらの変更も同じ effect が取得を担い、
+ * `cancelled` フラグで古いレスポンスの反映を防ぐ（`filters` か `page` が変わるたびに
+ * cleanup が走り、直前のフェッチの結果を無効化する。`useInterestArticles.loadMore` の
+ * `filterKeyRef` と同じ「古いレスポンスを破棄する」狙いを、こちらは effect の
+ * cleanup で満たす）。
  *
  * フィードバックの楽観的更新（Good/Bad/保存）は書き換え前の `useFeed` と同じ
  * 設計を引き継ぐ：先にローカル state を書き換えてから API を呼び、失敗時は
  * 呼び出し前の状態へロールバックする。最新の items はレンダー時の `items` を
  * 直接参照する（Issue #37 の教訓、`itemsRef` 経由のミラーは使わない）。
  */
-export function useFeed(filters: FeedFilters): UseFeedResult {
+export function useFeed(filters: FeedFilters, page: number): UseFeedResult {
   const [items, setItems] = useState<FeedItem[]>([]);
-  const [page, setPageState] = useState(FIRST_PAGE);
   const [totalPages, setTotalPages] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
@@ -89,7 +93,22 @@ export function useFeed(filters: FeedFilters): UseFeedResult {
   const [previousFilterKey, setPreviousFilterKey] = useState(filterKey);
   if (filterKey !== previousFilterKey) {
     setPreviousFilterKey(filterKey);
-    setPageState(FIRST_PAGE);
+    setItems([]);
+    setError(null);
+    setIsLoading(true);
+  }
+
+  // ページ移動でも読み込み中にする。`useEffect` の本体で `setIsLoading(true)` を
+  // 同期的に呼ぶとカスケード再レンダーになる（react-hooks/set-state-in-effect が
+  // 検出する）ため、読み込み開始の合図はフィルター変更と同じくレンダー中の比較で
+  // 立て、effect 側は結果反映の setState だけにする。
+  //
+  // 前の items を残さないのは、範囲外のページを開いたときに前ページの記事が
+  // 見えたままにならないようにするため（`DiscoverFeed` は items が空のときに
+  // 「このページには記事がありません」を出す）。
+  const [previousPage, setPreviousPage] = useState(page);
+  if (page !== previousPage) {
+    setPreviousPage(page);
     setItems([]);
     setError(null);
     setIsLoading(true);
@@ -127,23 +146,6 @@ export function useFeed(filters: FeedFilters): UseFeedResult {
     // 参照を安定させる想定だが、安定していなくても（`filterKey` の値が同じなら
     // 上のリセットが起きないため）正しく動く（`useInterestArticles` と同じ狙い）。
   }, [filters, page]);
-
-  // ページ移動でも読み込み中にする。`useEffect` の本体で `setIsLoading(true)` を
-  // 同期的に呼ぶとカスケード再レンダーになる（react-hooks/set-state-in-effect が
-  // 検出する）ため、読み込み開始の合図は「取得のきっかけを作る側」であるここと
-  // 上のフィルター変更検出へ寄せ、effect 側は結果反映の setState だけにする
-  // （`useInterestArticles` と同じ形）。同じページ番号への移動では effect が
-  // 走らないので、読み込み中のまま止まらないよう先に弾く。
-  const setPage = useCallback(
-    (nextPage: number) => {
-      if (nextPage === page) {
-        return;
-      }
-      setPageState(nextPage);
-      setIsLoading(true);
-    },
-    [page],
-  );
 
   const applyFeedback = useCallback(
     (articleId: string, action: FeedbackAction, reason?: BadReason) => {
@@ -249,10 +251,8 @@ export function useFeed(filters: FeedFilters): UseFeedResult {
     items,
     isLoading,
     error,
-    page,
     totalPages,
     totalCount,
-    setPage,
     applyFeedback,
     removeFeedback,
   };

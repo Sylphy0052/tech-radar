@@ -81,13 +81,12 @@ describe("useFeed", () => {
     const fetchMock = stubFeedPages({ 1: [itemA, itemB] });
 
     // Act
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
 
     // Assert
     expect(result.current.isLoading).toBe(true);
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.items).toEqual([itemA, itemB]);
-    expect(result.current.page).toBe(1);
     expect(result.current.totalPages).toBe(2);
     expect(result.current.totalCount).toBe(4);
     expect(result.current.error).toBeNull();
@@ -98,55 +97,53 @@ describe("useFeed", () => {
   it("replaces items with the requested page instead of appending", async () => {
     // Arrange
     stubFeedPages({ 1: [itemA, itemB], 2: [itemB, itemC] });
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result, rerender } = renderHook(({ page }) => useFeed(FILTERS_A, page), {
+      initialProps: { page: 1 },
+    });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
-    // Act
-    act(() => {
-      result.current.setPage(2);
-    });
-    await waitFor(() => expect(result.current.page).toBe(2));
+    // Act — ページ番号は URL 由来で、呼び出し側が渡し直す（Issue #95）
+    rerender({ page: 2 });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Assert — 2ページ目の内容にまるごと差し替わる（追記ではない）
     expect(result.current.items).toEqual([itemB, itemC]);
   }, TEST_TIMEOUT_MS);
 
-  it("requests the API again with the new page number when setPage is called", async () => {
+  it("requests the API again when the page argument changes", async () => {
     // Arrange
     const fetchMock = stubFeedPages({ 1: [itemA], 2: [itemB] });
-    const { result } = renderHook(() => useFeed(FILTERS_A));
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-
-    // Act
-    act(() => {
-      result.current.setPage(2);
+    const { result, rerender } = renderHook(({ page }) => useFeed(FILTERS_A, page), {
+      initialProps: { page: 1 },
     });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
-    // Assert
+    // Act
+    rerender({ page: 2 });
+
+    // Assert — 渡し直した直後から読み込み中になる（`DiscoverFeed` がページャを
+    // 押した瞬間にローディング表示へ切り替わる）
+    expect(result.current.isLoading).toBe(true);
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
     const lastCall = fetchMock.mock.calls.at(-1) as [string];
     expect(pageFromUrl(lastCall[0])).toBe(2);
   }, TEST_TIMEOUT_MS);
 
-  it("resets to page 1 and refetches when the filters change", async () => {
-    // Arrange
+  it("refetches with the new filters and the page it is given", async () => {
+    // ページ番号を1へ戻すのはこの hook の役目ではない（Issue #95 で URL 側へ移した）。
+    // `FeedFilterPanel` がフィルター変更時に URL を組み立て直すと `page` が落ちるため、
+    // ここには1ページ目が渡ってくる。hook はそれをそのまま使って取り直す。
+    // URL から `page` が消えることの検証は `DiscoverFeed.test.tsx` にある。
     const fetchMock = stubFeedPages({ 1: [itemA], 2: [itemB] });
-    const { result, rerender } = renderHook(({ filters }) => useFeed(filters), {
-      initialProps: { filters: FILTERS_A },
+    const { result, rerender } = renderHook(({ filters, page }) => useFeed(filters, page), {
+      initialProps: { filters: FILTERS_A, page: 2 },
     });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
-    act(() => {
-      result.current.setPage(2);
-    });
-    await waitFor(() => expect(result.current.page).toBe(2));
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
 
-    // Act — 条件を変える
-    rerender({ filters: FILTERS_B });
+    // Act — 条件を変え、あわせて1ページ目を渡す（URL 側で `page` が落ちた状態）
+    rerender({ filters: FILTERS_B, page: 1 });
 
-    // Assert — ページ番号が1へ戻る
-    await waitFor(() => expect(result.current.page).toBe(1));
+    // Assert
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const lastCall = fetchMock.mock.calls.at(-1) as [string];
     expect(pageFromUrl(lastCall[0])).toBe(1);
@@ -172,16 +169,14 @@ describe("useFeed", () => {
       });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result, rerender } = renderHook(({ page }) => useFeed(FILTERS_A, page), {
+      initialProps: { page: 1 },
+    });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
-    act(() => {
-      result.current.setPage(2);
-    });
-    act(() => {
-      result.current.setPage(3);
-    });
+    rerender({ page: 2 });
+    rerender({ page: 3 });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // ページ2の応答が（3へ移った）後から解決しても反映されない
@@ -190,7 +185,6 @@ describe("useFeed", () => {
     );
 
     // Assert
-    expect(result.current.page).toBe(3);
     expect(result.current.items).toEqual([itemC]);
   }, TEST_TIMEOUT_MS);
 
@@ -199,7 +193,7 @@ describe("useFeed", () => {
     stubFeedPages({ 1: [] }, { totalPages: 0, totalCount: 0 });
 
     // Act
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
 
     // Assert
     await waitFor(() => expect(result.current.isLoading).toBe(false));
@@ -213,7 +207,7 @@ describe("useFeed", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
 
     // Act
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
 
     // Assert
     await waitFor(() => expect(result.current.isLoading).toBe(false));
@@ -234,7 +228,7 @@ describe("useFeed", () => {
       return jsonResponse({ items: [itemA], total_count: 1, page: 1, page_size: 20, total_pages: 1 });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
@@ -261,7 +255,7 @@ describe("useFeed", () => {
       return jsonResponse({ items: [itemA], total_count: 1, page: 1, page_size: 20, total_pages: 1 });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
@@ -296,7 +290,7 @@ describe("useFeed", () => {
       });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.items[0]?.feedback?.action).toBe("good");
 
@@ -332,7 +326,7 @@ describe("useFeed", () => {
       return jsonResponse({ items: [withBad], total_count: 1, page: 1, page_size: 20, total_pages: 1 });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act — 既に理由なしの bad が付いている記事へ、理由を指定して bad を送り直す
@@ -368,7 +362,7 @@ describe("useFeed", () => {
       });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
@@ -390,7 +384,7 @@ describe("useFeed", () => {
     // Arrange
     const fetchMock = stubFeedPages({ 1: [itemA] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const callCountBefore = fetchMock.mock.calls.length;
 
@@ -430,7 +424,7 @@ describe("useFeed", () => {
       });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act — 再レンダリングを挟まず、同じ articleId に対して連続で applyFeedback を呼ぶ
@@ -449,7 +443,7 @@ describe("useFeed", () => {
     // Arrange
     const fetchMock = stubFeedPages({ 1: [itemA] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const callCountBefore = fetchMock.mock.calls.length;
 
@@ -469,7 +463,7 @@ describe("useFeed", () => {
     // Arrange — 一覧が出た直後のクリックを取りこぼさないことを固定する。
     stubFeedPages({ 1: [itemA] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
     const applyFeedbackWhileEmpty = result.current.applyFeedback;
     expect(result.current.items).toEqual([]);
 
@@ -495,7 +489,7 @@ describe("useFeed", () => {
     // 書き換えで一度落ちたため、対を揃えて戻した（Issue #90 自己レビュー）。
     const fetchMock = stubFeedPages({ 1: [itemA] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     const callCountBefore = fetchMock.mock.calls.length;
 
@@ -529,7 +523,7 @@ describe("useFeed", () => {
       });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     // Act
@@ -554,7 +548,7 @@ describe("useFeed", () => {
     );
 
     // Act
-    const { result } = renderHook(() => useFeed(FILTERS_A));
+    const { result } = renderHook(() => useFeed(FILTERS_A, 1));
 
     // Assert
     await waitFor(() => expect(result.current.error).not.toBeNull());
