@@ -12,7 +12,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
@@ -76,6 +76,15 @@ class FeedFilters:
     `topics` / `technologies` は指定した全てを含む記事に絞る（AND）。
     `published_from` / `published_to` は `published_at` を基準にし、NULL の
     記事は `fetched_at` で代替する（`load_candidates` の既存ロジックに揃える）。
+
+    `max_age_days` はフィード対象期間（日数）。未指定（`None`）は
+    `config/scoring.yaml` の `freshness.max_age_days` を使うことを表す
+    （`load_candidates` が解決する）。freshness スコアの減衰基準
+    （`ranking.compute_freshness`）はこの値と無関係で、常に
+    `scoring.yaml` の `freshness.max_age_days` のまま変わらない
+    （`generate_recommendations` が使う `scoring_settings` 経由、Issue #90
+    自己レビュー）。対象期間を変えても同じ記事のスコアが変わらないのはこの
+    ためで、意図的に切り離してある。
     """
 
     query: str | None = None
@@ -84,6 +93,22 @@ class FeedFilters:
     published_from: datetime | None = None
     published_to: datetime | None = None
     source_domain: str | None = None
+    max_age_days: int | None = None
+
+
+def _isoformat_utc(value: datetime) -> str:
+    """`datetime` を UTC へ正規化してから ISO 8601 文字列にする。
+
+    同じ時刻でもタイムゾーンのオフセット表記（例: `+00:00` と `+09:00` で表した
+    同時刻）が違うと `isoformat()` の結果が異なり、`compute_filter_fingerprint`
+    が本来同一の条件を別条件として扱ってしまう（Issue #90 自己レビュー）。
+    naive な datetime は `fetcher/extract.py` / `collectors/brave.py` の
+    `_normalize_datetime` と同じ方針で、既に UTC とみなしてタイムゾーンだけ
+    付与する（システムのローカルタイムゾーンに暗黙依存させないため）。
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC).isoformat()
+    return value.astimezone(UTC).isoformat()
 
 
 def compute_filter_fingerprint(filters: FeedFilters) -> str:
@@ -92,6 +117,8 @@ def compute_filter_fingerprint(filters: FeedFilters) -> str:
     `topics` / `technologies` は指定順序だけが違っても同じ条件とみなすため、
     重複を除いてソートしてから正規化する（受入基準）。検索語は大文字小文字を
     区別しない実際の検索仕様（ILIKE）に揃え、前後の空白を除いて小文字化する。
+    `published_from` / `published_to` は UTC へ正規化してから文字列化する
+    （`_isoformat_utc`、Issue #90 自己レビュー）。
     SHA-256 のハッシュ値にすることで、検索語の長さに関わらず
     `recommendation_runs.filter_fingerprint`（Text 列）を扱いやすい固定長に保つ。
     """
@@ -99,9 +126,12 @@ def compute_filter_fingerprint(filters: FeedFilters) -> str:
         "query": filters.query.strip().lower() if filters.query else None,
         "topics": sorted(set(filters.topics)),
         "technologies": sorted(set(filters.technologies)),
-        "published_from": filters.published_from.isoformat() if filters.published_from else None,
-        "published_to": filters.published_to.isoformat() if filters.published_to else None,
+        "published_from": _isoformat_utc(filters.published_from)
+        if filters.published_from
+        else None,
+        "published_to": _isoformat_utc(filters.published_to) if filters.published_to else None,
         "source_domain": filters.source_domain,
+        "max_age_days": filters.max_age_days,
     }
     encoded = json.dumps(canonical, sort_keys=True, ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -204,9 +234,13 @@ def load_candidates(
     以下を除外する。
 
     * リンク切れ記事（`is_dead`）
-    * 公開から `config/scoring.yaml` の `freshness.max_age_days` を超えた記事
-      （`published_at` が NULL なら `fetched_at` で代替する）。freshness スコアの
-      減衰基準（`ranking.compute_freshness`）と単一の真実源を共有する
+    * 公開から対象期間（既定は `config/scoring.yaml` の `freshness.max_age_days`、
+      `feed_filters.max_age_days` を指定するとそちらを使う）を超えた記事
+      （`published_at` が NULL なら `fetched_at` で代替する）。この対象期間は
+      候補の絞り込みにのみ使い、freshness スコアの減衰基準
+      （`ranking.compute_freshness`）は常に `scoring.yaml` の
+      `freshness.max_age_days` のまま変える対象にしない（Issue #90 自己レビュー、
+      `FeedFilters.max_age_days` のコメント参照）
     * この user が Bad 済みの記事
     * この user が既に関心記事として登録済み（origin が manual/good/saved）の記事
     * `source_article_id`（記事起点推薦の起点記事自身）
@@ -226,6 +260,7 @@ def load_candidates(
       演算子は「左辺の配列が右辺の要素を全て含む」を表すため、そのまま AND 条件になる）
     * `published_from` / `published_to`: `published_or_fetched_at` に対する範囲
     * `source_domain`: 完全一致
+    * `max_age_days`: 上記の対象期間そのもの（未指定なら `freshness.max_age_days`）
 
     `user_articles`（is_read 判定用）と `source_registry` は候補記事数に
     関わらず 1 回ずつ取得して辞書化し、N+1 クエリを避ける。
@@ -238,7 +273,12 @@ def load_candidates(
 
     config = get_scoring_config()
     max_candidates = config.limits.max_candidates_per_run
-    since = now - timedelta(days=config.freshness.max_age_days)
+    max_age_days = (
+        feed_filters.max_age_days
+        if feed_filters is not None and feed_filters.max_age_days is not None
+        else config.freshness.max_age_days
+    )
+    since = now - timedelta(days=max_age_days)
 
     origins_by_article_id: dict[uuid.UUID, set[str]] = {}
     for article_id, origin in session.execute(

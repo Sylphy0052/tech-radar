@@ -51,6 +51,30 @@ _page_size_limits = get_scoring_config().limits
 DEFAULT_PAGE_SIZE = _page_size_limits.default_page_size
 MAX_PAGE_SIZE = _page_size_limits.max_page_size
 
+# GET /api/feed の対象期間（`max_age_days`）の範囲・既定値（Issue #90 自己レビュー）。
+# 既定は `config/scoring.yaml` の `freshness.max_age_days`（int へ丸める。同ファイルの
+# 型は float だが、実運用値は整数日のため小数へ揃える意味が無い）。180 日は
+# 「絞り込みなしに近い、実用上十分に広い期間」という目安で、コードから読み取れる
+# 制約ではないため上限として明記する（未定義な巨大値を候補読み込みへ渡さない安全弁）。
+MIN_FEED_MAX_AGE_DAYS = 1
+MAX_FEED_MAX_AGE_DAYS = 180
+DEFAULT_FEED_MAX_AGE_DAYS = int(get_scoring_config().freshness.max_age_days)
+
+# 検索語・情報源ドメインの入力長上限（`api/articles.py` の
+# `INTEREST_LIST_TEXT_FILTER_MAX_LENGTH` と同じ方針、Issue #90 自己レビュー）。
+# 際限なく長い文字列を ILIKE / 等価比較へ渡さないための安全弁。
+FEED_TEXT_FILTER_MAX_LENGTH = 256
+
+# topics / technologies の要素ごとの長さ上限。`FEED_TEXT_FILTER_MAX_LENGTH` と
+# 同じ値を使うが、FastAPI の `Query(max_length=...)` は `list[str]` の要素単位には
+# 効かない（リスト自体にしか効かない、実機で確認済み）ため、`_reject_oversized_list`
+# で明示的に検証する。
+FEED_LIST_FILTER_MAX_ITEM_LENGTH = 256
+
+# topics / technologies の件数上限。FastAPI の `Query` には件数の制約を表す機能が
+# 無いため、同様に `_reject_oversized_list` で明示的に検証する。
+FEED_LIST_FILTER_MAX_ITEMS = 20
+
 
 class RecommendationItem(BaseModel):
     """推薦結果 1 件のレスポンス。
@@ -203,6 +227,32 @@ def _build_items(
     ]
 
 
+def _reject_oversized_list(values: Sequence[str] | None, *, param_name: str) -> None:
+    """`topics` / `technologies` の件数・要素ごとの長さを検証し、超過なら 422。
+
+    FastAPI の `Query(max_length=...)` は `list[str]` の要素単位には効かず、
+    件数の制約を表す機能も無いため（実機で確認済み、`FEED_LIST_FILTER_MAX_ITEMS`
+    のコメント参照）、`api/articles.py` の `_reject_naive_datetime` と同じ
+    「関数本体で明示チェックして `HTTPException` を送出する」方式で検証する
+    （Issue #90 自己レビュー）。
+    """
+    if not values:
+        return
+    if len(values) > FEED_LIST_FILTER_MAX_ITEMS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(f"{param_name} の件数が上限（{FEED_LIST_FILTER_MAX_ITEMS}件）を超えています"),
+        )
+    for value in values:
+        if len(value) > FEED_LIST_FILTER_MAX_ITEM_LENGTH:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"{param_name} の要素は{FEED_LIST_FILTER_MAX_ITEM_LENGTH}文字以下にしてください"
+                ),
+            )
+
+
 def _resolve_discover_run_id(
     session: Session,
     settings: Settings,
@@ -307,7 +357,8 @@ def get_feed(
     q: Annotated[
         str | None,
         Query(
-            description="検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）"
+            description="検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）",
+            max_length=FEED_TEXT_FILTER_MAX_LENGTH,
         ),
     ] = None,
     topics: Annotated[
@@ -322,19 +373,42 @@ def get_feed(
         datetime | None, Query(description="公開日の下限（published_at、NULLはfetched_atで代替）")
     ] = None,
     published_to: Annotated[datetime | None, Query(description="公開日の上限")] = None,
-    source_domain: Annotated[str | None, Query(description="情報源ドメインの完全一致")] = None,
+    source_domain: Annotated[
+        str | None,
+        Query(description="情報源ドメインの完全一致", max_length=FEED_TEXT_FILTER_MAX_LENGTH),
+    ] = None,
+    max_age_days: Annotated[
+        int,
+        Query(
+            ge=MIN_FEED_MAX_AGE_DAYS,
+            le=MAX_FEED_MAX_AGE_DAYS,
+            description=(
+                "フィード対象期間（日数）。省略時はconfig/scoring.yamlのfreshness."
+                "max_age_daysを使う。freshnessスコアの減衰基準（新しさの点数）は"
+                "この値を変えても変わらない"
+            ),
+        ),
+    ] = DEFAULT_FEED_MAX_AGE_DAYS,
     page: Annotated[int, Query(ge=1, description="1始まりのページ番号")] = 1,
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
 ) -> FeedResponse:
     """Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。
 
     `q` / `topics` / `technologies` / `published_from` / `published_to` /
-    `source_domain` はいずれも省略可能な絞り込み条件で、全候補を対象に推薦を
-    作り直す（決定済みの設計、`generate_recommendations` の `feed_filters`）。
-    条件を反映したフィンガープリントが一致する直近の DISCOVER run が再利用して
-    よい時間内（`config/scoring.yaml` の `limits.feed_run_reuse_seconds`）なら
-    その run を再利用し、そうでなければ新しい run を生成する
-    （`_resolve_discover_run_id`）。
+    `source_domain` / `max_age_days` はいずれも省略可能な絞り込み条件で、全候補を
+    対象に推薦を作り直す（決定済みの設計、`generate_recommendations` の
+    `feed_filters`）。条件を反映したフィンガープリントが一致する直近の DISCOVER
+    run が再利用してよい時間内（`config/scoring.yaml` の
+    `limits.feed_run_reuse_seconds`）ならその run を再利用し、そうでなければ
+    新しい run を生成する（`_resolve_discover_run_id`）。
+
+    `max_age_days` はフィードの対象期間そのもの（候補の絞り込み）を変える
+    パラメータで、freshness スコアの減衰基準（`ranking.compute_freshness`）とは
+    無関係（Issue #90 自己レビュー、`FeedFilters.max_age_days` のコメント参照）。
+    従来は `config/scoring.yaml` の `freshness.max_age_days`（既定 7 日）を
+    超える公開日で `published_from` / `published_to` を指定すると、この
+    ハード除外の内側でしか絞り込みが効かず黙って 0 件になっていた
+    （Issue #90 自己レビューで判明した不具合そのもの）。
 
     ページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset
     として扱う。`total_count` は run に保存された件数（Bad 除外前）であり、
@@ -343,6 +417,9 @@ def get_feed(
     古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を
     削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。
     """
+    _reject_oversized_list(topics, param_name="topics")
+    _reject_oversized_list(technologies, param_name="technologies")
+
     feed_filters = FeedFilters(
         query=q,
         topics=tuple(topics) if topics else (),
@@ -350,6 +427,7 @@ def get_feed(
         published_from=published_from,
         published_to=published_to,
         source_domain=source_domain,
+        max_age_days=max_age_days,
     )
     run_id = _resolve_discover_run_id(session, settings, user_id, now, feed_filters)
 

@@ -2037,7 +2037,7 @@
     },
     "/api/feed": {
       "get": {
-        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。\n\n`q` / `topics` / `technologies` / `published_from` / `published_to` /\n`source_domain` はいずれも省略可能な絞り込み条件で、全候補を対象に推薦を\n作り直す（決定済みの設計、`generate_recommendations` の `feed_filters`）。\n条件を反映したフィンガープリントが一致する直近の DISCOVER run が再利用して\nよい時間内（`config/scoring.yaml` の `limits.feed_run_reuse_seconds`）なら\nその run を再利用し、そうでなければ新しい run を生成する\n（`_resolve_discover_run_id`）。\n\nページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset\nとして扱う。`total_count` は run に保存された件数（Bad 除外前）であり、\n範囲外の `page` はエラーにせず空の `items` を返す。\n\n古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を\n削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。",
+        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。\n\n`q` / `topics` / `technologies` / `published_from` / `published_to` /\n`source_domain` / `max_age_days` はいずれも省略可能な絞り込み条件で、全候補を\n対象に推薦を作り直す（決定済みの設計、`generate_recommendations` の\n`feed_filters`）。条件を反映したフィンガープリントが一致する直近の DISCOVER\nrun が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run を再利用し、そうでなければ\n新しい run を生成する（`_resolve_discover_run_id`）。\n\n`max_age_days` はフィードの対象期間そのもの（候補の絞り込み）を変える\nパラメータで、freshness スコアの減衰基準（`ranking.compute_freshness`）とは\n無関係（Issue #90 自己レビュー、`FeedFilters.max_age_days` のコメント参照）。\n従来は `config/scoring.yaml` の `freshness.max_age_days`（既定 7 日）を\n超える公開日で `published_from` / `published_to` を指定すると、この\nハード除外の内側でしか絞り込みが効かず黙って 0 件になっていた\n（Issue #90 自己レビューで判明した不具合そのもの）。\n\nページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset\nとして扱う。`total_count` は run に保存された件数（Bad 除外前）であり、\n範囲外の `page` はエラーにせず空の `items` を返す。\n\n古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を\n削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。",
         "operationId": "get_feed_api_feed_get",
         "parameters": [
           {
@@ -2048,6 +2048,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "maxLength": 256,
                   "type": "string"
                 },
                 {
@@ -2146,6 +2147,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "maxLength": 256,
                   "type": "string"
                 },
                 {
@@ -2154,6 +2156,20 @@
               ],
               "description": "情報源ドメインの完全一致",
               "title": "Source Domain"
+            }
+          },
+          {
+            "description": "フィード対象期間（日数）。省略時はconfig/scoring.yamlのfreshness.max_age_daysを使う。freshnessスコアの減衰基準（新しさの点数）はこの値を変えても変わらない",
+            "in": "query",
+            "name": "max_age_days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "description": "フィード対象期間（日数）。省略時はconfig/scoring.yamlのfreshness.max_age_daysを使う。freshnessスコアの減衰基準（新しさの点数）はこの値を変えても変わらない",
+              "maximum": 180,
+              "minimum": 1,
+              "title": "Max Age Days",
+              "type": "integer"
             }
           },
           {

@@ -12,6 +12,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_now, get_session
+from techradar.api.recommendations import (
+    FEED_LIST_FILTER_MAX_ITEM_LENGTH,
+    FEED_LIST_FILTER_MAX_ITEMS,
+    FEED_TEXT_FILTER_MAX_LENGTH,
+)
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, Recommendation, RecommendationRun, UserArticle
 from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction, RecommendationMode
@@ -521,6 +526,95 @@ class TestGetFeedSearchAndFilters:
         item_ids = [item["article_id"] for item in response.json()["items"]]
         assert str(target.id) in item_ids
         assert str(other.id) not in item_ids
+
+
+class TestGetFeedMaxAgeDays:
+    """受入基準: 対象期間を1〜180日で指定できる（Issue #90 自己レビュー）。"""
+
+    def test_returns_articles_older_than_the_default_window_when_widened(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 既定（scoring.yaml の freshness.max_age_days = 7日）では
+        # 候補に入らない記事が、対象期間を広げると出る
+        old = make_article(
+            db_session,
+            title="30日前の記事",
+            published_at=NOW - timedelta(days=30),
+            embedding=make_embedding(0),
+        )
+
+        # Act
+        response = client.get("/api/feed", params={"max_age_days": 60})
+
+        # Assert
+        assert response.status_code == 200
+        assert str(old.id) in [item["article_id"] for item in response.json()["items"]]
+
+    def test_excludes_articles_older_than_the_given_max_age_days(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange
+        within = make_article(
+            db_session,
+            title="期間内",
+            published_at=NOW - timedelta(days=2),
+            embedding=make_embedding(0),
+        )
+        beyond = make_article(
+            db_session,
+            title="期間外",
+            published_at=NOW - timedelta(days=4),
+            embedding=make_embedding(1),
+        )
+
+        # Act
+        response = client.get("/api/feed", params={"max_age_days": 3})
+
+        # Assert
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(within.id) in item_ids
+        assert str(beyond.id) not in item_ids
+
+    def test_rejects_a_max_age_days_below_the_minimum(self, client: TestClient) -> None:
+        # Act / Assert — 0 日は範囲外
+        assert client.get("/api/feed", params={"max_age_days": 0}).status_code == 422
+
+    def test_rejects_a_max_age_days_above_the_maximum(self, client: TestClient) -> None:
+        # Act / Assert — 181 日は範囲外
+        assert client.get("/api/feed", params={"max_age_days": 181}).status_code == 422
+
+
+class TestGetFeedInputLimits:
+    """受入基準: 自由入力の絞り込み条件に上限を課す（Issue #90 自己レビュー）。
+
+    上限値は `api/recommendations.py` の定数から取り、テスト側で数値を二重管理
+    しない（`api/articles.py` の入力長上限と同じ方針）。
+    """
+
+    def test_rejects_a_too_long_query(self, client: TestClient) -> None:
+        # Act / Assert
+        too_long = "a" * (FEED_TEXT_FILTER_MAX_LENGTH + 1)
+        assert client.get("/api/feed", params={"q": too_long}).status_code == 422
+
+    def test_rejects_a_too_long_source_domain(self, client: TestClient) -> None:
+        # Act / Assert
+        too_long = "a" * (FEED_TEXT_FILTER_MAX_LENGTH + 1)
+        assert client.get("/api/feed", params={"source_domain": too_long}).status_code == 422
+
+    def test_rejects_too_many_topics(self, client: TestClient) -> None:
+        # Act / Assert — 件数の上限は FastAPI の Query では表せないため関数内で検証している
+        too_many = [f"topic{index}" for index in range(FEED_LIST_FILTER_MAX_ITEMS + 1)]
+        assert client.get("/api/feed", params={"topics": too_many}).status_code == 422
+
+    def test_rejects_a_too_long_topic_item(self, client: TestClient) -> None:
+        # Act / Assert — 要素ごとの長さも Query では効かないため関数内で検証している
+        too_long = "a" * (FEED_LIST_FILTER_MAX_ITEM_LENGTH + 1)
+        assert client.get("/api/feed", params={"topics": [too_long]}).status_code == 422
+
+    def test_rejects_too_many_technologies(self, client: TestClient) -> None:
+        # Act / Assert
+        too_many = [f"tech{index}" for index in range(FEED_LIST_FILTER_MAX_ITEMS + 1)]
+        assert client.get("/api/feed", params={"technologies": too_many}).status_code == 422
 
 
 class TestGetFeedRunReuse:

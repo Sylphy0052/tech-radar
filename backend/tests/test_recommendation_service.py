@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -824,6 +824,24 @@ class TestComputeFilterFingerprint:
         # Act / Assert
         assert compute_filter_fingerprint(ordered_ab) == compute_filter_fingerprint(ordered_ba)
 
+    def test_different_max_age_days_produce_different_fingerprints(self) -> None:
+        # Arrange — 対象期間が違えば別条件なので run を使い回してはいけない
+        seven_days = FeedFilters(max_age_days=7)
+        thirty_days = FeedFilters(max_age_days=30)
+
+        # Act / Assert
+        assert compute_filter_fingerprint(seven_days) != compute_filter_fingerprint(thirty_days)
+
+    def test_the_same_instant_in_another_offset_produces_the_same_fingerprint(self) -> None:
+        # Arrange — 同じ時刻をUTCとJSTで表しただけの指定は同一条件として扱う
+        in_utc = FeedFilters(published_from=datetime(2026, 8, 1, tzinfo=UTC))
+        in_jst = FeedFilters(
+            published_from=datetime(2026, 8, 1, 9, tzinfo=timezone(timedelta(hours=9)))
+        )
+
+        # Act / Assert
+        assert compute_filter_fingerprint(in_utc) == compute_filter_fingerprint(in_jst)
+
 
 class TestLoadCandidatesFiltersBySearchQuery:
     """受入基準: 検索語が title/translated_title/summary_ja のいずれかに部分一致すれば当たる。"""
@@ -980,6 +998,111 @@ class TestLoadCandidatesFiltersByPublishedRangeAndSourceDomain:
         candidate_ids = {candidate.id for candidate in candidates}
         assert target.id in candidate_ids
         assert other.id not in candidate_ids
+
+
+class TestLoadCandidatesFiltersByMaxAgeDays:
+    """受入基準: 対象期間を1〜180日で指定でき、freshness スコアには影響しない（Issue #90）。"""
+
+    def test_includes_articles_older_than_the_configured_window(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 受入基準そのもの。既定の7日では候補に入らない記事が、
+        # 対象期間を広げると入る（自己レビューで判明した「黙って0件」の解消）
+        user_id = uuid.uuid4()
+        old_article = make_article(
+            db_session, title="30日前の記事", published_at=NOW - timedelta(days=30)
+        )
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(max_age_days=60)
+        )
+
+        # Assert
+        assert old_article.id in {candidate.id for candidate in candidates}
+
+    def test_excludes_articles_older_than_the_given_max_age_days(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 指定した期間の境界を跨ぐデータで確認する
+        user_id = uuid.uuid4()
+        within = make_article(db_session, title="期間内", published_at=NOW - timedelta(days=2))
+        beyond = make_article(db_session, title="期間外", published_at=NOW - timedelta(days=4))
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(max_age_days=3)
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert within.id in candidate_ids
+        assert beyond.id not in candidate_ids
+
+    def test_falls_back_to_the_configured_window_when_not_given(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 未指定なら従来どおり scoring.yaml の freshness.max_age_days（7日）
+        user_id = uuid.uuid4()
+        old_article = make_article(
+            db_session, title="8日前の記事", published_at=NOW - timedelta(days=8)
+        )
+        fresh_article = make_article(
+            db_session, title="1日前の記事", published_at=NOW - timedelta(days=1)
+        )
+
+        # Act
+        candidates = load_candidates(db_session, user_id, NOW, settings, feed_filters=FeedFilters())
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert old_article.id not in candidate_ids
+        assert fresh_article.id in candidate_ids
+
+    def test_does_not_change_the_freshness_score(self, db_session: Session, settings: Settings):
+        # Arrange — 受入基準: 期間の選び方で同じ記事のスコアが変わらない
+        # （減衰基準は scoring.yaml の freshness.max_age_days のままにしてある）
+        user_id = uuid.uuid4()
+        article = make_article(
+            db_session,
+            title="対象期間の内側の記事",
+            published_at=NOW - timedelta(days=3),
+            embedding=make_embedding(0),
+        )
+
+        # Act — 対象期間だけを変えて2回生成する
+        default_run = generate_recommendations(
+            db_session,
+            user_id,
+            RecommendationMode.DISCOVER,
+            settings,
+            NOW,
+            feed_filters=FeedFilters(max_age_days=7),
+        )
+        widened_run = generate_recommendations(
+            db_session,
+            user_id,
+            RecommendationMode.DISCOVER,
+            settings,
+            NOW,
+            feed_filters=FeedFilters(max_age_days=180),
+        )
+
+        # Assert
+        default_freshness = _freshness_of(db_session, default_run.run_id, article.id)
+        widened_freshness = _freshness_of(db_session, widened_run.run_id, article.id)
+        assert default_freshness == widened_freshness
+
+
+def _freshness_of(session: Session, run_id: uuid.UUID, article_id: uuid.UUID) -> float:
+    """指定 run の指定記事について、reasons に保存された freshness の素の値を返す。"""
+    reasons = session.scalar(
+        select(Recommendation.reasons).where(
+            Recommendation.run_id == run_id, Recommendation.article_id == article_id
+        )
+    )
+    assert reasons is not None
+    return float(reasons["freshness"])
 
 
 class TestLoadRecommendationPageOffset:
