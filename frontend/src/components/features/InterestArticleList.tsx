@@ -1,7 +1,7 @@
 "use client";
 
-import { useSearchParams } from "next/navigation";
-import { useMemo } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useMemo } from "react";
 
 import { ErrorMessage } from "@/components/ui/ErrorMessage";
 import { LoadingIndicator } from "@/components/ui/LoadingIndicator";
@@ -14,6 +14,7 @@ import {
   parseArticleFiltersFromSearchParams,
 } from "@/lib/interest-articles";
 import type { InterestArticleItem } from "@/lib/interest-articles";
+import { FIRST_PAGE, parsePageOrFirst } from "@/lib/pagination";
 import { isSafeHttpUrl } from "@/lib/safe-url";
 
 function contentTypeLabel(contentType: string | null): string | null {
@@ -99,15 +100,58 @@ function InterestArticleCard({ item, onRemove }: InterestArticleCardProps) {
  * `parseArticleFiltersFromSearchParams` を使うため、フィルター条件を
  * コンポーネント間で二重管理することにならない（URL が唯一の情報源）。
  *
- * ページ番号は URL には載せず hook の state で持つ（`DiscoverFeed` と同じ）。
- * 両画面まとめて URL へ載せる作業は Issue #95 で扱う。
+ * ページ番号もフィルターと同じく URL クエリを唯一の情報源にする（Issue #100、
+ * フィード側は Issue #95 で対応済み）。`useInterestArticles` は URL から読んだ
+ * ページ番号を受け取るだけで、自分では保持しない（`DiscoverFeed` と同じ設計）。
+ *
+ * `ArticleFilterPanel` は `DiscoverFeed` が内部で `FeedFilterPanel` を抱えるのとは
+ * 違い、本コンポーネントの兄弟として `app/articles/page.tsx` からレンダーされる。
+ * `ArticleFilterPanel` は `buildSearchParamsFromFilters` で URL を組み立て直すため
+ * （`page` を含めない限り）フィルター変更時に `page` は自然と URL から落ちる。
  */
 export function InterestArticleList() {
   const searchParams = useSearchParams();
-  const filters = useMemo(() => parseArticleFiltersFromSearchParams(searchParams), [searchParams]);
+  const router = useRouter();
+  const pathname = usePathname();
 
-  const { items, isLoading, error, page, totalPages, totalCount, setPage, removeArticle } =
-    useInterestArticles(filters);
+  const filters = useMemo(() => parseArticleFiltersFromSearchParams(searchParams), [searchParams]);
+  const page = parsePageOrFirst(searchParams.get("page"));
+
+  // ページ移動は履歴へ積む（`push`）。フィルターの変更が `router.replace`（
+  // `ArticleFilterPanel`）なのとあえて分けている。3ページ目から戻ったら2ページ目へ
+  // 帰るのが、ページャを操作した側の期待だと判断した（`DiscoverFeed` と同じ、
+  // Issue #95）。
+  //
+  // `scroll: false` を付けるのは、書き換え前（ローカル state の更新）と同じく
+  // スクロール位置を動かさないため。`push` の既定は先頭へスクロールする。
+  const handlePageChange = useCallback(
+    (nextPage: number) => {
+      if (nextPage === page) {
+        // 今見ているページ番号のボタンは押せる（`Pagination` が無効化するのは
+        // 「前へ」「次へ」だけ）。ここで弾かないと、URL が変わらないまま履歴だけが
+        // 積まれ、戻るボタンを余計に押さないと前のページへ帰れなくなる
+        // （`DiscoverFeed` と同じガード）。
+        return;
+      }
+
+      const params = new URLSearchParams(searchParams);
+      if (nextPage === FIRST_PAGE) {
+        // 1ページ目では `page` を URL に出さない（既定値を URL に出さないのは
+        // `buildSearchParamsFromFilters` の他の条件と同じ扱い）。
+        params.delete("page");
+      } else {
+        params.set("page", String(nextPage));
+      }
+      const query = params.toString();
+      router.push(query ? `${pathname}?${query}` : pathname, { scroll: false });
+    },
+    [page, pathname, router, searchParams],
+  );
+
+  const { items, isLoading, error, totalPages, totalCount, removeArticle } = useInterestArticles(
+    filters,
+    page,
+  );
 
   return (
     <section className="flex flex-col gap-4">
@@ -146,7 +190,7 @@ export function InterestArticleList() {
             currentPage={page}
             totalPages={totalPages}
             totalCount={totalCount}
-            onPageChange={setPage}
+            onPageChange={handlePageChange}
           />
         </>
       )}

@@ -15,17 +15,11 @@ interface UseInterestArticlesResult {
   items: InterestArticleItem[];
   isLoading: boolean;
   error: string | null;
-  /** 1始まりの現在ページ番号。 */
-  page: number;
   totalPages: number;
   totalCount: number;
-  /** ページを移動する。`Pagination` の `onPageChange` へそのまま渡す想定。 */
-  setPage: (page: number) => void;
   /** 記事を関心記事一覧から除外する（`DELETE /api/articles/{article_id}/interest`）。 */
   removeArticle: (articleId: string) => void;
 }
-
-const FIRST_PAGE = 1;
 
 /** 指定 article_id を除いた新しい配列を返す。 */
 function withoutArticle(items: InterestArticleItem[], articleId: string): InterestArticleItem[] {
@@ -39,22 +33,33 @@ function withoutArticle(items: InterestArticleItem[], articleId: string): Intere
  * ページは追記せず丸ごと差し替える（backend の `page` は offset で、cursor と違い
  * 同じページを何度でも取り直せるため、蓄積して重複排除する必要が無くなった）。
  *
- * フィルター条件が変わったかどうかは「レンダー中に前回値と比較して直す」React の
- * 公式パターンで検出し、ページ番号を1へ戻す
+ * ページ番号はこの hook では持たず、呼び出し側（`InterestArticleList`）が URL から
+ * 読んで引数で渡す（Issue #100、フィード側は Issue #95 で対応済みの `useFeed` と
+ * 同じ設計）。URL を唯一の情報源にすることで、リロード・共有・戻る操作でページが
+ * 再現する。フィルター条件が URL クエリだけを情報源にしているのと同じ扱いで、
+ * 状態の持ち方が非対称でなくなる。
+ *
+ * そのため「フィルターが変わったらページを1へ戻す」処理はここには無い。`page` を
+ * `buildSearchParamsFromFilters` の対象に含めていないため、`ArticleFilterPanel` が
+ * フィルター変更時に URL を組み立て直すと `page` は自然に落ちる。**将来
+ * `buildSearchParamsFromFilters` へ `page` を足すとこの性質が壊れる**（フィルターを
+ * 変えてもページ番号が残り、範囲外のページを見せてしまう。`useFeed` と同じ注意）。
+ *
+ * フィルターとページのどちらが変わったかは「レンダー中に前回値と比較して直す」
+ * React の公式パターンで検出し、読み込み中の表示へ切り替える
  * （https://react.dev/learn/you-might-not-need-an-effect の
  * "Adjusting state when a prop changes"）。`useEffect` の本体で setState を
  * 同期的に呼ぶとカスケード再レンダーになるため（react-hooks/set-state-in-effect
- * が検出する）、リセットはレンダー中のこちらへ寄せ、`useEffect` 側は非同期の
- * fetch とその結果を反映する setState だけにする。オブジェクト参照ではなく
- * クエリ文字列で比較するので、呼び出し側が毎レンダー新しい `filters`
+ * が検出する）、この検出はレンダー中のこちらへ寄せ、`useEffect` 側は非同期の
+ * fetch とその結果を反映する setState だけにする。フィルターの比較はオブジェクト
+ * 参照ではなくクエリ文字列で行うので、呼び出し側が毎レンダー新しい `filters`
  * オブジェクトを渡しても（値が同じなら）無駄なリセットは起きない。
  *
  * 除外操作は `useFeed` の `removeFeedback` と同じく、先にローカル state から
  * 消してから API を呼び、失敗時はもとの位置へ戻す。
  */
-export function useInterestArticles(filters: ArticleFilters): UseInterestArticlesResult {
+export function useInterestArticles(filters: ArticleFilters, page: number): UseInterestArticlesResult {
   const [items, setItems] = useState<InterestArticleItem[]>([]);
-  const [page, setPageState] = useState(FIRST_PAGE);
   const [totalCount, setTotalCount] = useState(0);
   const [pageSize, setPageSize] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
@@ -82,7 +87,22 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
   const [previousFilterKey, setPreviousFilterKey] = useState(filterKey);
   if (filterKey !== previousFilterKey) {
     setPreviousFilterKey(filterKey);
-    setPageState(FIRST_PAGE);
+    setItems([]);
+    setError(null);
+    setIsLoading(true);
+  }
+
+  // ページ移動でも読み込み中にする。`useEffect` の本体で `setIsLoading(true)` を
+  // 同期的に呼ぶとカスケード再レンダーになるため、読み込み開始の合図はフィルター
+  // 変更と同じくレンダー中の比較で立て、`effect` 側は結果反映の setState だけに
+  // する（`useFeed` と同じ形）。
+  //
+  // 前の items を残さないのは、範囲外のページを開いたときに前ページの記事が
+  // 見えたままにならないようにするため（`InterestArticleList` は items が
+  // 空のときに「このページには記事がありません」を出す）。
+  const [previousPage, setPreviousPage] = useState(page);
+  if (page !== previousPage) {
+    setPreviousPage(page);
     setItems([]);
     setError(null);
     setIsLoading(true);
@@ -124,22 +144,6 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
     // （`useFeed` と同じ形。書き換え前の `filterKeyRef` による世代判定は、
     // 追記をやめてページ差し替えにしたため不要になった）。
   }, [filters, page]);
-
-  // ページ移動でも読み込み中にする。`useEffect` の本体で `setIsLoading(true)` を
-  // 同期的に呼ぶとカスケード再レンダーになるため、読み込み開始の合図は「取得の
-  // きっかけを作る側」であるここと上のフィルター変更検出へ寄せる（`useFeed` と
-  // 同じ形）。同じページ番号への移動では effect が走らないので、読み込み中のまま
-  // 止まらないよう先に弾く。
-  const setPage = useCallback(
-    (nextPage: number) => {
-      if (nextPage === page) {
-        return;
-      }
-      setPageState(nextPage);
-      setIsLoading(true);
-    },
-    [page],
-  );
 
   const removeArticle = useCallback(
     (articleId: string) => {
@@ -195,10 +199,8 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
     items,
     isLoading,
     error,
-    page,
     totalPages,
     totalCount,
-    setPage,
     removeArticle,
   };
 }
