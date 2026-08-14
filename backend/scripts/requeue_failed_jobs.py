@@ -101,7 +101,7 @@ def _summarize(job: Job) -> FailedJobSummary:
 def _build_plan(
     session: Session, *, job_type: JobType, error_contains: str | None = None
 ) -> RequeuePlan:
-    """`failed`のジョブから、指定条件に合う対象を洗い出す。
+    r"""`failed`のジョブから、指定条件に合う対象を洗い出す。
 
     `status == JobStatus.FAILED.value`だけを条件にすることで、実行中
     （`jobs/status.py`の`RUNNING_STATUSES` — fetching/analyzing/searching）と
@@ -122,8 +122,16 @@ def _build_plan(
     意図した以外の行まで一括UPDATEの対象に入ってしまう。
 
     `contains`はSQLAlchemyが前後に`%`を付けるため、他の呼び出し箇所
-    （`api/articles.py`など）の`ilike(f"%{...}%")`とは形が違うが、エスケープの
-    規則そのものは共通である。
+    （`api/articles.py`など）の`ilike(f"%{...}%")`とは形が違う。共通なのは
+    エスケープの規則だけで、**大文字小文字の扱いは異なる**。PostgreSQLの方言で
+    コンパイルすると次のようになり、`contains`は`LIKE`（区別する）、`ilike`は
+    `ILIKE`（区別しない）になる（2026-08-15実測）。
+
+        contains: jobs.last_error LIKE '%' || 'foo' || '%' ESCAPE '\'
+        ilike   : jobs.last_error ILIKE '%foo%' ESCAPE '\'
+
+    このスクリプトが区別する側なのは、Issue #79の時点からの挙動である。失敗
+    メッセージは表記が固定されがちで、大小を無視する必要が薄い。
     """
     stmt = select(Job).where(Job.status == JobStatus.FAILED.value, Job.type == job_type.value)
     if error_contains:
