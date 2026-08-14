@@ -3,7 +3,7 @@
 - ステータス: 採用
 - 日付: 2026-08-13
 - 関連: `PROJECT_SPEC.md` §8, §14, §15 / Issue #75, #87 / [ADR 0004](0004-analysis-body-limit.md) / [ADR 0007](0007-embedding-based-novelty.md)
-- 補足: `exploration_min_novelty` に関する記述は、翌日の [ADR 0007](0007-embedding-based-novelty.md) に置き換えられている（下記「追記」を参照）
+- 補足: `exploration_min_novelty` に関する記述は、翌日の [ADR 0007](0007-embedding-based-novelty.md) に置き換えられている（下記「追記」を参照）。「関心クラスタは推薦スコアに使われない」という記述も Issue #89 で成り立たなくなっている（下記「追記」を参照）
 
 ## コンテキスト
 
@@ -111,6 +111,14 @@ Issue #17 の「未確定・後続で判断する事項」に挙がっていた3
 本 ADR で切り出した Issue #87 は翌日に完了し、[ADR 0007](0007-embedding-based-novelty.md) が `compute_novelty` を topics の文字列一致から embedding のコサイン距離へ差し替えた。値そのものは 0.6 のままだが、**閾値が乗る軸が変わったため、上記の「動かしても効かない」という根拠はもう成り立たない**。現行の実装での分布と閾値の選定は ADR 0007 にある。
 
 置き換えの対象は `exploration_min_novelty` に関する記述だけである。クラスタ数の 3 値と `strong_interest_min_similarity` の判断は、`compute_novelty` の変更に依存しないため有効なまま残る。
+
+## 追記: 「関心クラスタは推薦スコアに使われない」という前提が崩れた（2026-08-14、Issue #89）
+
+上記「決定」節の根拠に**「関心クラスタは推薦スコアに使われない」**と書いた。Issue #89 で `compute_novelty` の `cluster_part` が関心クラスタの重心（`InterestProfile.cluster_centroids`）とのコサイン距離を使うようになったため（[ADR 0007](0007-embedding-based-novelty.md) の「追記: 式の差し替え」参照）、この前提はもう成り立たない。`min_clusters` / `max_clusters` / `min_articles_per_cluster` はクラスタの重心の位置を左右する値であり、いまは推薦スコアと exploration / diversity の枠判定へ直接効く。
+
+この根拠が崩れたことで、「値を動かす利得が小さい」という結論も同時に崩れる。上記の結論はクラスタを**「人が眺めるための粒度」**としてしか扱っておらず、その前提の上でのみ成り立つ話だった。
+
+ただし **ADR 0006 が選んだ値そのもの（`max_clusters=8` 等）を変えるかどうかは、この追記の範囲外である。** 値が推薦スコアに影響するようになったこと自体は判明したが、その影響を実際に測ったうえで別の値の方が良いかどうかまでは、この追記の時点では計測していない。値を見直すなら、[ADR 0007](0007-embedding-based-novelty.md) の計測と同じように、`cluster_centroids` を経由した novelty の分布と枠の充足率を軸にした別の計測が要る。
 
 ## 再現方法
 

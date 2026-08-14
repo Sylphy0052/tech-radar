@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from techradar.analysis.service import MAX_ANALYSIS_BODY_CHARACTERS
 from techradar.config import Settings
-from techradar.interest.clusters import ClusteringSettings, build_interest_clusters
+from techradar.interest.clusters import build_interest_clusters
 from techradar.interest.service import load_cluster_sources
 from techradar.measure.body_length import load_body_lengths, summarize_body_lengths
 from techradar.measure.clusters import summarize_clusters
@@ -26,7 +26,7 @@ from techradar.measure.feed_slots import summarize_feed_slots
 from techradar.measure.novelty import summarize_novelty
 from techradar.measure.report import Measurements
 from techradar.recommendation.composition import compose_feed_with_stats
-from techradar.recommendation.config import get_scoring_config
+from techradar.recommendation.config import clustering_settings_from_config, get_scoring_config
 from techradar.recommendation.ranking import rank_candidates
 from techradar.recommendation.service import build_interest_profile, load_candidates
 
@@ -53,16 +53,17 @@ def collect_measurements(
     )
 
     sources = load_cluster_sources(session, target_user_id, now)
-    clustering_settings = ClusteringSettings(
-        min_clusters=config.clustering.min_clusters,
-        max_clusters=config.clustering.max_clusters,
-        min_articles_per_cluster=config.clustering.min_articles_per_cluster,
-        label_topic_count=config.clustering.label_topic_count,
-        random_state=config.clustering.random_state,
-    )
-    clusters = summarize_clusters(sources, build_interest_clusters(sources, clustering_settings))
+    clustering_settings = clustering_settings_from_config(config)
+    built_clusters = build_interest_clusters(sources, clustering_settings)
+    clusters = summarize_clusters(sources, built_clusters)
 
-    profile = build_interest_profile(session, target_user_id, now, settings)
+    # `build_interest_profile` は既定では同じ user・同じ now に対して KMeans を
+    # 自前で再実行する（Issue #89）。上で `summarize_clusters` 用に既に構築した
+    # `built_clusters` をそのまま渡し、同じクラスタリングを 1 回の計測で 2 度
+    # 走らせない（MR !91 self review）。
+    profile = build_interest_profile(
+        session, target_user_id, now, settings, clusters=built_clusters
+    )
     candidates = load_candidates(session, target_user_id, now, settings)
     scored = rank_candidates(candidates, profile, scoring_settings, now)
     # 本番の DISCOVER 生成（`recommendation.service.generate_recommendations`）と同じ

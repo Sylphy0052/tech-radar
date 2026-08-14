@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from techradar.interest.clusters import ClusteringSettings
 from techradar.recommendation.ranking import (
     AuthorityGate,
     BadSimilaritySettings,
@@ -379,11 +380,16 @@ class ClusteringConfig(BaseModel):
     （`interest/clusters.py` の `_cluster_count`）、記事が少ないうちは
     `min_clusters` を下回る。`max_clusters` は上限として常に効く。
 
-    ここで作るクラスタは推薦スコアには使われない。読むのは `api/interests.py`
-    （`GET /api/interests`）だけで、`ranking.py` の `interest_similarity` は
-    関心記事の embedding を直接加重平均しており、クラスタを経由しない。
-    そのためこれらの値が決めるのは、関心を人が眺めるときの粒度だけである
-    （`docs/adr/0006-cluster-count-and-feed-slot-defaults.md`）。
+    ここで作るクラスタは `api/interests.py`（`GET /api/interests`）が関心を
+    人が眺めるための表示に使うだけでなく、`recommendation.service.
+    build_interest_profile` を経由して `InterestProfile.cluster_centroids`
+    にもなり、`compute_novelty` の `cluster_part`（新規性判定）を通じて
+    推薦スコアとフィードの枠判定（exploration / diversity）へ直接効く
+    （Issue #89、`docs/adr/0007-embedding-based-novelty.md`）。そのため
+    `min_clusters` / `max_clusters` / `min_articles_per_cluster` を動かすと、
+    関心の表示粒度だけでなくクラスタ重心の位置が変わり、推薦結果も変わりうる
+    （`docs/adr/0006-cluster-count-and-feed-slot-defaults.md` の「値を動かす
+    利得が小さい」という結論は Issue #89 以前のもので、現在は成り立たない）。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -537,6 +543,24 @@ class ScoringConfig(BaseModel):
                 max_factor=self.source_preference.max_factor,
             ),
         )
+
+
+def clustering_settings_from_config(config: ScoringConfig) -> ClusteringSettings:
+    """`ScoringConfig.clustering` から関心クラスタ構築用の `ClusteringSettings` を作る。
+
+    関心クラスタ構築（KMeans）を呼ぶ箇所が複数あり（`interest/service.py` の
+    `rebuild_interest_clusters`、`measure/collect.py` の `collect_measurements`、
+    `recommendation/service.py` の `build_interest_profile`）、いずれも同じ
+    5 項目を `ScoringConfig.clustering` から詰め替えるだけの変換だったため、
+    重複を避けてここへ集約する（Issue #89）。
+    """
+    return ClusteringSettings(
+        min_clusters=config.clustering.min_clusters,
+        max_clusters=config.clustering.max_clusters,
+        min_articles_per_cluster=config.clustering.min_articles_per_cluster,
+        label_topic_count=config.clustering.label_topic_count,
+        random_state=config.clustering.random_state,
+    )
 
 
 def load_scoring_config(path: Path | None = None) -> ScoringConfig:
