@@ -97,7 +97,10 @@ feed_composition:
   diversity: 0.05
   # weights.interest_similarity 側の authority_gate 閾値（0.35）とは別物。
   # 「強い関心一致」枠は一致度の中央よりやや高い水準で切り、フィードの主力枠に
-  # ふさわしい候補だけを入れる
+  # ふさわしい候補だけを入れる。
+  # 2026-08-13 に実データ（関心記事 69 件 / 候補 169 件）で確認し、据え置いた。
+  # 一致度の分布は p50 0.456 / p95 0.669 / max 0.755 で、この閾値を超える候補が
+  # 67 件あり定員 55 を満たす（ADR 0006）
   strong_interest_min_similarity: 0.5
   # novelty は「関心プロファイル中、最も近い記事1件からの embedding 距離」
   # （1 - 最大コサイン類似度、0〜1）。最も近い関心記事とも半分以上離れている
@@ -231,11 +234,20 @@ clustering:
   # 数（interest/clusters.py の _cluster_count）を上限に決めるため、記事が
   # min_clusters * min_articles_per_cluster 件に満たないうちは min_clusters を
   # 下回る（記事が少ないうちは無理にクラスタを分けない）。max_clusters は上限として
-  # 常に効く
+  # 常に効く。
+  # 2026-08-13 に実データ（関心記事 69 件）で確認し、3 値とも据え置いた。
+  # クラスタは推薦スコアに使われず（読むのは GET /api/interests だけ）、
+  # この値が決めるのは関心を人が眺めるときの粒度だけである。max_clusters を
+  # 10 以上にすると記事 1〜2 件のクラスタが現れてラベルが意味をなさず、
+  # 4 では 24 件と 18 件の塊ができて粗い。8 は最小クラスタが 3 件で
+  # min_articles_per_cluster を割らない（ADR 0006）
   min_clusters: 2
   max_clusters: 8
   # 1 クラスタを成立させるのに要する記事数。少数の記事だけで意味のあるクラスタと
-  # みなさないための下限
+  # みなさないための下限。
+  # 関心記事が min_clusters * この値（= 6 件）を超えると capacity_based が
+  # max_clusters を上回り、以降この値は結果に現れない。実データ 69 件では
+  # 2 / 3 / 5 / 8 のいずれでもクラスタ数・記事数の内訳が同一だった（ADR 0006）
   min_articles_per_cluster: 3
   # クラスタのラベルに使うトピック語数。§8 の例（"AI Agent Engineering" 等）程度の
   # 短いラベルにするため上位数語に絞る
