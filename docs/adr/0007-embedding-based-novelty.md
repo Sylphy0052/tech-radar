@@ -2,7 +2,7 @@
 
 - ステータス: 採用
 - 日付: 2026-08-14
-- 関連: `PROJECT_SPEC.md` §8, §14, §15 / Issue #75, #87 / [ADR 0003](0003-embedding-runtime.md)
+- 関連: `PROJECT_SPEC.md` §8, §14, §15 / Issue #75, #87 / [ADR 0003](0003-embedding-runtime.md) / [ADR 0006](0006-cluster-count-and-feed-slot-defaults.md)
 
 ## コンテキスト
 

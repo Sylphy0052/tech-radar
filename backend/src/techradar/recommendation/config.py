@@ -378,6 +378,12 @@ class ClusteringConfig(BaseModel):
     `min_articles_per_cluster` から賄える数を上限に決まるため
     （`interest/clusters.py` の `_cluster_count`）、記事が少ないうちは
     `min_clusters` を下回る。`max_clusters` は上限として常に効く。
+
+    ここで作るクラスタは推薦スコアには使われない。読むのは `api/interests.py`
+    （`GET /api/interests`）だけで、`ranking.py` の `interest_similarity` は
+    関心記事の embedding を直接加重平均しており、クラスタを経由しない。
+    そのためこれらの値が決めるのは、関心を人が眺めるときの粒度だけである
+    （`docs/adr/0006-cluster-count-and-feed-slot-defaults.md`）。
     """
 
     model_config = ConfigDict(extra="forbid")
