@@ -436,6 +436,52 @@ class TestGetFeedSearchAndFilters:
         assert str(target.id) in item_ids
         assert str(other.id) not in item_ids
 
+    def test_escapes_a_percent_in_the_search_term(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: `%` はワイルドカードではなくリテラルとして扱う（Issue #94）
+        target = make_article(db_session, title="割引100%還元", embedding=make_embedding(0))
+        other = make_article(db_session, title="割引100円還元", embedding=make_embedding(1))
+
+        # Act
+        response = client.get("/api/feed", params={"q": "100%還元"})
+
+        # Assert
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(target.id) in item_ids
+        assert str(other.id) not in item_ids
+
+    def test_escapes_an_underscore_in_the_search_term(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: `_` は任意の1文字ではなくリテラルとして扱う（Issue #94）
+        target = make_article(db_session, title="foo_bar入門", embedding=make_embedding(0))
+        other = make_article(db_session, title="fooXbar入門", embedding=make_embedding(1))
+
+        # Act
+        response = client.get("/api/feed", params={"q": "foo_bar"})
+
+        # Assert
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(target.id) in item_ids
+        assert str(other.id) not in item_ids
+
+    def test_matches_a_search_term_containing_a_backslash_without_error(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: バックスラッシュを含む検索語で例外にならず記事にだけ当たる
+        target = make_article(db_session, title="C:\\Users\\example", embedding=make_embedding(0))
+        other = make_article(db_session, title="C:/Users/example", embedding=make_embedding(1))
+
+        # Act
+        response = client.get("/api/feed", params={"q": "C:\\Users"})
+
+        # Assert
+        assert response.status_code == 200
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(target.id) in item_ids
+        assert str(other.id) not in item_ids
+
     def test_requires_all_specified_topics(self, client: TestClient, db_session: Session) -> None:
         # Arrange — 受入基準: topics を複数指定したとき、全てを含む記事だけが残る
         both = make_article(
