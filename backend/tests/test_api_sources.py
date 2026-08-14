@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_session
 from techradar.api.query_filters import MAX_OFFSET
+from techradar.api.sources import SOURCE_DOMAIN_MAX_LENGTH, SOURCE_ENTITY_NAME_MAX_LENGTH
 from techradar.config import Settings
 from techradar.db import SourceRegistry
 from techradar.db.enums import SourceType
@@ -141,6 +142,52 @@ class TestList:
         # Assert
         entity_names = [item["entity_name"] for item in response.json()]
         assert entity_names == ["100% Example"]
+
+    def test_accepts_a_domain_filter_at_the_length_limit(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: 上限ちょうどの検索語は従来どおり通る（Issue #98）。"""
+        # Arrange
+        make_source(db_session, domain="docs.example.com")
+
+        # Act
+        response = client.get("/api/sources", params={"domain": "a" * SOURCE_DOMAIN_MAX_LENGTH})
+
+        # Assert — 一致するものは無いが、検証で弾かれずに検索そのものは通る
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_rejects_a_domain_filter_above_the_length_limit(self, client: TestClient) -> None:
+        """受入基準: 上限を超える検索語は 422（Issue #98）。"""
+        # Act / Assert
+        response = client.get(
+            "/api/sources", params={"domain": "a" * (SOURCE_DOMAIN_MAX_LENGTH + 1)}
+        )
+        assert response.status_code == 422
+
+    def test_accepts_an_entity_name_filter_at_the_length_limit(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: 上限ちょうどの検索語は従来どおり通る（Issue #98）。"""
+        # Arrange
+        make_source(db_session, entity_name="Anthropic")
+
+        # Act
+        response = client.get(
+            "/api/sources", params={"entity_name": "a" * SOURCE_ENTITY_NAME_MAX_LENGTH}
+        )
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_rejects_an_entity_name_filter_above_the_length_limit(self, client: TestClient) -> None:
+        """受入基準: 上限を超える検索語は 422（Issue #98）。"""
+        # Act / Assert
+        response = client.get(
+            "/api/sources", params={"entity_name": "a" * (SOURCE_ENTITY_NAME_MAX_LENGTH + 1)}
+        )
+        assert response.status_code == 422
 
     def test_rejects_an_oversized_page(self, client: TestClient):
         # Arrange / Act — 全件返しでメモリを食い潰させない
