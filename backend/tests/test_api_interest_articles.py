@@ -588,6 +588,52 @@ class TestListInterestArticlesSearch:
         # Assert
         assert [item["article_id"] for item in response.json()["items"]] == [str(hit.id)]
 
+    def test_escapes_a_percent_in_the_search_term(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 受入基準: `%` はワイルドカードではなくリテラルとして扱う（Issue #94）
+        hit = make_article(db_session, title="割引100%還元")
+        miss = make_article(db_session, title="割引100円還元")
+        for article in (hit, miss):
+            add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles", params={"q": "100%還元"})
+
+        # Assert
+        assert [item["article_id"] for item in response.json()["items"]] == [str(hit.id)]
+
+    def test_escapes_an_underscore_in_the_search_term(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 受入基準: `_` は任意の1文字ではなくリテラルとして扱う（Issue #94）
+        hit = make_article(db_session, title="foo_bar入門")
+        miss = make_article(db_session, title="fooXbar入門")
+        for article in (hit, miss):
+            add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles", params={"q": "foo_bar"})
+
+        # Assert
+        assert [item["article_id"] for item in response.json()["items"]] == [str(hit.id)]
+
+    def test_matches_a_search_term_containing_a_backslash_without_error(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange — 受入基準: バックスラッシュを含む検索語で例外にならず記事にだけ当たる
+        hit = make_article(db_session, title="C:\\Users\\example")
+        miss = make_article(db_session, title="C:/Users/example")
+        for article in (hit, miss):
+            add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles", params={"q": "C:\\Users"})
+
+        # Assert
+        assert response.status_code == 200
+        assert [item["article_id"] for item in response.json()["items"]] == [str(hit.id)]
+
 
 class TestListInterestArticlesTagFilters:
     """受入基準: topics / technologies は複数指定でき、指定した全てを含む記事に絞る（AND）。"""

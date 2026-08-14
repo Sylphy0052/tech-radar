@@ -35,6 +35,7 @@ from techradar.api.query_filters import reject_oversized_list
 from techradar.db.enums import ArticleOrigin, JobStatus, JobType
 from techradar.db.errors import is_unique_violation
 from techradar.db.models import Article, ArticleRegistration, UserArticle
+from techradar.db.query import LIKE_ESCAPE_CHAR, escape_like_pattern
 from techradar.fetcher.url import normalize_url
 from techradar.jobs.queue import enqueue
 
@@ -599,22 +600,21 @@ def _build_interest_article_filters(
     topics / technologies は JSONB の包含（`@>`）で「指定した全てを含む」
     （AND）を表す。
 
-    検索語に含まれる LIKE の特殊文字（`%` / `_`）はエスケープしていない。
-    バインドパラメータ経由のため SQL インジェクションにはならず、意図より広く
-    当たるだけである。`api/sources.py` と `load_candidates` にも同じ書き方が
-    あるため、共通のエスケープ関数を作ってまとめて直す（Issue #94）。
+    検索語に含まれる LIKE の特殊文字（`%` / `_`）は `db/query.escape_like_pattern`
+    でエスケープしてから埋め込む。`api/sources.py` と `load_candidates` にも
+    同じ関数を使っている（Issue #94）。
     """
     filters: list[ColumnElement[bool]] = [
         UserArticle.user_id == user_id,
         UserArticle.origin.in_(allowed_origins),
     ]
     if query:
-        pattern = f"%{query}%"
+        pattern = f"%{escape_like_pattern(query)}%"
         filters.append(
             or_(
-                Article.title.ilike(pattern),
-                Article.translated_title.ilike(pattern),
-                Article.summary_ja.ilike(pattern),
+                Article.title.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+                Article.translated_title.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+                Article.summary_ja.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
             )
         )
     if topics:

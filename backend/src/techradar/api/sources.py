@@ -19,6 +19,7 @@ from techradar.api.deps import get_session
 from techradar.db import SourceRegistry
 from techradar.db.enums import SourceType
 from techradar.db.errors import is_unique_violation
+from techradar.db.query import LIKE_ESCAPE_CHAR, escape_like_pattern
 
 router = APIRouter(prefix="/api/sources", tags=["sources"])
 
@@ -90,9 +91,15 @@ def list_sources(
     """登録済みの情報源を一覧する。"""
     statement = select(SourceRegistry).order_by(SourceRegistry.domain, SourceRegistry.path_pattern)
     if domain:
-        statement = statement.where(SourceRegistry.domain.ilike(f"%{domain}%"))
+        statement = statement.where(
+            SourceRegistry.domain.ilike(f"%{escape_like_pattern(domain)}%", escape=LIKE_ESCAPE_CHAR)
+        )
     if entity_name:
-        statement = statement.where(SourceRegistry.entity_name.ilike(f"%{entity_name}%"))
+        statement = statement.where(
+            SourceRegistry.entity_name.ilike(
+                f"%{escape_like_pattern(entity_name)}%", escape=LIKE_ESCAPE_CHAR
+            )
+        )
     return list(session.scalars(statement.limit(limit).offset(offset)).all())
 
 
