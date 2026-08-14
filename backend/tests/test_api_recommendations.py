@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_now, get_session
+from techradar.api.query_filters import MAX_PAGE_NUMBER
 from techradar.api.recommendations import (
     FEED_LIST_FILTER_MAX_ITEM_LENGTH,
     FEED_LIST_FILTER_MAX_ITEMS,
@@ -298,6 +299,27 @@ class TestGetFeed:
         response = client.get("/api/feed", params={"page": invalid_page})
 
         # Assert
+        assert response.status_code == 422
+
+    def test_accepts_a_page_at_the_upper_bound(self, client: TestClient) -> None:
+        """受入基準: page の上限ちょうどは 200 + 空の items（Issue #96）。"""
+        # Act
+        response = client.get("/api/feed", params={"page": MAX_PAGE_NUMBER})
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json()["items"] == []
+
+    def test_rejects_a_page_above_the_upper_bound(self, client: TestClient) -> None:
+        """受入基準: page の上限を超えると 422（Issue #96）。"""
+        # Act / Assert
+        response = client.get("/api/feed", params={"page": MAX_PAGE_NUMBER + 1})
+        assert response.status_code == 422
+
+    def test_rejects_a_page_that_would_overflow_bigint_offset(self, client: TestClient) -> None:
+        """受入基準: bigint を超える offset になる page は 500 ではなく 422（Issue #96）。"""
+        # Act / Assert
+        response = client.get("/api/feed", params={"page": 10**19})
         assert response.status_code == 422
 
     def test_excludes_bad_articles(

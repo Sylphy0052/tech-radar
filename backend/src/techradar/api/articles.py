@@ -31,7 +31,7 @@ from techradar.api.bulk_import import (
     validate_bulk_import_url,
 )
 from techradar.api.deps import get_current_user_id, get_session
-from techradar.api.query_filters import reject_oversized_list
+from techradar.api.query_filters import MAX_PAGE_NUMBER, reject_oversized_list
 from techradar.db.enums import ArticleOrigin, JobStatus, JobType
 from techradar.db.errors import is_unique_violation
 from techradar.db.models import Article, ArticleRegistration, UserArticle
@@ -684,7 +684,7 @@ def list_interest_articles(
         datetime | None, Query(description="登録日時の期間（上限、含む）")
     ] = None,
     is_primary_source: Annotated[bool | None, Query(description="公式 / 非公式")] = None,
-    page: Annotated[int, Query(ge=1, description="1始まりのページ番号")] = 1,
+    page: Annotated[int, Query(ge=1, le=MAX_PAGE_NUMBER, description="1始まりのページ番号")] = 1,
     limit: Annotated[int, Query(ge=1, le=MAX_INTEREST_LIST_PAGE_SIZE)] = (
         DEFAULT_INTEREST_LIST_PAGE_SIZE
     ),
@@ -695,8 +695,9 @@ def list_interest_articles(
     降順で返す。タイブレークに `user_articles.id` を使う。
 
     ページングは番号付き（`page` / `limit`）で、`GET /api/feed` と同じく offset として
-    扱う。範囲外の `page` はエラーにせず空の `items` を返す。Issue #91 以前は cursor
-    方式だったが、目的のページへ直接移動できるようにするため置き換えた。
+    扱う。総ページ数を超える `page` はエラーにせず空の `items` を返すが、
+    `MAX_PAGE_NUMBER` を超える `page` は 422 で弾く（Issue #96）。Issue #91 以前は
+    cursor 方式だったが、目的のページへ直接移動できるようにするため置き換えた。
     """
     # naive な datetime 同士でも `>` 自体は例外を出さないが、片方だけ tz-aware だと
     # 比較で TypeError になる。ここで先に弾いておくことで、直後の順序比較を安全にする。

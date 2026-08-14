@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_app_settings, get_current_user_id, get_now, get_session
 from techradar.api.feedback import ArticleFeedbackResponse
-from techradar.api.query_filters import reject_oversized_list
+from techradar.api.query_filters import MAX_PAGE_NUMBER, reject_oversized_list
 from techradar.api.rate_limit import RATE_LIMITED_RESPONSES, enforce_recommendation_rate_limit
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, Recommendation, UserArticle
@@ -364,7 +364,7 @@ def get_feed(
             ),
         ),
     ] = DEFAULT_FEED_MAX_AGE_DAYS,
-    page: Annotated[int, Query(ge=1, description="1始まりのページ番号")] = 1,
+    page: Annotated[int, Query(ge=1, le=MAX_PAGE_NUMBER, description="1始まりのページ番号")] = 1,
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
 ) -> FeedResponse:
     """Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。
@@ -387,7 +387,8 @@ def get_feed(
 
     ページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset
     として扱う。`total_count` は run に保存された件数（Bad 除外前）であり、
-    範囲外の `page` はエラーにせず空の `items` を返す。
+    総ページ数を超える `page` はエラーにせず空の `items` を返すが、
+    `MAX_PAGE_NUMBER` を超える `page` は 422 で弾く（Issue #96）。
 
     古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を
     削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。
