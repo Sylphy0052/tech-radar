@@ -119,6 +119,39 @@ describe("parseFeedFiltersFromSearchParams", () => {
     expect(filters.publishedTo).toBe("2026-08-01T14:59:59.999Z");
   }, TEST_TIMEOUT_MS);
 
+  it("reads the feed window in days", () => {
+    // Arrange
+    const searchParams = new URLSearchParams("max_age_days=30");
+
+    // Act
+    const filters = parseFeedFiltersFromSearchParams(searchParams);
+
+    // Assert
+    expect(filters.maxAgeDays).toBe(30);
+  }, TEST_TIMEOUT_MS);
+
+  it("drops an out-of-range feed window instead of forwarding it to the API", () => {
+    // Arrange — 上限（180日）超えは 422 になるため、指定なしへ落として既定に任せる
+    const searchParams = new URLSearchParams("max_age_days=999");
+
+    // Act
+    const filters = parseFeedFiltersFromSearchParams(searchParams);
+
+    // Assert
+    expect(filters.maxAgeDays).toBeNull();
+  }, TEST_TIMEOUT_MS);
+
+  it("drops a non-integer feed window instead of forwarding it to the API", () => {
+    // Arrange — 壊れた URL クエリ（手編集・共有リンク）を素通しさせない
+    const searchParams = new URLSearchParams("max_age_days=abc");
+
+    // Act
+    const filters = parseFeedFiltersFromSearchParams(searchParams);
+
+    // Assert
+    expect(filters.maxAgeDays).toBeNull();
+  }, TEST_TIMEOUT_MS);
+
   it("drops an unparsable published_from value instead of forwarding it to the API", () => {
     // Arrange — 手動編集や壊れた共有リンクを想定
     const searchParams = new URLSearchParams("published_from=not-a-date");
@@ -149,6 +182,7 @@ describe("buildSearchParamsFromFilters", () => {
       publishedFrom: "2026-07-31T15:00:00.000Z",
       publishedTo: "2026-08-01T14:59:59.999Z",
       sourceDomain: "blog.example.com",
+      maxAgeDays: 30,
     };
 
     // Act
@@ -206,6 +240,7 @@ describe("getFeed", () => {
       publishedFrom: null,
       publishedTo: null,
       sourceDomain: "blog.example.com",
+      maxAgeDays: 30,
     };
 
     // Act
@@ -218,6 +253,7 @@ describe("getFeed", () => {
     expect(query.getAll("topics")).toEqual(["ai", "web"]);
     expect(query.getAll("technologies")).toEqual(["rust"]);
     expect(query.get("source_domain")).toBe("blog.example.com");
+    expect(query.get("max_age_days")).toBe("30");
   }, TEST_TIMEOUT_MS);
 
   it("includes the page in the query string when provided", async () => {

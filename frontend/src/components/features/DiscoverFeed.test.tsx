@@ -152,7 +152,30 @@ describe("DiscoverFeed", () => {
 
     // Assert
     await waitFor(() =>
-      expect(screen.getByText("表示できる記事がありません。")).toBeInTheDocument(),
+      expect(screen.getByText("条件に当たる記事がありません。")).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  }, TEST_TIMEOUT_MS);
+
+  it("tells the reader to try another page when only this page is empty", async () => {
+    // Arrange — 総件数はあるのにこのページだけ空になる状況（絞り込みで件数が
+    // 減った直後に古いページ番号でリロードした場合など）。総件数 0 と同じ文言だと
+    // 他のページに記事があることが伝わらない（Issue #90 自己レビュー）。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({ items: [], total_count: 40, page: 5, page_size: 20, total_pages: 2 }),
+      ),
+    );
+
+    // Act
+    renderFeed();
+
+    // Assert
+    await waitFor(() =>
+      expect(
+        screen.getByText("このページには記事がありません。他のページを開いてください。"),
+      ).toBeInTheDocument(),
     );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   }, TEST_TIMEOUT_MS);

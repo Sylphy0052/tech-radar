@@ -31,7 +31,22 @@ export interface FeedFilters {
   /** 公開日の上限（ISO8601、含む）。 */
   publishedTo: string | null;
   sourceDomain: string | null;
+  /**
+   * フィードの対象期間（日数）。`null` は backend の既定
+   * （`config/scoring.yaml` の `freshness.max_age_days`）に任せることを表す。
+   *
+   * 公開日の範囲（`publishedFrom` / `publishedTo`）とは別の軸である。backend は
+   * 候補そのものをこの期間で切ったうえで公開日の範囲を適用するため、対象期間より
+   * 古い日付を範囲に指定しても 0 件にしかならない（Issue #90 自己レビュー）。
+   */
+  maxAgeDays: number | null;
 }
+
+/** 対象期間として指定できる日数の下限（`api/recommendations.py` と揃える）。 */
+export const MIN_FEED_MAX_AGE_DAYS = 1;
+
+/** 対象期間として指定できる日数の上限（`api/recommendations.py` と揃える）。 */
+export const MAX_FEED_MAX_AGE_DAYS = 180;
 
 export const EMPTY_FEED_FILTERS: FeedFilters = {
   q: null,
@@ -40,6 +55,7 @@ export const EMPTY_FEED_FILTERS: FeedFilters = {
   publishedFrom: null,
   publishedTo: null,
   sourceDomain: null,
+  maxAgeDays: null,
 };
 
 /**
@@ -58,6 +74,24 @@ function parseValidIsoDateOrNull(value: string | null): string | null {
 }
 
 /**
+ * 対象期間の日数として妥当（整数かつ 1〜180）ならその値を、そうでなければ `null` を返す。
+ *
+ * `parseValidIsoDateOrNull` と同じ狙いで、壊れた URL クエリをそのまま
+ * `GET /api/feed` へ送って 422 にしないための防御。範囲外は「指定なし」として
+ * backend の既定へ落とす。
+ */
+function parseMaxAgeDaysOrNull(value: string | null): number | null {
+  if (value === null) {
+    return null;
+  }
+  const days = Number(value);
+  if (!Number.isInteger(days) || days < MIN_FEED_MAX_AGE_DAYS || days > MAX_FEED_MAX_AGE_DAYS) {
+    return null;
+  }
+  return days;
+}
+
+/**
  * URL のクエリパラメータからフィルター条件を復元する。キー名は backend のクエリ
  * パラメータ名（`q` / `source_domain` 等）とそのまま揃えており、URL 表示と
  * API リクエストの間で別々の変換テーブルを持たずに済むようにしている
@@ -71,6 +105,7 @@ export function parseFeedFiltersFromSearchParams(searchParams: URLSearchParams):
     publishedFrom: parseValidIsoDateOrNull(searchParams.get("published_from")),
     publishedTo: parseValidIsoDateOrNull(searchParams.get("published_to")),
     sourceDomain: searchParams.get("source_domain"),
+    maxAgeDays: parseMaxAgeDaysOrNull(searchParams.get("max_age_days")),
   };
 }
 
@@ -93,6 +128,9 @@ export function buildSearchParamsFromFilters(filters: FeedFilters): URLSearchPar
   }
   if (filters.sourceDomain) {
     params.set("source_domain", filters.sourceDomain);
+  }
+  if (filters.maxAgeDays !== null) {
+    params.set("max_age_days", String(filters.maxAgeDays));
   }
   return params;
 }

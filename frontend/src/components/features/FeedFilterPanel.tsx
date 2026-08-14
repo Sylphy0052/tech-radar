@@ -4,6 +4,8 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { FormEvent } from "react";
 
 import {
+  MAX_FEED_MAX_AGE_DAYS,
+  MIN_FEED_MAX_AGE_DAYS,
   buildSearchParamsFromFilters,
   isoToJstDateInputValue,
   jstDateToPublishedFromIso,
@@ -34,6 +36,22 @@ function parseCommaSeparatedList(value: FormDataEntryValue | null): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter((item) => item !== "");
+}
+
+/**
+ * 対象期間の入力値を日数へ変換する。空欄・整数でない値・範囲外は `null`
+ * （backend の既定に任せる）へ落とす。`<input type="number">` は min/max を
+ * 付けても手入力やブラウザによっては範囲外の値を送れるため、ここでも確かめる。
+ */
+function parseMaxAgeDaysField(value: FormDataEntryValue | null): number | null {
+  if (typeof value !== "string" || value.trim() === "") {
+    return null;
+  }
+  const days = Number(value);
+  if (!Number.isInteger(days) || days < MIN_FEED_MAX_AGE_DAYS || days > MAX_FEED_MAX_AGE_DAYS) {
+    return null;
+  }
+  return days;
 }
 
 /**
@@ -77,6 +95,7 @@ export function FeedFilterPanel() {
           ? jstDateToPublishedToIso(publishedToDate)
           : null,
       sourceDomain: emptyToNull(formData.get("source_domain")),
+      maxAgeDays: parseMaxAgeDaysField(formData.get("max_age_days")),
     };
 
     const query = buildSearchParamsFromFilters(nextFilters).toString();
@@ -130,6 +149,28 @@ export function FeedFilterPanel() {
           className="field-input"
         />
       </label>
+
+      <div className={FIELD_CLASS}>
+        <label className={FIELD_CLASS}>
+          {/* 補足はラベルの外に置く。ラベル内に入れるとアクセシブル名が説明文まで
+              含んだ長い文字列になり、支援技術での読み上げも冗長になる。 */}
+          <span className="mono-label">
+            対象期間（{MIN_FEED_MAX_AGE_DAYS}〜{MAX_FEED_MAX_AGE_DAYS}日）
+          </span>
+          <input
+            type="number"
+            name="max_age_days"
+            min={MIN_FEED_MAX_AGE_DAYS}
+            max={MAX_FEED_MAX_AGE_DAYS}
+            step={1}
+            defaultValue={filters.maxAgeDays ?? ""}
+            className="field-input"
+          />
+        </label>
+        <span className="text-xs text-ink-subtle">
+          何日前までの記事を対象にするか。未指定は7日。公開日の指定はこの期間の内側にだけ効く
+        </span>
+      </div>
 
       <label className={FIELD_CLASS}>
         <span className="mono-label">公開日（開始）</span>

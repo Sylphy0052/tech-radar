@@ -53,7 +53,14 @@ export function DiscoverFeed() {
           )}
 
           {items.length === 0 && error === null && (
-            <p className="font-mono text-sm text-ink-subtle">表示できる記事がありません。</p>
+            // 総件数が 0 なら条件に当たる記事が無く、総件数があるのに空なら
+            // 範囲外のページを見ている（絞り込みで件数が減った直後のリロード等）。
+            // どちらも同じ文言だと、他のページに記事があることが伝わらない。
+            <p className="font-mono text-sm text-ink-subtle">
+              {totalCount === 0
+                ? "条件に当たる記事がありません。"
+                : "このページには記事がありません。他のページを開いてください。"}
+            </p>
           )}
 
           <Pagination

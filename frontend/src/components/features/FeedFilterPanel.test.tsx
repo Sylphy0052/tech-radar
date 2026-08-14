@@ -120,6 +120,51 @@ describe("FeedFilterPanel", () => {
     expect(query.get("published_to")).toBe("2026-08-01T14:59:59.999Z");
   }, TEST_TIMEOUT_MS);
 
+  it("reflects the feed window in the URL query when submitted", () => {
+    // Arrange — 受入基準: 対象期間が URL クエリに載る（Issue #90 自己レビュー）
+    render(
+      <NavigationTestProvider>
+        <FeedFilterPanel />
+        <LocationProbe />
+      </NavigationTestProvider>,
+    );
+
+    // Act
+    fireEvent.change(screen.getByLabelText("対象期間（1〜180日）"), { target: { value: "30" } });
+    fireEvent.click(screen.getByRole("button", { name: "絞り込む" }));
+
+    // Assert
+    const query = new URLSearchParams(screen.getByTestId("location-probe").textContent ?? "");
+    expect(query.get("max_age_days")).toBe("30");
+  }, TEST_TIMEOUT_MS);
+
+  it("drops an out-of-range feed window instead of putting it in the URL", () => {
+    // Arrange — number 入力は min/max を付けても範囲外の値を送れることがあるため、
+    // 送信時にも確かめて「指定なし」（backend の既定）へ落とす
+    render(
+      <NavigationTestProvider>
+        <FeedFilterPanel />
+        <LocationProbe />
+      </NavigationTestProvider>,
+    );
+
+    // Act
+    fireEvent.change(screen.getByLabelText("対象期間（1〜180日）"), { target: { value: "999" } });
+    fireEvent.click(screen.getByRole("button", { name: "絞り込む" }));
+
+    // Assert
+    const query = new URLSearchParams(screen.getByTestId("location-probe").textContent ?? "");
+    expect(query.get("max_age_days")).toBeNull();
+  }, TEST_TIMEOUT_MS);
+
+  it("restores the feed window from the current URL on mount", () => {
+    // Arrange & Act
+    renderPanel("max_age_days=45");
+
+    // Assert
+    expect(screen.getByLabelText("対象期間（1〜180日）")).toHaveValue(45);
+  }, TEST_TIMEOUT_MS);
+
   it("clears the URL query when the clear button is pressed", () => {
     // Arrange
     render(

@@ -217,12 +217,20 @@ export interface paths {
          * @description Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。
          *
          *     `q` / `topics` / `technologies` / `published_from` / `published_to` /
-         *     `source_domain` はいずれも省略可能な絞り込み条件で、全候補を対象に推薦を
-         *     作り直す（決定済みの設計、`generate_recommendations` の `feed_filters`）。
-         *     条件を反映したフィンガープリントが一致する直近の DISCOVER run が再利用して
-         *     よい時間内（`config/scoring.yaml` の `limits.feed_run_reuse_seconds`）なら
-         *     その run を再利用し、そうでなければ新しい run を生成する
-         *     （`_resolve_discover_run_id`）。
+         *     `source_domain` / `max_age_days` はいずれも省略可能な絞り込み条件で、全候補を
+         *     対象に推薦を作り直す（決定済みの設計、`generate_recommendations` の
+         *     `feed_filters`）。条件を反映したフィンガープリントが一致する直近の DISCOVER
+         *     run が再利用してよい時間内（`config/scoring.yaml` の
+         *     `limits.feed_run_reuse_seconds`）ならその run を再利用し、そうでなければ
+         *     新しい run を生成する（`_resolve_discover_run_id`）。
+         *
+         *     `max_age_days` はフィードの対象期間そのもの（候補の絞り込み）を変える
+         *     パラメータで、freshness スコアの減衰基準（`ranking.compute_freshness`）とは
+         *     無関係（Issue #90 自己レビュー、`FeedFilters.max_age_days` のコメント参照）。
+         *     従来は `config/scoring.yaml` の `freshness.max_age_days`（既定 7 日）を
+         *     超える公開日で `published_from` / `published_to` を指定すると、この
+         *     ハード除外の内側でしか絞り込みが効かず黙って 0 件になっていた
+         *     （Issue #90 自己レビューで判明した不具合そのもの）。
          *
          *     ページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset
          *     として扱う。`total_count` は run に保存された件数（Bad 除外前）であり、
@@ -1428,6 +1436,8 @@ export interface operations {
                 published_to?: string | null;
                 /** @description 情報源ドメインの完全一致 */
                 source_domain?: string | null;
+                /** @description フィード対象期間（日数）。省略時はconfig/scoring.yamlのfreshness.max_age_daysを使う。freshnessスコアの減衰基準（新しさの点数）はこの値を変えても変わらない */
+                max_age_days?: number;
                 /** @description 1始まりのページ番号 */
                 page?: number;
                 limit?: number;

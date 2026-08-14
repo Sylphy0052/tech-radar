@@ -488,4 +488,77 @@ describe("useFeed", () => {
     await waitFor(() => expect(result.current.items[0]?.feedback?.action).toBe("good"));
     expect(warn).not.toHaveBeenCalled();
   }, TEST_TIMEOUT_MS);
+
+  it("does nothing when removeFeedback targets an unknown article id", async () => {
+    // Arrange — applyFeedback 版と対になる回帰テスト。一覧に無い article_id を
+    // 渡されたら黙って戻らず痕跡を残す（Issue #45）。番号付きページングへの
+    // 書き換えで一度落ちたため、対を揃えて戻した（Issue #90 自己レビュー）。
+    const fetchMock = stubFeedPages({ 1: [itemA] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = renderHook(() => useFeed(FILTERS_A));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    const callCountBefore = fetchMock.mock.calls.length;
+
+    // Act
+    act(() => {
+      result.current.removeFeedback("unknown-id");
+    });
+
+    // Assert
+    expect(fetchMock).toHaveBeenCalledTimes(callCountBefore);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain("unknown-id");
+  }, TEST_TIMEOUT_MS);
+
+  it("rolls back and surfaces an error when removeFeedback's DELETE request fails", async () => {
+    // Arrange — 楽観的更新の巻き戻し（Issue #90 自己レビューで復元）
+    const withFeedback = makeItem({
+      article_id: itemA.article_id,
+      feedback: { action: "save", reason: null, created_at: "2026-08-01T00:00:00Z" },
+    });
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        return new Response("boom", { status: 500 });
+      }
+      return jsonResponse({
+        items: [withFeedback],
+        total_count: 1,
+        page: pageFromUrl(url),
+        page_size: 2,
+        total_pages: 1,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useFeed(FILTERS_A));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Act
+    act(() => {
+      result.current.removeFeedback(itemA.article_id);
+    });
+
+    // Assert — 送信前の feedback へ戻り、エラーが出る
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.items[0]?.feedback).toEqual(withFeedback.feedback);
+  }, TEST_TIMEOUT_MS);
+
+  it("surfaces a rate limit message with the wait time when the feed returns 429", async () => {
+    // Arrange — Issue #31 のクールダウン自体は無限スクロール（自動再取得）の
+    // 撤去で機構ごと不要になったが、429 の文言が出ることは残す必要がある。
+    // 書き換えでフィード側の 429 テストが全部消えていたため戻した（Issue #90 自己レビュー）。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("rate limited", { status: 429, headers: { "Retry-After": "30" } }),
+      ),
+    );
+
+    // Act
+    const { result } = renderHook(() => useFeed(FILTERS_A));
+
+    // Assert
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.error).toContain("30");
+    expect(result.current.items).toEqual([]);
+  }, TEST_TIMEOUT_MS);
 });
