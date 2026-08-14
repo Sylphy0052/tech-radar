@@ -55,8 +55,8 @@ function withoutArticle(items: InterestArticleItem[], articleId: string): Intere
 export function useInterestArticles(filters: ArticleFilters): UseInterestArticlesResult {
   const [items, setItems] = useState<InterestArticleItem[]>([]);
   const [page, setPageState] = useState(FIRST_PAGE);
-  const [totalPages, setTotalPages] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
+  const [pageSize, setPageSize] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -71,6 +71,12 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
     },
     [],
   );
+
+  // 総ページ数は state で持たず総件数から導く。除外操作は総件数をローカルで
+  // 1件ぶん減らすため（下記 `removeArticle`）、応答の `total_pages` をそのまま
+  // 保持すると再取得までページ数だけが古い値で残る。backend の計算式と同じ
+  // （`ceil(total_count / page_size)`）なので、導出しても値は変わらない。
+  const totalPages = pageSize > 0 ? Math.ceil(totalCount / pageSize) : 0;
 
   const filterKey = buildSearchParamsFromFilters(filters).toString();
   const [previousFilterKey, setPreviousFilterKey] = useState(filterKey);
@@ -91,8 +97,8 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
           return;
         }
         setItems(response.items);
-        setTotalPages(response.total_pages);
         setTotalCount(response.total_count);
+        setPageSize(response.page_size);
         setError(null);
       })
       .catch((err: unknown) => {
@@ -152,7 +158,11 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
       }
       const removedItem = items[index];
 
+      // 総件数も一緒に減らす。`items` だけ減らすと「全件が空なのか、その
+      // ページだけ空なのか」の出し分け（`InterestArticleList`）と「全N件」の
+      // 表示が、次の取得まで古い総件数のまま食い違う。
       setItems((current) => withoutArticle(current, articleId));
+      setTotalCount((current) => Math.max(0, current - 1));
       pendingArticleIdsRef.current.add(articleId);
 
       deleteInterestArticle(articleId)
@@ -171,6 +181,7 @@ export function useInterestArticles(filters: ArticleFilters): UseInterestArticle
             restored.splice(index, 0, removedItem);
             return restored;
           });
+          setTotalCount((current) => current + 1);
           setError(getRequestErrorMessage(err));
         })
         .finally(() => {

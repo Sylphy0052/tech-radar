@@ -48,3 +48,6 @@ infra/pgdata/
 .DS_Store
 .idea/
 *.swp
+
+# 型チェッカーのキャッシュ (mypy をアドホックに走らせたときに残る)
+.mypy_cache/

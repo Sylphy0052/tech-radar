@@ -296,6 +296,30 @@ describe("useInterestArticles", () => {
     );
   }, TEST_TIMEOUT_MS);
 
+  it("decreases the total count when an article is removed", async () => {
+    // Arrange — 1件だけの一覧。除外すると総件数も0にならなければ、表示側が
+    // 「該当する記事がありません」ではなく「他のページを開いてください」を出す
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(listResponse([itemA]));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useInterestArticles(EMPTY_ARTICLE_FILTERS));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.totalCount).toBe(1);
+
+    // Act
+    act(() => {
+      result.current.removeArticle(itemA.article_id);
+    });
+
+    // Assert — 総件数と総ページ数が再取得を待たずに追随する
+    expect(result.current.totalCount).toBe(0);
+    expect(result.current.totalPages).toBe(0);
+  }, TEST_TIMEOUT_MS);
+
   it("rolls back and surfaces an error when the removal request fails", async () => {
     // Arrange
     const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
@@ -319,6 +343,8 @@ describe("useInterestArticles", () => {
       itemA.article_id,
       itemB.article_id,
     ]);
+    // 総件数も巻き戻す（items だけ戻すと表示が食い違う）
+    expect(result.current.totalCount).toBe(2);
   }, TEST_TIMEOUT_MS);
 
   it("ignores a second removeArticle call on the same article while the request is in flight", async () => {

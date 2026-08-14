@@ -130,6 +130,28 @@ describe("InterestArticleList", () => {
     await waitFor(() => expect(screen.queryByText("除外対象")).not.toBeInTheDocument());
   }, TEST_TIMEOUT_MS);
 
+  it("shows the empty state after the last article on the page is excluded", async () => {
+    // Arrange — 総件数1件の一覧。除外後に総件数が古いままだと「他のページを
+    // 開いてください」という、存在しないページへの案内が出てしまう
+    const item = makeItem({ article_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", title: "最後の1件" });
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(listResponse([item]));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderList();
+    await waitFor(() => expect(screen.getByText("最後の1件")).toBeInTheDocument());
+
+    // Act
+    fireEvent.click(screen.getByRole("button", { name: "関心対象から除外" }));
+
+    // Assert
+    await waitFor(() => expect(screen.getByText("該当する記事がありません。")).toBeInTheDocument());
+    expect(screen.getByText("全0件")).toBeInTheDocument();
+  }, TEST_TIMEOUT_MS);
+
   it("removes the article even when clicked in the same tick it appears (Issue #37)", async () => {
     // Arrange — 記事が DOM に出た瞬間（React の passive effect が走る前）に
     // クリックする。MutationObserver のコールバックはマイクロタスク、passive

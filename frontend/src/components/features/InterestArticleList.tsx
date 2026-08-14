@@ -112,12 +112,16 @@ export function InterestArticleList() {
   return (
     <section className="flex flex-col gap-4">
       <h2 className="heading text-lg">関心記事一覧</h2>
-      {error !== null && <ErrorMessage message={error} />}
 
       {isLoading ? (
         <LoadingIndicator label="読み込み中..." />
       ) : (
         <>
+          {/* エラーは読み込み中には出さない。ページ移動では直前のエラーが
+              残ったままなので、外に置くと「読み込み中」と並んで出る
+              （`DiscoverFeed` と同じ扱い）。 */}
+          {error !== null && <ErrorMessage message={error} />}
+
           {items.length > 0 ? (
             <div className="flex flex-col gap-4">
               {items.map((item) => (
