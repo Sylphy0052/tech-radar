@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session
 from techradar.db import session_scope
 from techradar.db.enums import JobStatus, JobType
 from techradar.db.models import Job
+from techradar.db.query import LIKE_ESCAPE_CHAR, escape_like_pattern
 
 # dry-runのレポート表示でlast_errorを短く保つための切り詰め長。`jobs/queue.py`の
 # MAX_LAST_ERROR_LENGTH（DB保存上限）とは目的が別のため、値を共有せず独立して持つ。
@@ -54,31 +55,6 @@ _REPORT_ERROR_PREVIEW_LENGTH = 200
 # （今回の契機はembed_article 194件）。既定値は小さく保ち、実際の復旧では
 # 明示的に--max-requeueを引き上げて「意図した大量操作である」ことを示す運用にする。
 DEFAULT_MAX_REQUEUE = 50
-
-# `--error-contains`をLIKE（`Column.contains`）へ渡す際のエスケープ文字。
-# LIKEでは`%`（任意の0文字以上）と`_`（任意の1文字）がワイルドカードとして働く。
-# 運用者が失敗メッセージの一部をコピーして渡す前提のスクリプトだが、失敗メッセージと
-# Pythonのモジュール名が表記として一致しない場合がある。実際にIssue #79の復旧対象の
-# 失敗メッセージは「sentence-transformersが利用できません」（ハイフン）だが、
-# 対応するPythonのモジュール名は`sentence_transformers`（アンダースコア）である。
-# 運用者がどちらの表記で渡すかは状況次第で、`_`を含む文字列をエスケープせずに渡すと
-# ワイルドカードとして働き、意図した以外の行まで一括UPDATEの対象に入ってしまう。
-# そのため`%`・`_`・エスケープ文字自体をエスケープしたうえで、`contains(escape=...)`へ
-# 明示的なエスケープ文字を渡す。
-_LIKE_ESCAPE_CHAR = "\\"
-
-
-def _escape_like_wildcards(value: str) -> str:
-    """LIKE演算子のワイルドカード（`%`・`_`）をリテラル文字として扱うためにエスケープする。
-
-    エスケープ文字自体（`\\`）が値に含まれている場合、それを先にエスケープしておかないと
-    後段の置換で二重にエスケープされてしまうため、最初に処理する。
-    """
-    return (
-        value.replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR * 2)
-        .replace("%", _LIKE_ESCAPE_CHAR + "%")
-        .replace("_", _LIKE_ESCAPE_CHAR + "_")
-    )
 
 
 class TooManyRequeueTargetsError(RuntimeError):
@@ -133,16 +109,26 @@ def _build_plan(
     `pending`のジョブしか実行中へ遷移させないため、`failed`のジョブが横から
     実行中へ変わる経路はワーカー側に存在しない。
 
-    `error_contains`はLIKEによる部分一致（`Column.contains`）で、`%`・`_`は
-    `_escape_like_wildcards`でエスケープしたうえでリテラルとして扱う（理由は
-    `_LIKE_ESCAPE_CHAR`のコメント参照）。
+    `error_contains`はLIKEによる部分一致で、`%`・`_`・バックスラッシュは
+    `db/query.py`の`escape_like_pattern`でエスケープしたうえでリテラルとして扱う
+    （Issue #97でこのスクリプト独自の実装から共通関数へ寄せた）。
+
+    エスケープが要るのは、運用者が失敗メッセージの一部をコピーして渡す前提の
+    スクリプトでありながら、失敗メッセージとPythonのモジュール名が表記として
+    一致しない場合があるため。実際にIssue #79の復旧対象の失敗メッセージは
+    「sentence-transformersが利用できません」（ハイフン）だが、対応するモジュール名は
+    `sentence_transformers`（アンダースコア）である。運用者がどちらの表記で渡すかは
+    状況次第で、`_`をエスケープせずに渡すとワイルドカード（任意の1文字）として働き、
+    意図した以外の行まで一括UPDATEの対象に入ってしまう。
+
+    `contains`はSQLAlchemyが前後に`%`を付けるため、他の呼び出し箇所
+    （`api/articles.py`など）の`ilike(f"%{...}%")`とは形が違うが、エスケープの
+    規則そのものは共通である。
     """
     stmt = select(Job).where(Job.status == JobStatus.FAILED.value, Job.type == job_type.value)
     if error_contains:
         stmt = stmt.where(
-            Job.last_error.contains(
-                _escape_like_wildcards(error_contains), escape=_LIKE_ESCAPE_CHAR
-            )
+            Job.last_error.contains(escape_like_pattern(error_contains), escape=LIKE_ESCAPE_CHAR)
         )
     stmt = stmt.order_by(Job.created_at)
     jobs = session.scalars(stmt).all()
