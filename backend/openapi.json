@@ -1445,7 +1445,7 @@
   "paths": {
     "/api/articles": {
       "get": {
-        "description": "関心記事一覧を返す（`PROJECT_SPEC.md` §6.3、検索・絞り込み・ページングは Issue #91）。\n\n手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）\n降順で返す。タイブレークに `user_articles.id` を使う。\n\nページングは番号付き（`page` / `limit`）で、`GET /api/feed` と同じく offset として\n扱う。範囲外の `page` はエラーにせず空の `items` を返す。Issue #91 以前は cursor\n方式だったが、目的のページへ直接移動できるようにするため置き換えた。",
+        "description": "関心記事一覧を返す（`PROJECT_SPEC.md` §6.3、検索・絞り込み・ページングは Issue #91）。\n\n手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）\n降順で返す。タイブレークに `user_articles.id` を使う。\n\nページングは番号付き（`page` / `limit`）で、`GET /api/feed` と同じく offset として\n扱う。総ページ数を超える `page` はエラーにせず空の `items` を返すが、\n`MAX_PAGE_NUMBER` を超える `page` は 422 で弾く（Issue #96）。Issue #91 以前は\ncursor 方式だったが、目的のページへ直接移動できるようにするため置き換えた。",
         "operationId": "list_interest_articles_api_articles_get",
         "parameters": [
           {
@@ -2102,7 +2102,7 @@
     },
     "/api/feed": {
       "get": {
-        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。\n\n`q` / `topics` / `technologies` / `published_from` / `published_to` /\n`source_domain` / `max_age_days` はいずれも省略可能な絞り込み条件で、全候補を\n対象に推薦を作り直す（決定済みの設計、`generate_recommendations` の\n`feed_filters`）。条件を反映したフィンガープリントが一致する直近の DISCOVER\nrun が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run を再利用し、そうでなければ\n新しい run を生成する（`_resolve_discover_run_id`）。\n\n`max_age_days` はフィードの対象期間そのもの（候補の絞り込み）を変える\nパラメータで、freshness スコアの減衰基準（`ranking.compute_freshness`）とは\n無関係（Issue #90 自己レビュー、`FeedFilters.max_age_days` のコメント参照）。\n従来は `config/scoring.yaml` の `freshness.max_age_days`（既定 7 日）を\n超える公開日で `published_from` / `published_to` を指定すると、この\nハード除外の内側でしか絞り込みが効かず黙って 0 件になっていた\n（Issue #90 自己レビューで判明した不具合そのもの）。\n\nページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset\nとして扱う。`total_count` は run に保存された件数（Bad 除外前）であり、\n範囲外の `page` はエラーにせず空の `items` を返す。\n\n古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を\n削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。",
+        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。\n\n`q` / `topics` / `technologies` / `published_from` / `published_to` /\n`source_domain` / `max_age_days` はいずれも省略可能な絞り込み条件で、全候補を\n対象に推薦を作り直す（決定済みの設計、`generate_recommendations` の\n`feed_filters`）。条件を反映したフィンガープリントが一致する直近の DISCOVER\nrun が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run を再利用し、そうでなければ\n新しい run を生成する（`_resolve_discover_run_id`）。\n\n`max_age_days` はフィードの対象期間そのもの（候補の絞り込み）を変える\nパラメータで、freshness スコアの減衰基準（`ranking.compute_freshness`）とは\n無関係（Issue #90 自己レビュー、`FeedFilters.max_age_days` のコメント参照）。\n従来は `config/scoring.yaml` の `freshness.max_age_days`（既定 7 日）を\n超える公開日で `published_from` / `published_to` を指定すると、この\nハード除外の内側でしか絞り込みが効かず黙って 0 件になっていた\n（Issue #90 自己レビューで判明した不具合そのもの）。\n\nページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset\nとして扱う。`total_count` は run に保存された件数（Bad 除外前）であり、\n総ページ数を超える `page` はエラーにせず空の `items` を返すが、\n`MAX_PAGE_NUMBER` を超える `page` は 422 で弾く（Issue #96）。\n\n古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を\n削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。",
         "operationId": "get_feed_api_feed_get",
         "parameters": [
           {

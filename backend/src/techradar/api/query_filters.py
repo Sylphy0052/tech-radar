@@ -3,6 +3,10 @@
 `GET /api/feed`（`recommendations.py`）と `GET /api/articles`（`articles.py`）は、
 どちらも自由入力の検索語と topics / technologies を受け取る。上限の値そのものは
 エンドポイントごとに定数で持つが、検証の規則は同じなのでここへ集約する。
+
+ただし `page` の上限（`MAX_PAGE_NUMBER`）だけはこの方針の例外で、値そのものを
+ここで共有する。DB の bigint に収まる OFFSET かどうかという制約から決まる値であり、
+エンドポイントごとの事情で変わらないため（Issue #96）。
 """
 
 from __future__ import annotations

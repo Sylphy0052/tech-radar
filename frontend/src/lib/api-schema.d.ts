@@ -19,8 +19,9 @@ export interface paths {
          *     降順で返す。タイブレークに `user_articles.id` を使う。
          *
          *     ページングは番号付き（`page` / `limit`）で、`GET /api/feed` と同じく offset として
-         *     扱う。範囲外の `page` はエラーにせず空の `items` を返す。Issue #91 以前は cursor
-         *     方式だったが、目的のページへ直接移動できるようにするため置き換えた。
+         *     扱う。総ページ数を超える `page` はエラーにせず空の `items` を返すが、
+         *     `MAX_PAGE_NUMBER` を超える `page` は 422 で弾く（Issue #96）。Issue #91 以前は
+         *     cursor 方式だったが、目的のページへ直接移動できるようにするため置き換えた。
          */
         get: operations["list_interest_articles_api_articles_get"];
         put?: never;
@@ -238,7 +239,8 @@ export interface paths {
          *
          *     ページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset
          *     として扱う。`total_count` は run に保存された件数（Bad 除外前）であり、
-         *     範囲外の `page` はエラーにせず空の `items` を返す。
+         *     総ページ数を超える `page` はエラーにせず空の `items` を返すが、
+         *     `MAX_PAGE_NUMBER` を超える `page` は 422 で弾く（Issue #96）。
          *
          *     古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を
          *     削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。
