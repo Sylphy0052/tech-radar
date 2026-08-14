@@ -45,13 +45,21 @@ class SourceResponse(BaseModel):
     verified: bool
 
 
+# `domain` / `entity_name` の長さ上限（Issue #98）。登録・更新・検索の3経路で
+# 同じ値を使う。検索側だけ緩いと、書き込めない長さの語で検索できることになり、
+# 一致するはずのない問い合わせを DB まで通してしまう。値そのものは
+# `source_registry` の列長に由来する。
+SOURCE_ENTITY_NAME_MAX_LENGTH = 200
+SOURCE_DOMAIN_MAX_LENGTH = 255
+
+
 class SourceCreate(BaseModel):
     """レジストリの新規登録。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    entity_name: str = Field(min_length=1, max_length=200)
-    domain: str = Field(min_length=1, max_length=255)
+    entity_name: str = Field(min_length=1, max_length=SOURCE_ENTITY_NAME_MAX_LENGTH)
+    domain: str = Field(min_length=1, max_length=SOURCE_DOMAIN_MAX_LENGTH)
     path_pattern: str | None = Field(default=None, max_length=255)
     github_org: str | None = Field(default=None, max_length=100)
     source_type: SourceType
@@ -73,7 +81,9 @@ class SourceUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    entity_name: str | None = Field(default=None, min_length=1, max_length=200)
+    entity_name: str | None = Field(
+        default=None, min_length=1, max_length=SOURCE_ENTITY_NAME_MAX_LENGTH
+    )
     source_type: SourceType | None = None
     authority_score: float | None = Field(default=None, ge=0.0, le=1.0)
     verified: bool | None = None
@@ -82,9 +92,16 @@ class SourceUpdate(BaseModel):
 @router.get("", response_model=list[SourceResponse])
 def list_sources(
     session: SessionDep,
-    domain: Annotated[str | None, Query(description="ドメインの部分一致で絞り込む")] = None,
+    domain: Annotated[
+        str | None,
+        Query(description="ドメインの部分一致で絞り込む", max_length=SOURCE_DOMAIN_MAX_LENGTH),
+    ] = None,
     entity_name: Annotated[
-        str | None, Query(description="企業・OSS 名の部分一致で絞り込む")
+        str | None,
+        Query(
+            description="企業・OSS 名の部分一致で絞り込む",
+            max_length=SOURCE_ENTITY_NAME_MAX_LENGTH,
+        ),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
     offset: Annotated[int, Query(ge=0, le=MAX_OFFSET)] = 0,
