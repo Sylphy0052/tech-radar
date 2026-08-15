@@ -130,7 +130,7 @@ def collect_candidates(
 
 
 def _record_feed_health_safely(session: Session, collectors: Sequence[SourceCollector]) -> None:
-    """`DiscoveredFeedCollector` の巡回結果を `discovered_feeds` へ反映する（Issue #105）。
+    """`DiscoveredFeedCollector` の巡回結果を `discovered_feeds` へ反映する（Issue #105, #108）。
 
     `collectors` の中から `DiscoveredFeedCollector` のインスタンスだけを見つけて
     `feed_results()`（`RssCollector` が持つ、フィード URL ごとの結果の記録。

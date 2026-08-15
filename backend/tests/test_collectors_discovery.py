@@ -1656,6 +1656,88 @@ class TestRecordFeedHealthEmptyFetches:
         assert row.status == DiscoveredFeedStatus.DISABLED.value
         assert _available_slots(db_session) == slots_before + 1
 
+    def test_disables_every_row_sharing_the_same_feed_url(self, db_session: Session) -> None:
+        """受入基準: 同じ `feed_url` を持つ行が複数あれば、そのすべてが空配信で無効化される。
+
+        `feed_url` に一意制約は無く、別々のドメインのトップページが同じフィード URL
+        を指していれば行が並ぶ（`record_feed_health` docstring 参照）。取得失敗による
+        無効化では `test_updates_every_row_sharing_the_same_feed_url` が同じことを
+        押さえている。空配信の経路にも同じ回帰テストを置く。
+        """
+        # Arrange — 同じ feed_url を指す 2 ドメイン。どちらも次の 0 件で閾値へ届く
+        feed_url = "https://shared-empty.example.com/feed.xml"
+        rows = [
+            make_discovered_feed(
+                db_session,
+                domain=domain,
+                status=DiscoveredFeedStatus.FOUND,
+                last_attempted_at=NOW,
+                feed_url=feed_url,
+                enabled=True,
+                consecutive_empty_fetches=MAX_CONSECUTIVE_EMPTY_FETCHES - 1,
+            )
+            for domain in ("shared-empty.example.com", "blog.shared-empty.example.com")
+        ]
+
+        # Act
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=True, entry_count=0)}, now=NOW
+        )
+
+        # Assert
+        for row in rows:
+            db_session.refresh(row)
+            assert row.status == DiscoveredFeedStatus.DISABLED.value
+            assert row.enabled is False
+            assert row.consecutive_empty_fetches == MAX_CONSECUTIVE_EMPTY_FETCHES
+
+    def test_does_not_touch_an_already_disabled_row_sharing_the_feed_url(
+        self, db_session: Session
+    ) -> None:
+        """受入基準: 無効化済みの行は、同じ `feed_url` の生きた行の巡回結果を巻き込まない。
+
+        無効化済みの行は巡回対象ではない（`load_enabled_discovered_feeds` は
+        `status=FOUND` かつ `enabled` のみを返す）。同じ `feed_url` を持つ別ドメインが
+        まだ生きていると、その巡回結果が相乗りで届く。取得していない行の成否を数えると
+        カウンタが際限なく増え、無効化のログも巡回のたびに出続ける。
+        """
+        # Arrange — 無効化済みの行と、同じ feed_url を指す生きた行
+        feed_url = "https://mixed.example.com/feed.xml"
+        disabled = make_discovered_feed(
+            db_session,
+            domain="mixed.example.com",
+            status=DiscoveredFeedStatus.DISABLED,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=False,
+            consecutive_empty_fetches=MAX_CONSECUTIVE_EMPTY_FETCHES,
+            consecutive_failures=MAX_CONSECUTIVE_FEED_FAILURES,
+        )
+        alive = make_discovered_feed(
+            db_session,
+            domain="blog.mixed.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+        )
+
+        # Act — 空配信と取得失敗の両方を通す
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=True, entry_count=0)}, now=NOW
+        )
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=False, entry_count=0)}, now=NOW
+        )
+
+        # Assert — 無効化済みの行は据え置き、生きた行だけが数えられる
+        db_session.refresh(disabled)
+        assert disabled.consecutive_empty_fetches == MAX_CONSECUTIVE_EMPTY_FETCHES
+        assert disabled.consecutive_failures == MAX_CONSECUTIVE_FEED_FAILURES
+        db_session.refresh(alive)
+        assert alive.consecutive_empty_fetches == 1
+        assert alive.consecutive_failures == 1
+
     def test_logs_a_distinct_event_from_the_failure_based_disablement(
         self, db_session: Session, monkeypatch: pytest.MonkeyPatch
     ) -> None:

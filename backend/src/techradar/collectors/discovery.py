@@ -289,10 +289,19 @@ def record_feed_health(
             logger.debug("collectors.discovery.feed_health_row_missing feed_url=%s", feed_url)
             continue
         for row in rows:
+            if row.status == DiscoveredFeedStatus.DISABLED.value:
+                # 既に無効化した行は巡回対象ではない（`load_enabled_discovered_feeds`
+                # は status=FOUND かつ enabled のみを返す）。ここへ来るのは、同じ
+                # feed_url を持つ別ドメインの行がまだ生きていて、その巡回結果が
+                # 相乗りしてくる場合だけ。取得していない行の成否を数える意味は無く、
+                # 放置するとカウンタが際限なく増え、無効化のログも巡回のたびに
+                # 出続ける。復活は再発見（`_apply_discovery_result`）が担う。
+                continue
+
             if result.succeeded:
                 row.consecutive_failures = 0
                 row.last_succeeded_at = resolved_now
-                _apply_empty_fetch_result(row, result, feed_url=feed_url, now=resolved_now)
+                _apply_empty_fetch_result(row, result, feed_url=feed_url)
                 continue
 
             row.consecutive_failures += 1
@@ -313,7 +322,7 @@ def record_feed_health(
 
 
 def _apply_empty_fetch_result(
-    row: DiscoveredFeed, result: FeedFetchResult, *, feed_url: str, now: datetime
+    row: DiscoveredFeed, result: FeedFetchResult, *, feed_url: str
 ) -> None:
     """取得・パースに成功した1行へ、エントリ 0 件の連続回数を反映する（Issue #108）。
 

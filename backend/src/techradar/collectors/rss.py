@@ -46,11 +46,20 @@ class FeedFetchResult:
     """1 フィードぶんの巡回結果（Issue #105, #108）。
 
     `succeeded` は「取得でき、かつパースが破綻していない」こと（`RssCollector`
-    docstring 参照）。`entry_count` は取得できた候補記事の件数（`_to_candidate`
-    で link/title 欠落として弾かれた分は含まない。「記事を配信できたか」を見る
-    Issue #108 の用途では、パース上のエントリ数より配信できた件数のほうが
-    意味を持つため）。取得・パースに失敗した場合は `entry_count=0` になるが、
-    「記事が無かった」わけではなく「件数が分からない」ことを表す。呼び出し側
+    docstring 参照）。`entry_count` はこのフィードから作れた候補記事の件数
+    （`_to_candidate` で link/title 欠落として弾かれた分は含まない。「記事を
+    配信しているか」を見る Issue #108 の用途では、パース上のエントリ数より、
+    記事として扱える形になっている件数のほうが意味を持つため）。
+
+    **重複・既存記事の除外より前の値である。** `collect_candidates` が後段で
+    かける `filter_recent` / `_dedupe_by_normalized_url` /
+    `_exclude_existing_articles` / `_exclude_already_queued` を通す前に数える
+    ため、「毎回同じ既出記事だけを返すフィード」は `entry_count > 0` になる。
+    Issue #108 が回収するのは「記事を配信しないフィード」の枠であって「新着が
+    無いフィード」ではない。後者まで含めるなら別の指標（除外後の件数）が要る。
+
+    取得・パースに失敗した場合は `entry_count=0` になるが、「記事が無かった」
+    わけではなく「件数が分からない」ことを表す。呼び出し側
     （`discovery.record_feed_health`）は `succeeded=False` の行を「エントリ 0 件
     だった」とは数えない。
     """
