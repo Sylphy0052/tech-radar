@@ -13,8 +13,9 @@ frontend の `npm run gen:api-types` がこの出力（既定では `backend/ope
 
 from __future__ import annotations
 
+import argparse
 import json
-import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -23,17 +24,70 @@ from techradar.main import create_app
 
 DEFAULT_OUTPUT_PATH = REPO_ROOT / "backend" / "openapi.json"
 
-_USAGE = "使い方: python -m techradar.openapi_export [出力先パス]"
 
-# 引数の検証が失敗したときの終了コード。慣例（`argparse` が使う値）に合わせる。
-_USAGE_ERROR_EXIT_CODE = 2
+def _output_path(value: str) -> Path:
+    """コマンドライン引数を書き出し先のパスへ変換する。
+
+    `argparse` が引数の誤りとして扱ってくれない入力を、ここで
+    `argparse.ArgumentTypeError` へ変換する。こうすると `--check` のような
+    オプション風の引数と同じ usage 表示・終了コード 2 に揃う。素通りさせると
+    どれも意図しない場所へファイルを作るか、生のトレースバックで落ちる。
+
+    - 空文字列と空白のみ。どちらもシェルの展開ミスで渡りうる。落ち方は違い、
+      `Path("")` はカレントディレクトリを指すため書き出し時に
+      `IsADirectoryError` になり、`Path(" ")` は空白 1 文字を名前に持つ
+      ファイルが黙って作られる。どちらも出力先の指定として意味を成さない
+    - ハイフンで始まる引数。`argparse` は `-`（標準入出力を表す Unix の慣習）と
+      `-1` のような負数形式のトークンを、オプションではなく位置引数として受け
+      取る。このモジュールは標準出力へ書き出さず、数値オプションも持たない。
+      素通りさせると `-` や `-1` という名前のファイルが作られ、`git add -A` で
+      commit へ紛れ込む（Issue #103 で `--check` について実際に起きた）。
+      ハイフンで始まるパスを本当に渡したいときは `./-name.json` と書く
+    - ディレクトリ。`.` や `./` を含む
+
+    親ディレクトリが存在しない場合は弾かない。それは引数として壊れているのでは
+    なく書き込み時の問題であり、`write_text` の `FileNotFoundError` に任せる。
+    """
+    if not value.strip():
+        raise argparse.ArgumentTypeError("出力先パスが空です")
+    if value.startswith("-"):
+        raise argparse.ArgumentTypeError(
+            f"不明なオプション: {value}（このコマンドにオプションはない）"
+        )
+    path = Path(value)
+    if path.is_dir():
+        raise argparse.ArgumentTypeError(f"出力先がディレクトリを指している: {value}")
+    return path
 
 
-def _reject(message: str) -> int:
-    """引数の誤りを stderr へ報告し、`main` の戻り値をそのまま返す。"""
-    print(message, file=sys.stderr)
-    print(_USAGE, file=sys.stderr)
-    return _USAGE_ERROR_EXIT_CODE
+def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    """引数を解釈する。誤りがあれば usage を出して終了コード 2 で終わる。
+
+    このコマンドにオプションは無いが、`--check` のような引数をそのまま出力先として
+    扱うと `backend/--check` というファイルが作られ、`git add -A` で commit へ紛れ
+    込む（Issue #103 で実際に起きた）。判定は `argparse` に任せる（`sources/seed.py`
+    と同じ流儀で、自前の usage 文字列や終了コードを持たない）。`argparse` が見逃す
+    入力だけを `_output_path` で拾う。
+
+    `allow_abbrev` を切ってあるのは、既定の True では未知のオプションが前方一致で
+    既知のものへ解決されるため。誤入力をエラーにせず別の動作へ倒すのは、引数を
+    検証する目的と逆になる。
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m techradar.openapi_export",
+        description="OpenAPI スキーマを JSON ファイルへ書き出す",
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        type=_output_path,
+        # metavar は英語にする。argparse の桁揃えは文字数で計算し全角の表示幅を
+        # 見ないため、日本語を置くと --help の説明列が縦に揃わない。
+        metavar="PATH",
+        help="書き出し先のパス（省略時は backend/openapi.json）",
+    )
+    return parser.parse_args(argv)
 
 
 def build_openapi_schema() -> dict[str, Any]:
@@ -50,33 +104,18 @@ def render_openapi_schema(schema: dict[str, Any]) -> str:
     return json.dumps(schema, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """OpenAPI スキーマをファイルへ書き出す。
-
-    受け付ける引数は出力先パス1つだけで、オプションは持たない。`-` で始まる引数を
-    そのまま出力先として扱うと、`--check` のような誤った呼び出しで `backend/--check`
-    というファイルが作られ、`git add -A` で commit へ紛れ込む（Issue #103 で実際に
-    起きた）。オプションらしき引数と余分な引数は、書き出す前に弾く。
 
     Args:
         argv: 引数。1つ目に出力先パスを指定できる（省略時は `backend/openapi.json`）。
 
     Returns:
-        終了コード。成功なら 0、引数が不正なら 2（このときファイルは作らない）。
+        終了コード。成功なら 0。引数が不正な場合は `argparse` が `SystemExit(2)` を
+        送出するため、この関数からは返らない（このときファイルは作らない）。
     """
-    arguments = sys.argv[1:] if argv is None else argv
-    # オプションの判定を個数より先に置く。`--check out.json` は両方に当たるが、
-    # 誤用の実態はオプションの取り違えであり、個数を先に見ると「引数が多すぎます」
-    # としか出ずにオプションが無いことが伝わらない。
-    if arguments and arguments[0].startswith("-"):
-        return _reject(f"不明なオプション: {arguments[0]}")
-    if len(arguments) > 1:
-        return _reject(f"引数が多すぎます: {' '.join(arguments)}")
-    # 空文字列はシェルの展開ミスで渡りうる。`Path("")` はカレントディレクトリを
-    # 指すため、素通りさせると書き出し時に IsADirectoryError で落ちる。
-    if arguments and arguments[0] == "":
-        return _reject("出力先パスが空です")
-    output_path = Path(arguments[0]) if arguments else DEFAULT_OUTPUT_PATH
+    args = _parse_args(argv)
+    output_path = DEFAULT_OUTPUT_PATH if args.path is None else args.path
 
     schema = build_openapi_schema()
     output_path.write_text(render_openapi_schema(schema), encoding="utf-8")
