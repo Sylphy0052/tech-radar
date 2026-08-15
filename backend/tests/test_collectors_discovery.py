@@ -18,6 +18,7 @@ from techradar.collectors import discovery as discovery_module
 from techradar.collectors.discovery import (
     MAX_DISCOVERED_FEEDS_TOTAL,
     MAX_DISCOVERY_DOMAINS_PER_RUN,
+    MAX_FEED_CANDIDATES_PER_DOMAIN,
     DiscoveredFeedCollector,
     DomainCount,
     aggregate_domain_counts,
@@ -744,6 +745,374 @@ class TestDiscoverFeeds:
             c for c in fake_fetch_resource.calls if c["url"] == "https://ct.example.com/feed.xml"
         )
         assert feed_call["allowed_content_types"] == FEED_CONTENT_TYPES
+
+    def test_limits_feed_candidates_tried_per_domain(
+        self, db_session: Session, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ) -> None:
+        """受入基準: 1ドメインから取得を試す候補は MAX_FEED_CANDIDATES_PER_DOMAIN 件まで。
+
+        `<link rel="alternate">` を大量に並べた HTML を踏むと、上限が無ければ
+        1ドメインの発見だけでジョブワーカーが長時間占有される。
+        """
+        # Arrange — 上限より多い候補を並べ、いずれもパースできないフィードを返す
+        user_id = uuid.uuid4()
+        domain = "manylinks.example.com"
+        make_user_article(
+            db_session,
+            make_article(db_session, f"https://{domain}/1", source_domain=domain),
+            user_id=user_id,
+            origin=ArticleOrigin.MANUAL,
+        )
+        candidate_count = MAX_FEED_CANDIDATES_PER_DOMAIN + 3
+        links = "".join(
+            f'<link rel="alternate" type="application/rss+xml" href="/feed{i}.xml">'
+            for i in range(candidate_count)
+        )
+        fake_fetch_resource.set_response(
+            f"https://{domain}/",
+            _resource(
+                f"<html><head>{links}</head><body></body></html>", final_url=f"https://{domain}/"
+            ),
+        )
+        for i in range(candidate_count):
+            feed_url = f"https://{domain}/feed{i}.xml"
+            fake_fetch_resource.set_response(
+                feed_url,
+                _resource(BROKEN_FEED_XML, final_url=feed_url, content_type="application/rss+xml"),
+            )
+
+        # Act
+        discover_feeds(db_session, user_id=user_id, settings=settings, now=NOW)
+
+        # Assert — トップページ以外への取得は上限件数で打ち切られる
+        feed_calls = [c for c in fake_fetch_resource.calls if c["url"] != f"https://{domain}/"]
+        assert len(feed_calls) == MAX_FEED_CANDIDATES_PER_DOMAIN
+        row = db_session.scalars(
+            select(DiscoveredFeed).where(DiscoveredFeed.domain == domain)
+        ).one()
+        assert row.status == DiscoveredFeedStatus.NOT_FOUND.value
+
+    def test_ignores_feed_candidates_pointing_at_another_site(
+        self, db_session: Session, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ) -> None:
+        """受入基準: 外部サイトの HTML が指す第三者の URL は巡回対象にしない。
+
+        `<link rel="alternate">` の href には任意の URL を書けるため、制限が
+        無いと「攻撃者が選んだ URL を恒久的な巡回先として登録させる」ことが
+        できてしまう。取得すれば有効なフィードを返す応答を用意しておき、
+        そもそも取得しないことを確かめる。
+        """
+        # Arrange
+        user_id = uuid.uuid4()
+        make_user_article(
+            db_session,
+            make_article(
+                db_session, "https://linkfarm.example.com/1", source_domain="linkfarm.example.com"
+            ),
+            user_id=user_id,
+            origin=ArticleOrigin.MANUAL,
+        )
+        homepage_html = (
+            "<html><head>"
+            '<link rel="alternate" type="application/rss+xml" '
+            'href="https://third-party.example.net/feed.xml">'
+            "</head><body></body></html>"
+        )
+        fake_fetch_resource.set_response(
+            "https://linkfarm.example.com/",
+            _resource(homepage_html, final_url="https://linkfarm.example.com/"),
+        )
+        fake_fetch_resource.set_response(
+            "https://third-party.example.net/feed.xml",
+            _resource(
+                VALID_FEED_XML,
+                final_url="https://third-party.example.net/feed.xml",
+                content_type="application/rss+xml",
+            ),
+        )
+
+        # Act
+        found_count = discover_feeds(db_session, user_id=user_id, settings=settings, now=NOW)
+
+        # Assert — 別サイトの候補へは取得へ行かず、発見できなかった扱いになる
+        assert found_count == 0
+        assert [call["url"] for call in fake_fetch_resource.calls] == [
+            "https://linkfarm.example.com/"
+        ]
+        row = db_session.scalars(
+            select(DiscoveredFeed).where(DiscoveredFeed.domain == "linkfarm.example.com")
+        ).one()
+        assert row.status == DiscoveredFeedStatus.NOT_FOUND.value
+
+    def test_accepts_a_feed_candidate_on_a_subdomain_of_the_homepage(
+        self, db_session: Session, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ) -> None:
+        """受入基準: 同じサイトの配下（サブドメイン）に置かれたフィードは採用する。
+
+        フィード配信を `feeds.` のような別ホストへ分けているサイトを
+        取りこぼさないため、同一ホスト完全一致までは狭めない。
+        """
+        # Arrange
+        user_id = uuid.uuid4()
+        make_user_article(
+            db_session,
+            make_article(
+                db_session, "https://parent.example.com/1", source_domain="parent.example.com"
+            ),
+            user_id=user_id,
+            origin=ArticleOrigin.MANUAL,
+        )
+        homepage_html = (
+            "<html><head>"
+            '<link rel="alternate" type="application/rss+xml" '
+            'href="https://feeds.parent.example.com/rss.xml">'
+            "</head><body></body></html>"
+        )
+        fake_fetch_resource.set_response(
+            "https://parent.example.com/",
+            _resource(homepage_html, final_url="https://parent.example.com/"),
+        )
+        fake_fetch_resource.set_response(
+            "https://feeds.parent.example.com/rss.xml",
+            _resource(
+                VALID_FEED_XML,
+                final_url="https://feeds.parent.example.com/rss.xml",
+                content_type="application/rss+xml",
+            ),
+        )
+
+        # Act
+        found_count = discover_feeds(db_session, user_id=user_id, settings=settings, now=NOW)
+
+        # Assert
+        assert found_count == 1
+        row = db_session.scalars(
+            select(DiscoveredFeed).where(DiscoveredFeed.domain == "parent.example.com")
+        ).one()
+        assert row.feed_url == "https://feeds.parent.example.com/rss.xml"
+
+    def test_accepts_link_type_with_parameters_and_uppercase_attributes(
+        self, db_session: Session, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ) -> None:
+        """受入基準: `type` のパラメータ付き表記・大文字表記を取りこぼさない。
+
+        `type="application/rss+xml; charset=utf-8"` を出すサイトがあるため、
+        `fetcher.http._check_content_type` と同じ正規化をしてから比較する。
+        """
+        # Arrange
+        user_id = uuid.uuid4()
+        make_user_article(
+            db_session,
+            make_article(
+                db_session, "https://mixedcase.example.com/1", source_domain="mixedcase.example.com"
+            ),
+            user_id=user_id,
+            origin=ArticleOrigin.MANUAL,
+        )
+        homepage_html = (
+            "<html><head>"
+            '<link rel="Alternate" type="Application/RSS+XML; charset=utf-8" href="/feed.xml">'
+            "</head><body></body></html>"
+        )
+        fake_fetch_resource.set_response(
+            "https://mixedcase.example.com/",
+            _resource(homepage_html, final_url="https://mixedcase.example.com/"),
+        )
+        fake_fetch_resource.set_response(
+            "https://mixedcase.example.com/feed.xml",
+            _resource(
+                VALID_FEED_XML,
+                final_url="https://mixedcase.example.com/feed.xml",
+                content_type="application/rss+xml",
+            ),
+        )
+
+        # Act
+        found_count = discover_feeds(db_session, user_id=user_id, settings=settings, now=NOW)
+
+        # Assert
+        assert found_count == 1
+        row = db_session.scalars(
+            select(DiscoveredFeed).where(DiscoveredFeed.domain == "mixedcase.example.com")
+        ).one()
+        assert row.feed_url == "https://mixedcase.example.com/feed.xml"
+
+    def test_fetches_a_duplicated_candidate_url_only_once(
+        self, db_session: Session, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ) -> None:
+        """受入基準: 同じ href が複数のタグに書かれていても取得は 1 回だけ。"""
+        # Arrange
+        user_id = uuid.uuid4()
+        make_user_article(
+            db_session,
+            make_article(db_session, "https://dup.example.com/1", source_domain="dup.example.com"),
+            user_id=user_id,
+            origin=ArticleOrigin.MANUAL,
+        )
+        homepage_html = (
+            "<html><head>"
+            '<link rel="alternate" type="application/rss+xml" href="/feed.xml">'
+            '<link rel="alternate" type="application/atom+xml" href="/feed.xml">'
+            "</head><body></body></html>"
+        )
+        fake_fetch_resource.set_response(
+            "https://dup.example.com/",
+            _resource(homepage_html, final_url="https://dup.example.com/"),
+        )
+        fake_fetch_resource.set_response(
+            "https://dup.example.com/feed.xml",
+            _resource(
+                BROKEN_FEED_XML,
+                final_url="https://dup.example.com/feed.xml",
+                content_type="application/rss+xml",
+            ),
+        )
+
+        # Act
+        discover_feeds(db_session, user_id=user_id, settings=settings, now=NOW)
+
+        # Assert
+        feed_calls = [
+            c for c in fake_fetch_resource.calls if c["url"] == "https://dup.example.com/feed.xml"
+        ]
+        assert len(feed_calls) == 1
+
+    def test_falls_back_to_next_candidate_when_the_first_feed_cannot_be_fetched(
+        self, db_session: Session, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ) -> None:
+        """受入基準: 候補フィードの取得自体が失敗しても次の候補を試す。
+
+        パース失敗（`bozo`）のフォールバックとは別の分岐（`FetchError`）を通す。
+        """
+        # Arrange
+        user_id = uuid.uuid4()
+        make_user_article(
+            db_session,
+            make_article(
+                db_session, "https://deadlink.example.com/1", source_domain="deadlink.example.com"
+            ),
+            user_id=user_id,
+            origin=ArticleOrigin.MANUAL,
+        )
+        homepage_html = (
+            "<html><head>"
+            '<link rel="alternate" type="application/rss+xml" href="/gone.xml">'
+            '<link rel="alternate" type="application/rss+xml" href="/alive.xml">'
+            "</head><body></body></html>"
+        )
+        fake_fetch_resource.set_response(
+            "https://deadlink.example.com/",
+            _resource(homepage_html, final_url="https://deadlink.example.com/"),
+        )
+        fake_fetch_resource.set_error(
+            "https://deadlink.example.com/gone.xml", FetchError("404 が返りました")
+        )
+        fake_fetch_resource.set_response(
+            "https://deadlink.example.com/alive.xml",
+            _resource(
+                VALID_FEED_XML,
+                final_url="https://deadlink.example.com/alive.xml",
+                content_type="application/rss+xml",
+            ),
+        )
+
+        # Act
+        found_count = discover_feeds(db_session, user_id=user_id, settings=settings, now=NOW)
+
+        # Assert
+        assert found_count == 1
+        row = db_session.scalars(
+            select(DiscoveredFeed).where(DiscoveredFeed.domain == "deadlink.example.com")
+        ).one()
+        assert row.feed_url == "https://deadlink.example.com/alive.xml"
+
+    def test_limits_domains_to_the_remaining_slots(
+        self, db_session: Session, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ) -> None:
+        """受入基準: 総数上限までの残り枠が per-run 上限より少なければ、残り枠まで。
+
+        枠 0（発見処理そのものを始めない）と枠十分（per-run 上限が効く）の間の、
+        枠を部分的に消費した状態を通す。
+        """
+        # Arrange — 残り 2 枠になるまで FOUND を積み、per-run 上限ぶんのドメインを用意する
+        remaining_slots = 2
+        for i in range(MAX_DISCOVERED_FEEDS_TOTAL - remaining_slots):
+            make_discovered_feed(
+                db_session,
+                domain=f"taken{i:02d}.example.com",
+                status=DiscoveredFeedStatus.FOUND,
+                last_attempted_at=NOW,
+                feed_url=f"https://taken{i:02d}.example.com/feed.xml",
+                enabled=True,
+            )
+        user_id = uuid.uuid4()
+        for i in range(MAX_DISCOVERY_DOMAINS_PER_RUN):
+            domain = f"slot{i:02d}.example.com"
+            make_user_article(
+                db_session,
+                make_article(db_session, f"https://{domain}/1", source_domain=domain),
+                user_id=user_id,
+                origin=ArticleOrigin.MANUAL,
+            )
+            fake_fetch_resource.set_response(
+                f"https://{domain}/",
+                _resource(
+                    "<html><head></head><body></body></html>", final_url=f"https://{domain}/"
+                ),
+            )
+
+        # Act
+        discover_feeds(db_session, user_id=user_id, settings=settings, now=NOW)
+
+        # Assert — per-run 上限（5）ではなく残り枠（2）まで
+        assert len({call["url"] for call in fake_fetch_resource.calls}) == remaining_slots
+
+    def test_updates_the_existing_row_when_the_insert_races_with_another_writer(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 一意制約違反を検知したら、既存行を新しい発見結果で更新する。
+
+        単一ユーザー・ローカル実行では実際のレースはまず起きないため、
+        「最初の検索だけ空を返す」状態を作ってこの分岐を通す。
+        """
+        # Arrange — DB には行があるが、最初の検索では見つからないことにする
+        make_discovered_feed(
+            db_session,
+            domain="race.example.com",
+            status=DiscoveredFeedStatus.NOT_FOUND,
+            last_attempted_at=NOW - timedelta(days=365),
+        )
+        original_scalars = db_session.scalars
+        seen_calls = {"count": 0}
+
+        def scalars_hiding_the_first_result(statement, *args, **kwargs):  # type: ignore[no-untyped-def]
+            seen_calls["count"] += 1
+            if seen_calls["count"] == 1:
+                statement = select(DiscoveredFeed).where(
+                    DiscoveredFeed.domain == "no-such-domain.example.com"
+                )
+            return original_scalars(statement, *args, **kwargs)
+
+        monkeypatch.setattr(db_session, "scalars", scalars_hiding_the_first_result)
+
+        # Act
+        discovery_module._upsert_discovered_feed(
+            db_session,
+            domain="race.example.com",
+            feed_url="https://race.example.com/feed.xml",
+            status=DiscoveredFeedStatus.FOUND.value,
+            article_count=3,
+            now=NOW,
+        )
+
+        # Assert — 挿入は諦め、既存行が新しい結果で上書きされる
+        row = db_session.scalars(
+            select(DiscoveredFeed).where(DiscoveredFeed.domain == "race.example.com")
+        ).one()
+        assert row.status == DiscoveredFeedStatus.FOUND.value
+        assert row.feed_url == "https://race.example.com/feed.xml"
+        assert row.article_count == 3
+        assert row.enabled is True
 
 
 class TestLoadEnabledDiscoveredFeeds:

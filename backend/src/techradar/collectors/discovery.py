@@ -17,6 +17,19 @@ Issue #93 ヒアリングでの決定）。
 - `DISCOVERY_RETRY_COOLDOWN_DAYS`: 発見に失敗した（NOT_FOUND/FETCH_FAILED）
   ドメインを再試行するまでの間隔。短すぎると、フィードを持たない・一時的に
   落ちているドメインへ毎回 HTTP を出し続けてしまう。
+- `MAX_FEED_CANDIDATES_PER_DOMAIN`: 1 ドメインのトップページから試すフィード
+  候補数の上限。トップページの HTML は最大 `fetch_max_response_bytes`（既定 5MB）
+  まで許容されるため、`<link rel="alternate">` を大量に並べた HTML を踏むと、
+  1 ドメインだけで「候補数 × `fetch_total_timeout_seconds`」の時間をジョブ
+  ワーカーが占有されうる。上限がこれを抑える。
+
+外部サイトの HTML が指す URL をそのまま巡回対象にはしない。候補はトップページと
+同じホスト（またはそのサブドメイン）の https URL に限る。`<link rel="alternate">`
+の `href` には任意の第三者 URL を書けるため、制限しないと「攻撃者が選んだ URL を
+恒久的な巡回先として登録させる」ことができてしまう（内部アドレスへの到達自体は
+`fetcher.ssrf.validate_url` が別途止めるが、外部サイトの選択までは止めない）。
+`fetcher.url.resolve_canonical_url` が「別ホストの canonical は採用しない」と
+しているのと同じ考え方。
 
 ドメイン集計は `interest.service._load_interest_article_population` と共用しない
 （モジュール docstring と `DiscoveredFeed` モデルの docstring を参照。要点は、
@@ -28,10 +41,11 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import feedparser
 from bs4 import BeautifulSoup
@@ -58,6 +72,9 @@ MAX_DISCOVERED_FEEDS_TOTAL = 20
 
 # 発見に失敗したドメインを再試行するまでの間隔（日数）。
 DISCOVERY_RETRY_COOLDOWN_DAYS = 30
+
+# 1 ドメインのトップページから取得を試すフィード候補数の上限。
+MAX_FEED_CANDIDATES_PER_DOMAIN = 5
 
 # ドメイン集計の対象にする UserArticle.origin。「実際に登録した記事のサイト」を
 # 見たいだけなので、関心スコア計算用の5経路のうち read_full/clicked は含めない
@@ -145,7 +162,7 @@ def discover_feeds(
     max_domains = min(MAX_DISCOVERY_DOMAINS_PER_RUN, available)
     targets = select_discovery_targets(ranked, excluded=excluded, max_domains=max_domains)
 
-    found_count = 0
+    status_counts: Counter[str] = Counter()
     for target in targets:
         try:
             status, feed_url = _discover_feed_url(target.domain, settings=settings)
@@ -162,8 +179,18 @@ def discover_feeds(
             article_count=target.article_count,
             now=resolved_now,
         )
-        if status == DiscoveredFeedStatus.FOUND.value:
-            found_count += 1
+        status_counts[status] += 1
+
+    found_count = status_counts[DiscoveredFeedStatus.FOUND.value]
+    # 常駐監視も CI も持たないため、事後にログだけで何が起きたか読めるようにしておく
+    # （`collect_candidates` が完了時にサマリを出すのと同じ理由）。
+    logger.info(
+        "collectors.discovery.completed attempted=%d found=%d not_found=%d fetch_failed=%d",
+        len(targets),
+        found_count,
+        status_counts[DiscoveredFeedStatus.NOT_FOUND.value],
+        status_counts[DiscoveredFeedStatus.FETCH_FAILED.value],
+    )
     return found_count
 
 
@@ -215,9 +242,6 @@ def _discover_feed_url(domain: str, *, settings: Settings) -> tuple[str, str | N
         return DiscoveredFeedStatus.FETCH_FAILED.value, None
 
     for candidate_url in _extract_feed_link_candidates(page.text, page.final_url):
-        if not candidate_url.startswith("https://"):
-            # http 候補は `FeedEntryConfig` の https 限定制約と整合させるため採用しない。
-            continue
         if _validate_feed(candidate_url, settings=settings):
             return DiscoveredFeedStatus.FOUND.value, candidate_url
 
@@ -225,12 +249,25 @@ def _discover_feed_url(domain: str, *, settings: Settings) -> tuple[str, str | N
 
 
 def _extract_feed_link_candidates(html: str, base_url: str) -> tuple[str, ...]:
-    """HTML から `<link rel="alternate" type="application/(rss|atom)+xml">` の href を集める。
+    """HTML から取得を試す価値のあるフィード候補 URL を集める。
+
+    `<link rel="alternate" type="application/(rss|atom)+xml">` の href のうち、
+    次をすべて満たすものだけを、HTML に現れた順で最大
+    `MAX_FEED_CANDIDATES_PER_DOMAIN` 件返す。
+
+    - `base_url`（リダイレクト追跡後の `final_url`）と同じホスト、またはその
+      サブドメインであること（モジュール docstring 参照）
+    - https であること（`FeedEntryConfig` の `_require_https` と整合させる）
+    - 既に候補へ入っていないこと（同じ href を複数のタグに書くページがあり、
+      そのままだと同一 URL を二度取得してしまう）
 
     `rel` は bs4 のビルダーによって複数値（list）にも単一値（str）にもなりうるため、
-    どちらでも判定できるようにする。相対 URL は `base_url`（リダイレクト追跡後の
-    `final_url`）を基準に絶対化する。
+    どちらでも判定できるようにする。`type` は `Content-Type` ヘッダと同じ書式を
+    取りうるので、`fetcher.http._check_content_type` と同様にパラメータを落として
+    小文字化してから比較する（`type="application/rss+xml; charset=utf-8"` のような
+    表記を取りこぼさないため）。
     """
+    base_host = _hostname_of(base_url)
     soup = BeautifulSoup(html, "lxml")
     candidates: list[str] = []
     for tag in soup.find_all("link"):
@@ -241,18 +278,49 @@ def _extract_feed_link_candidates(html: str, base_url: str) -> tuple[str, ...]:
             rel_values = [rel]
         else:
             rel_values = []
-        if "alternate" not in rel_values:
+        if "alternate" not in {value.lower() for value in rel_values}:
             continue
 
         type_attr = tag.get("type")
-        if type_attr not in _FEED_LINK_TYPES:
+        if not isinstance(type_attr, str):
+            continue
+        if type_attr.split(";", 1)[0].strip().lower() not in _FEED_LINK_TYPES:
             continue
 
         href = tag.get("href")
         if not isinstance(href, str) or not href:
             continue
-        candidates.append(urljoin(base_url, href))
+
+        candidate_url = urljoin(base_url, href)
+        if not candidate_url.startswith("https://"):
+            continue
+        if not _is_same_site(candidate_url, base_host):
+            continue
+        if candidate_url in candidates:
+            continue
+        candidates.append(candidate_url)
+        if len(candidates) >= MAX_FEED_CANDIDATES_PER_DOMAIN:
+            break
     return tuple(candidates)
+
+
+def _hostname_of(url: str) -> str:
+    """URL のホスト名を小文字で返す（取り出せなければ空文字）。"""
+    return (urlsplit(url).hostname or "").lower()
+
+
+def _is_same_site(candidate_url: str, base_host: str) -> bool:
+    """候補 URL がトップページと同じホスト、またはそのサブドメインかどうかを返す。
+
+    公開接尾辞リスト（`example.co.jp` のような多段 TLD）は見ない。判定を
+    「トップページのホストと一致するか、その配下か」に閉じているため、
+    上位ドメインを跨いで広がることはない。`base_host` が取れないときは
+    比較のしようがないので採用しない（安全側へ倒す）。
+    """
+    if not base_host:
+        return False
+    host = _hostname_of(candidate_url)
+    return host == base_host or host.endswith(f".{base_host}")
 
 
 def _validate_feed(feed_url: str, *, settings: Settings) -> bool:

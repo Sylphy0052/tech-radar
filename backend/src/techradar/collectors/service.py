@@ -130,9 +130,17 @@ def _discover_new_feeds_safely(session: Session, *, settings: Settings) -> None:
     ドメイン集計クエリ自体の失敗など想定外の例外まで含めて、この処理の失敗で
     巡回結果（既に enqueue 済みの候補）を失わせないよう、ここでも `_collect_all`
     と同じ「1 箇所の失敗が全体を止めない」方針で広く捕捉する。
+
+    捕捉するだけでは足りないため、発見処理全体を savepoint で囲む。`discover_feeds`
+    は `discovered_feeds` へ書き込むので、その flush が失敗するとセッションが
+    「rollback 待ち」のまま残り、呼び出し元（`jobs.handlers._shared._run_sync`）の
+    `session.commit()` が `PendingRollbackError` で落ちて、enqueue 済みの候補まで
+    巻き添えで消える。savepoint を張っておけば、例外時に発見処理ぶんだけを巻き戻して
+    セッションを使える状態へ戻せる。
     """
     try:
-        discover_feeds(session, user_id=settings.default_user_id, settings=settings)
+        with session.begin_nested():
+            discover_feeds(session, user_id=settings.default_user_id, settings=settings)
     except Exception:
         logger.warning("collectors.service.feed_discovery_failed", exc_info=True)
 

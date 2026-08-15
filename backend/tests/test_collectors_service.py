@@ -600,3 +600,36 @@ class TestFeedDiscoveryIntegration:
         assert len(received) == 1
         assert received[0]["user_id"] == settings.default_user_id
         assert received[0]["session"] is db_session
+
+    def test_a_failed_discovery_query_does_not_poison_the_session(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 発見処理が DB エラーで落ちても、巡回のトランザクションは使える状態で残る。
+
+        PostgreSQL はエラーが起きたトランザクションを中断状態にするため、savepoint で
+        囲っていないと、以降のクエリも呼び出し元の commit もすべて失敗し、enqueue 済みの
+        候補まで巻き添えで消える。ここでは実際に DB 側のエラー（ゼロ除算）を起こし、
+        その後もセッションが使えることを確かめる。
+        """
+        # Arrange
+        from sqlalchemy import text
+
+        def raise_a_database_error(session: Session, **kwargs: object) -> int:
+            session.execute(text("SELECT 1 / 0"))
+            return 0
+
+        monkeypatch.setattr(service, "discover_feeds", raise_a_database_error)
+        working = _FakeCollector("working", [make_candidate("https://example.com/articles/ok")])
+
+        # Act
+        result = collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[working],
+        )
+
+        # Assert — enqueue は残り、セッションは中断状態になっていない
+        assert result.enqueued_count == 1
+        db_session.flush()
+        assert len(db_session.scalars(select(Job)).all()) == 1
