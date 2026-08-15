@@ -104,4 +104,35 @@ def test_main_rejects_extra_arguments(tmp_path: Path, capsys, monkeypatch):
     # Assert
     assert exit_code == 2
     assert list(tmp_path.iterdir()) == []
+    assert "引数が多すぎます" in capsys.readouterr().err
+
+
+def test_main_reports_the_unknown_option_even_with_extra_arguments(tmp_path: Path, capsys):
+    # Arrange — `--check foo.json` は「オプション風」と「引数が多い」の両方に当たる。
+    # 個数だけを先に見ると「引数が多すぎます」としか出ず、オプションが無いことが伝わらない。
+    # 誤用の実態はオプションの取り違えなので、そちらを優先して報告する。
+
+    # Act
+    exit_code = main(["--check", str(tmp_path / "openapi.json")])
+
+    # Assert
+    assert exit_code == 2
+    assert list(tmp_path.iterdir()) == []
+    assert "不明なオプション" in capsys.readouterr().err
+
+
+def test_main_rejects_an_empty_path(tmp_path: Path, capsys, monkeypatch):
+    # Arrange — 空文字列はシェルの展開ミスで渡りうる。`Path("")` はカレントディレクトリを
+    # 指すため、素通りさせると書き出し時に IsADirectoryError の生トレースバックで落ちる。
+    from techradar import openapi_export as module
+
+    monkeypatch.setattr(module, "DEFAULT_OUTPUT_PATH", tmp_path / "openapi.json")
+    monkeypatch.chdir(tmp_path)
+
+    # Act
+    exit_code = main([""])
+
+    # Assert
+    assert exit_code == 2
+    assert list(tmp_path.iterdir()) == []
     assert capsys.readouterr().err != ""

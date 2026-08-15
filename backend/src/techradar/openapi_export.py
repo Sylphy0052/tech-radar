@@ -29,6 +29,13 @@ _USAGE = "使い方: python -m techradar.openapi_export [出力先パス]"
 _USAGE_ERROR_EXIT_CODE = 2
 
 
+def _reject(message: str) -> int:
+    """引数の誤りを stderr へ報告し、`main` の戻り値をそのまま返す。"""
+    print(message, file=sys.stderr)
+    print(_USAGE, file=sys.stderr)
+    return _USAGE_ERROR_EXIT_CODE
+
+
 def build_openapi_schema() -> dict[str, Any]:
     """DB 接続なしで FastAPI アプリを組み立て、OpenAPI スキーマを返す。"""
     app = create_app(Settings(_env_file=None))
@@ -58,14 +65,17 @@ def main(argv: list[str] | None = None) -> int:
         終了コード。成功なら 0、引数が不正なら 2（このときファイルは作らない）。
     """
     arguments = sys.argv[1:] if argv is None else argv
-    if len(arguments) > 1:
-        print(f"引数が多すぎます: {' '.join(arguments)}", file=sys.stderr)
-        print(_USAGE, file=sys.stderr)
-        return _USAGE_ERROR_EXIT_CODE
+    # オプションの判定を個数より先に置く。`--check out.json` は両方に当たるが、
+    # 誤用の実態はオプションの取り違えであり、個数を先に見ると「引数が多すぎます」
+    # としか出ずにオプションが無いことが伝わらない。
     if arguments and arguments[0].startswith("-"):
-        print(f"不明なオプション: {arguments[0]}", file=sys.stderr)
-        print(_USAGE, file=sys.stderr)
-        return _USAGE_ERROR_EXIT_CODE
+        return _reject(f"不明なオプション: {arguments[0]}")
+    if len(arguments) > 1:
+        return _reject(f"引数が多すぎます: {' '.join(arguments)}")
+    # 空文字列はシェルの展開ミスで渡りうる。`Path("")` はカレントディレクトリを
+    # 指すため、素通りさせると書き出し時に IsADirectoryError で落ちる。
+    if arguments and arguments[0] == "":
+        return _reject("出力先パスが空です")
     output_path = Path(arguments[0]) if arguments else DEFAULT_OUTPUT_PATH
 
     schema = build_openapi_schema()
