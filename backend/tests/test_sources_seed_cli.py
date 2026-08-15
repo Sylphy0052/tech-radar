@@ -68,3 +68,52 @@ class TestSeedCli:
         # Assert
         assert exit_code == 1
         assert cli_session.scalars(select(SourceRegistry)).all() == []
+
+    def test_rejects_option_like_arguments(self, cli_session: Session, capsys):
+        # Arrange — このコマンドにオプションは無い。オプション風の引数を設定ファイルの
+        # パスとして扱うと「そんなファイルは無い」というエラーで終わり、オプションが
+        # 存在しないことが伝わらない（Issue #104）。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            seed_module.main(["--force"])
+
+        # Assert — 引数の誤りとして終了コード 2 で落ち、DB は触らない
+        assert excinfo.value.code == 2
+        assert "--force" in capsys.readouterr().err
+        assert cli_session.scalars(select(SourceRegistry)).all() == []
+
+    def test_rejects_extra_arguments(self, cli_session: Session, tmp_path: Path, capsys):
+        # Arrange — 受け付けるのは設定ファイルのパス1つだけ。2つ目を黙って捨てると、
+        # 読み込んだ設定が呼び出し側の意図とずれたまま気付けない。
+        first = tmp_path / "first.yaml"
+        first.write_text(
+            "entities:\n"
+            "  - name: Example\n"
+            "    rules:\n"
+            "      - domain: first.example.com\n"
+            "        type: official_blog\n",
+            encoding="utf-8",
+        )
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            seed_module.main([str(first), str(tmp_path / "second.yaml")])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert cli_session.scalars(select(SourceRegistry)).all() == []
+
+    def test_rejects_an_empty_path(self, cli_session: Session, capsys):
+        # Arrange — 空文字列はシェルの展開ミスで渡りうる。`Path("")` はカレント
+        # ディレクトリを指すため、素通りさせると「ディレクトリを YAML として読もうと
+        # した」という分かりにくいエラーで落ちる。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            seed_module.main([""])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert capsys.readouterr().err != ""
+        assert cli_session.scalars(select(SourceRegistry)).all() == []
