@@ -41,13 +41,24 @@ def _to_utc_datetime(value: time.struct_time | None) -> datetime | None:
 
 
 class RssCollector:
-    """公式 RSS/Atom フィードを巡回するコレクター。"""
+    """公式 RSS/Atom フィードを巡回するコレクター。
+
+    フィード URL ごとの成否を `_feed_results` へ記録する（Issue #105）。
+    「成功」は「取得でき、かつパースが破綻していない（`bozo` かつエントリ 0 件、
+    ではない）」こと。エントリが 0 件でもパースに成功していれば成功として扱う
+    （フィードが生きていて記事が無いだけであり、フィード自体の不調ではないため）。
+    「失敗」は `FetchError`（取得失敗）と、パースが破綻してエントリを 1 件も
+    取れなかった場合の 2 通り。記録は DB を持たない（コレクターは DB を知らない
+    ままにする、Issue #105 の設計判断）。呼び出し側（`collectors.service`）が
+    `DiscoveredFeedCollector` のときだけこの記録を読んで DB へ反映する。
+    """
 
     name: str = "rss"
 
     def __init__(self, feeds: Sequence[FeedEntryConfig], settings: Settings) -> None:
         self._feeds = tuple(feeds)
         self._settings = settings
+        self._feed_results: dict[str, bool] = {}
 
     def collect(self) -> Sequence[CandidateArticle]:
         """設定された全フィードを巡回し、候補記事をまとめて返す。
@@ -57,11 +68,22 @@ class RssCollector:
         （呼び出し側の他コレクターを巻き込まないよう、ここでは
         `CollectorError` を送出しない。あくまでこのコレクター自体は
         「続行できる」ため）。
+
+        呼び出しのたびに `_feed_results` をリセットしてから収集する。同じ
+        インスタンスを2回呼んでも前回の記録が混ざらないようにするため。
         """
+        self._feed_results = {}
         candidates: list[CandidateArticle] = []
         for feed in self._feeds:
             candidates.extend(self._collect_feed(feed))
         return tuple(candidates)
+
+    def feed_results(self) -> dict[str, bool]:
+        """直近の `collect()` におけるフィード URL ごとの成否を返す。
+
+        キーはフィード URL、値は成功なら True。`collect()` を呼ぶ前は空。
+        """
+        return dict(self._feed_results)
 
     def _collect_feed(self, feed: FeedEntryConfig) -> list[CandidateArticle]:
         """1 フィード分を取得・パースし、候補記事のリストを返す（失敗時は空）。"""
@@ -78,6 +100,7 @@ class RssCollector:
             )
         except FetchError as exc:
             logger.warning("フィードの取得に失敗しました: %s (%s)", feed.name, exc)
+            self._feed_results[feed.url] = False
             return []
 
         parsed = feedparser.parse(resource.text)
@@ -91,6 +114,7 @@ class RssCollector:
                 feed.name,
                 parsed.get("bozo_exception"),
             )
+            self._feed_results[feed.url] = False
             return []
         if parsed.bozo:
             logger.warning(
@@ -99,6 +123,7 @@ class RssCollector:
                 parsed.get("bozo_exception"),
             )
 
+        self._feed_results[feed.url] = True
         return [
             candidate
             for entry in entries

@@ -538,6 +538,12 @@ class DiscoveredFeed(Base):
     # status=FOUND のときのみ True にする（発見処理側が明示的に立てる。
     # feed_url が無いのに enabled でも意味が無いため既定は False）。
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # 巡回の連続失敗回数（Issue #105）。1 回でも成功したら 0 へリセットする。
+    # `MAX_CONSECUTIVE_FEED_FAILURES` に達すると status=DISABLED / enabled=False にする。
+    # `feeds.yaml` 由来の手動フィードは対象外（`collectors.discovery` docstring 参照）。
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # 直近の巡回成功時刻（Issue #105）。一度も成功していなければ NULL のまま。
+    last_succeeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

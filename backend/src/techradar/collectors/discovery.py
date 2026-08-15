@@ -76,6 +76,11 @@ DISCOVERY_RETRY_COOLDOWN_DAYS = 30
 # 1 ドメインのトップページから取得を試すフィード候補数の上限。
 MAX_FEED_CANDIDATES_PER_DOMAIN = 5
 
+# 発見済みフィードの死活監視（Issue #105）で許容する連続失敗回数の上限。これに
+# 達すると status=DISABLED / enabled=False にして巡回対象から外す。1 回程度の
+# 失敗はネットワークの一時的な不調でも起きうるため、単発の失敗では無効化しない。
+MAX_CONSECUTIVE_FEED_FAILURES = 3
+
 # ドメイン集計の対象にする UserArticle.origin。「実際に登録した記事のサイト」を
 # 見たいだけなので、関心スコア計算用の5経路のうち read_full/clicked は含めない
 # （どちらも本文閲覧・クリックの副産物で、ユーザーが能動的に選んだ登録ではないため）。
@@ -220,6 +225,64 @@ def _available_slots(session: Session) -> int:
         .where(DiscoveredFeed.status == DiscoveredFeedStatus.FOUND.value)
     )
     return max(0, MAX_DISCOVERED_FEEDS_TOTAL - (found_count or 0))
+
+
+def record_feed_health(
+    session: Session, feed_results: dict[str, bool], *, now: datetime | None = None
+) -> None:
+    """`DiscoveredFeedCollector` の巡回結果を `discovered_feeds` へ反映する（Issue #105）。
+
+    `feed_results` は `RssCollector.feed_results()`（`DiscoveredFeedCollector` が
+    継承する）が返す「フィード URL → 成否」の対応をそのまま渡す想定。
+    `feeds.yaml` 由来の手動フィード（`RssCollector` / `JpMediaCollector`）は
+    対象外にする。自動追加の枠（`MAX_DISCOVERED_FEEDS_TOTAL`）を消費しないため
+    無効化する動機が無く、人が意図して置いたフィードを機械が黙って外す方が
+    危ういため（呼び出し側の `collectors.service` が `DiscoveredFeedCollector`
+    のときだけこの関数を呼ぶことで、対象を絞る）。
+
+    成功したフィードは `consecutive_failures` を 0 へリセットし
+    `last_succeeded_at` を更新する。失敗したフィードは `consecutive_failures`
+    を 1 増やし、`MAX_CONSECUTIVE_FEED_FAILURES` に達したら
+    `status=DISABLED` / `enabled=False` にする。対象の行が見つからない URL
+    （巡回中に行が消えた場合など）は黙って無視する。
+
+    無効化すると、なぜ枠が空き・復活も拾えるかは `_available_slots` /
+    `_already_found_domains` / `_cooldown_domains` の3関数が
+    `status == FOUND` だけを見ているため。`DISABLED` にした時点で
+    `_available_slots` の残り枠が増え、同時に `_already_found_domains` の
+    対象から外れて `_cooldown_domains`（`status != FOUND` を対象にする）
+    経由で `DISCOVERY_RETRY_COOLDOWN_DAYS` 後に再発見の対象へ戻る。
+    この3関数は変更しない。
+    """
+    resolved_now = now or datetime.now(UTC)
+    for feed_url, succeeded in feed_results.items():
+        row = session.scalars(
+            select(DiscoveredFeed).where(DiscoveredFeed.feed_url == feed_url)
+        ).first()
+        if row is None:
+            # 巡回中に行が消えた場合などに起こりうる。反映すべき対象が無いだけ
+            # なので、他の URL の反映は続ける。
+            continue
+
+        if succeeded:
+            row.consecutive_failures = 0
+            row.last_succeeded_at = resolved_now
+            continue
+
+        row.consecutive_failures += 1
+        if row.consecutive_failures >= MAX_CONSECUTIVE_FEED_FAILURES:
+            row.status = DiscoveredFeedStatus.DISABLED.value
+            row.enabled = False
+            logger.info(
+                "collectors.discovery.feed_disabled domain=%s feed_url=%s consecutive_failures=%d",
+                row.domain,
+                feed_url,
+                row.consecutive_failures,
+            )
+    # 呼び出し側（`collectors.service`）が savepoint（`begin_nested`）で囲む前提
+    # だが、テストや直接呼び出しでも変更が即座に読めるよう明示的に flush する
+    # （`_upsert_discovered_feed` と同じ流儀）。
+    session.flush()
 
 
 def _discover_feed_url(domain: str, *, settings: Settings) -> tuple[str, str | None]:
@@ -401,12 +464,21 @@ def _upsert_discovered_feed(
 def _apply_discovery_result(
     row: DiscoveredFeed, *, feed_url: str | None, status: str, article_count: int, now: datetime
 ) -> None:
-    """発見結果を既存の `DiscoveredFeed` 行へ反映する（新規作成・更新の両方から使う共通処理）。"""
+    """発見結果を既存の `DiscoveredFeed` 行へ反映する（新規作成・更新の両方から使う共通処理）。
+
+    `status=FOUND` になったときは `consecutive_failures` を 0 へ戻す（Issue #105）。
+    連続失敗で `DISABLED` にした行は `DISCOVERY_RETRY_COOLDOWN_DAYS` 後に再発見の
+    対象へ戻るが、失敗回数を持ち越したままだと復活直後の 1 回の失敗で
+    `MAX_CONSECUTIVE_FEED_FAILURES` に達して即座に無効化されてしまい、
+    「一時的な失敗では無効化しない」という前提が復活後だけ成り立たなくなるため。
+    """
     row.feed_url = feed_url
     row.status = status
     row.article_count = article_count
     row.last_attempted_at = now
     row.enabled = status == DiscoveredFeedStatus.FOUND.value
+    if status == DiscoveredFeedStatus.FOUND.value:
+        row.consecutive_failures = 0
 
 
 def load_enabled_discovered_feeds(session: Session) -> tuple[FeedEntryConfig, ...]:
