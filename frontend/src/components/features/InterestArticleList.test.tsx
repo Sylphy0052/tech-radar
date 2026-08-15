@@ -38,6 +38,7 @@ function listResponse(items: InterestArticleItem[], overrides: Record<string, un
 
 function makeItem(overrides: Partial<InterestArticleItem> & { article_id: string }): InterestArticleItem {
   return {
+    analysis_status: "completed",
     canonical_url: `https://example.com/${overrides.article_id}`,
     original_url: `https://example.com/${overrides.article_id}`,
     category: null,
@@ -49,6 +50,7 @@ function makeItem(overrides: Partial<InterestArticleItem> & { article_id: string
     published_at: "2026-07-28T00:00:00Z",
     registered_at: "2026-08-01T12:00:00Z",
     source_domain: "example.com",
+    technologies: [],
     title: "Title",
     topics: [],
     translated_title: null,
@@ -192,6 +194,100 @@ describe("InterestArticleList", () => {
     expect(screen.getByText("llm")).toBeInTheDocument();
     expect(screen.getByText("blog.example.com")).toBeInTheDocument();
     expect(screen.getByText("研究・論文")).toBeInTheDocument();
+  }, TEST_TIMEOUT_MS);
+
+  // 受入基準（Issue #92）: 技術タグの表示が analysis_status によって状態別に出る。
+  // 「機能は動いているのに画面に出ていない」が Issue の実体で、タグが空のとき
+  // 「未解析だから空」と「解析済みだが実際に0件」を区別できることが目的。
+  it("shows the technology tags when analysis is completed and technologies exist", async () => {
+    // Arrange
+    const item = makeItem({
+      article_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      title: "技術タグあり",
+      analysis_status: "completed",
+      technologies: ["Python", "FastAPI"],
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(listResponse([item]))));
+
+    // Act
+    renderList();
+    await waitFor(() => expect(screen.getByText("技術タグあり")).toBeInTheDocument());
+
+    // Assert
+    expect(screen.getByText("Python")).toBeInTheDocument();
+    expect(screen.getByText("FastAPI")).toBeInTheDocument();
+  }, TEST_TIMEOUT_MS);
+
+  it("shows a pending message when the article has not been analyzed yet", async () => {
+    // Arrange — analysis_status が null（古いデータ）でも pending と同じ扱いにする
+    const item = makeItem({
+      article_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      title: "解析待ちの記事",
+      analysis_status: null,
+      technologies: [],
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(listResponse([item]))));
+
+    // Act
+    renderList();
+    await waitFor(() => expect(screen.getByText("解析待ちの記事")).toBeInTheDocument());
+
+    // Assert
+    expect(screen.getByText("解析待ち")).toBeInTheDocument();
+  }, TEST_TIMEOUT_MS);
+
+  it("shows an analyzing article as pending too", async () => {
+    // Arrange
+    const item = makeItem({
+      article_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      title: "解析中の記事",
+      analysis_status: "analyzing",
+      technologies: [],
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(listResponse([item]))));
+
+    // Act
+    renderList();
+    await waitFor(() => expect(screen.getByText("解析中の記事")).toBeInTheDocument());
+
+    // Assert
+    expect(screen.getByText("解析待ち")).toBeInTheDocument();
+  }, TEST_TIMEOUT_MS);
+
+  it("shows a failure message when analysis failed", async () => {
+    // Arrange
+    const item = makeItem({
+      article_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      title: "解析失敗の記事",
+      analysis_status: "failed",
+      technologies: [],
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(listResponse([item]))));
+
+    // Act
+    renderList();
+    await waitFor(() => expect(screen.getByText("解析失敗の記事")).toBeInTheDocument());
+
+    // Assert
+    expect(screen.getByText("解析に失敗")).toBeInTheDocument();
+  }, TEST_TIMEOUT_MS);
+
+  it("shows a no-tags message when analysis is completed but technologies is empty", async () => {
+    // Arrange — 「未解析だから空」ではなく「解析済みだが実際に0件」と区別できること
+    const item = makeItem({
+      article_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      title: "タグなしの記事",
+      analysis_status: "completed",
+      technologies: [],
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(listResponse([item]))));
+
+    // Act
+    renderList();
+    await waitFor(() => expect(screen.getByText("タグなしの記事")).toBeInTheDocument());
+
+    // Assert
+    expect(screen.getByText("タグなし")).toBeInTheDocument();
   }, TEST_TIMEOUT_MS);
 
   it("removes the article from the list once it is excluded", async () => {

@@ -492,6 +492,16 @@ class InterestArticleItem(BaseModel):
     source_domain: str
     language: str | None
     topics: list[str]
+    # LLM 解析（`analysis/service.py`）が付与する技術タグ。関心プロファイルの
+    # 集計対象には既になっているが、この一覧に出ていなかったため Issue #92 で追加。
+    technologies: list[str]
+    # 解析の進行状態（`db/models.py` の `Article.analysis_status`）。
+    # `technologies` が空のとき「未解析だから空」（pending/analyzing/null）と
+    # 「解析済みだが実際に0件」（completed）を画面側で区別するために返す。
+    # 値は常に pending/analyzing/completed/failed のいずれか（`analysis/service.py`
+    # / `fetcher/service.py` がこの列へ書き込む値。`JobStatus` 自体は
+    # fetching/searching も持つが、この列には現れない）。
+    analysis_status: JobStatus | None
     domain: str | None
     category: str | None
     content_type: str | None
@@ -532,6 +542,10 @@ def _build_interest_article_item(
         source_domain=article.source_domain,
         language=article.language,
         topics=list(article.topics),
+        technologies=list(article.technologies),
+        analysis_status=(
+            JobStatus(article.analysis_status) if article.analysis_status is not None else None
+        ),
         domain=article.domain,
         category=article.category,
         content_type=article.content_type,

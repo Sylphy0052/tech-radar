@@ -95,7 +95,7 @@ export const CHART_ANIMATION_ACTIVE = false;
  */
 export const CHART_PIE_STROKE = "var(--surface)";
 
-/** 円グラフのスライス1件（名称・値・色）。3つの円グラフコンポーネントで共通の形。 */
+/** 円グラフのスライス1件（名称・値・色）。4つの円グラフコンポーネントで共通の形。 */
 export interface ChartPieSlice {
   name: string;
   value: number;
@@ -108,7 +108,7 @@ export interface ChartPieSlice {
  * recharts の `Pie` の `label` prop は `PieLabelRenderProps` を受け取り、
  * `name`/`value` は型上 `undefined` を許容する（実行時には必ず渡ってくるが、
  * `Cell`/`data` の組み方次第では欠落しうるため型は緩めてある）ため、
- * 表示側でも防御的にフォールバックする。3つの円グラフコンポーネントで
+ * 表示側でも防御的にフォールバックする。4つの円グラフコンポーネントで
  * 同じ組み立て方をするため1箇所にまとめる。
  */
 export function renderPieSliceLabel({ name, value }: PieLabelRenderProps): string {

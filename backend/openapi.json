@@ -400,6 +400,16 @@
       "InterestArticleItem": {
         "description": "関心記事一覧（`GET /api/articles`）1 件のレスポンス（`PROJECT_SPEC.md` §6.3）。",
         "properties": {
+          "analysis_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "article_id": {
             "format": "uuid",
             "title": "Article Id",
@@ -485,6 +495,13 @@
             "title": "Source Domain",
             "type": "string"
           },
+          "technologies": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Technologies",
+            "type": "array"
+          },
           "title": {
             "title": "Title",
             "type": "string"
@@ -519,6 +536,8 @@
           "source_domain",
           "language",
           "topics",
+          "technologies",
+          "analysis_status",
           "domain",
           "category",
           "content_type",
@@ -722,6 +741,40 @@
         "title": "InterestGenreItem",
         "type": "object"
       },
+      "InterestOriginCounts": {
+        "description": "関心プロファイル構築対象の記事の origin 別件数（Issue #92）。\n\n`interest/service.py` の `load_weighted_interest_articles`（Discover の\n関心プロファイル）と同じ母集団（`count_interest_articles_by_origin`）を\n使う。このレスポンスの他の項目（`article_feedback JOIN articles`、\n多くは good/save のみに絞る）とは集計元が異なる点に注意（このクラスの\ndocstring と `get_interest_summary` の docstring を参照）。origin は\n5値で固定のため、他の内容分布系（`InterestTechnologyItem` 等）のような\n可変長リストではなく `InterestFeedbackRatio` と同じ固定フィールドの形にする。",
+        "properties": {
+          "clicked_count": {
+            "title": "Clicked Count",
+            "type": "integer"
+          },
+          "good_count": {
+            "title": "Good Count",
+            "type": "integer"
+          },
+          "manual_count": {
+            "title": "Manual Count",
+            "type": "integer"
+          },
+          "read_full_count": {
+            "title": "Read Full Count",
+            "type": "integer"
+          },
+          "saved_count": {
+            "title": "Saved Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "manual_count",
+          "good_count",
+          "saved_count",
+          "read_full_count",
+          "clicked_count"
+        ],
+        "title": "InterestOriginCounts",
+        "type": "object"
+      },
       "InterestPrimarySourceRatio": {
         "description": "一次情報比率（`articles.is_primary_source`）。",
         "properties": {
@@ -768,6 +821,9 @@
             "title": "Genres",
             "type": "array"
           },
+          "origin_counts": {
+            "$ref": "#/components/schemas/InterestOriginCounts"
+          },
           "primary_source_ratio": {
             "$ref": "#/components/schemas/InterestPrimarySourceRatio"
           },
@@ -793,6 +849,7 @@
           "primary_source_ratio",
           "content_types",
           "difficulties",
+          "origin_counts",
           "suppressed_topics"
         ],
         "title": "InterestSummaryResponse",
@@ -1005,6 +1062,19 @@
         ],
         "title": "JobResponse",
         "type": "object"
+      },
+      "JobStatus": {
+        "description": "ジョブおよび記事登録の処理状態（`PROJECT_SPEC.md` §6.2）。",
+        "enum": [
+          "pending",
+          "fetching",
+          "analyzing",
+          "searching",
+          "completed",
+          "failed"
+        ],
+        "title": "JobStatus",
+        "type": "string"
       },
       "RateLimitedResponse": {
         "description": "429 のレスポンスボディ（`HTTPException` の既定形）。",
@@ -2415,7 +2485,7 @@
     },
     "/api/interests/summary": {
       "get": {
-        "description": "関心分析画面向けのサマリーを返す（`PROJECT_SPEC.md` §7, §8, Issue #16）。\n\n集計元は `article_feedback JOIN articles`（`user_articles` は使わない）。\nGood/Bad 比率は action 別の件数をそのまま返すが、内容分布系（技術・一次\n情報比率・content_type・難易度）は `af.action IN ('good', 'save')` に\n絞って集計する（Bad を付けた記事の属性まで「関心」として数えると実態と\nずれるため）。ジャンル別関心度だけは例外で、good/save の positive_count に\n加えて bad の negative_count も返す（`InterestGenreItem` docstring 参照）。\n\n抑制中のトピックは `user_topic_preferences.negative_weight > 0` の行を返す。\n抑制ロジック（`interest/topics.py`）が domain ではなく topic 粒度で動くため、\nここも topic 粒度で返す（`GET /api/interests` と同じ ORM クエリ）。\n\n集計は SQL 側で完結させ、Python へ全件ロードしない（`/timeline` と同じ方針）。\nデータが 1 件も無いときは各リストが空配列、`feedback_ratio` /\n`primary_source_ratio` は全項目 0 になる（GROUP BY 無しの集約クエリは\n行が無くても必ず 1 行返るため、例外にはならない）。",
+        "description": "関心分析画面向けのサマリーを返す（`PROJECT_SPEC.md` §7, §8, Issue #16）。\n\n集計元は `article_feedback JOIN articles`（`user_articles` は使わない）。\nGood/Bad 比率は action 別の件数をそのまま返すが、内容分布系（技術・一次\n情報比率・content_type・難易度）は `af.action IN ('good', 'save')` に\n絞って集計する（Bad を付けた記事の属性まで「関心」として数えると実態と\nずれるため）。ジャンル別関心度だけは例外で、good/save の positive_count に\n加えて bad の negative_count も返す（`InterestGenreItem` docstring 参照）。\n\n抑制中のトピックは `user_topic_preferences.negative_weight > 0` の行を返す。\n抑制ロジック（`interest/topics.py`）が domain ではなく topic 粒度で動くため、\nここも topic 粒度で返す（`GET /api/interests` と同じ ORM クエリ）。\n\n集計は SQL 側で完結させ、Python へ全件ロードしない（`/timeline` と同じ方針）。\nただし `origin_counts` だけは例外で、Python 側で数える（Issue #92）。この項目は\n集計元が他と違い（`article_feedback JOIN articles` ではなく関心プロファイルの\n構築対象）、母集団の決定に `user_articles` と `article_feedback` のマージが要る。\n`load_weighted_interest_articles` と同じ `_load_interest_article_population` を\n通さないと母集団がずれて画面の数字が嘘になるため、SQL 側での再実装は避けている。\nデータが 1 件も無いときは各リストが空配列、`feedback_ratio` /\n`primary_source_ratio` は全項目 0 になる（GROUP BY 無しの集約クエリは\n行が無くても必ず 1 行返るため、例外にはならない）。",
         "operationId": "get_interest_summary_api_interests_summary_get",
         "responses": {
           "200": {

@@ -23,6 +23,7 @@ from techradar.db.models import (
     UserTopicPreference,
 )
 from techradar.interest.service import (
+    count_interest_articles_by_origin,
     load_weighted_interest_articles,
     rebuild_interest_clusters,
     recompute_source_preferences_after_removal,
@@ -501,6 +502,99 @@ class TestLoadWeightedInterestArticlesConfidence:
 
         # Assert — explicit_weight（manual=1.0）× recency_decay（当日=1.0）そのもの
         assert records[0].weight == pytest.approx(config.feedback_weights.manual)
+
+
+class TestCountInterestArticlesByOrigin:
+    """`GET /api/interests/summary` の origin 別内訳（Issue #92）が使う集計関数。
+
+    `load_weighted_interest_articles` と完全に同じ母集団（`user_articles` の
+    5経路 + `article_feedback` の good のみ、user_articles 優先でマージ）を
+    使わないと、画面の内訳が実際のプロファイル寄与と食い違う（母集団のずれは
+    嘘の数字になる）ため、その一致を検証する。
+    """
+
+    def test_counts_each_origin_from_user_articles(self, db_session: Session) -> None:
+        # Arrange
+        user_id = uuid.uuid4()
+        manual_article = make_article(db_session, title="手動登録")
+        add_user_article(db_session, user_id, manual_article, ArticleOrigin.MANUAL)
+        saved_article = make_article(db_session, title="保存")
+        add_user_article(db_session, user_id, saved_article, ArticleOrigin.SAVED)
+        read_full_article = make_article(db_session, title="全文閲覧")
+        add_user_article(db_session, user_id, read_full_article, ArticleOrigin.READ_FULL)
+        clicked_article = make_article(db_session, title="クリック")
+        add_user_article(db_session, user_id, clicked_article, ArticleOrigin.CLICKED)
+
+        # Act
+        counts = count_interest_articles_by_origin(db_session, user_id)
+
+        # Assert
+        assert counts[ArticleOrigin.MANUAL] == 1
+        assert counts[ArticleOrigin.SAVED] == 1
+        assert counts[ArticleOrigin.READ_FULL] == 1
+        assert counts[ArticleOrigin.CLICKED] == 1
+        assert counts[ArticleOrigin.GOOD] == 0
+
+    def test_counts_an_article_feedback_only_good_as_good(self, db_session: Session) -> None:
+        """受入基準: `user_articles` に無く `article_feedback` だけにある good は Good扱い。"""
+        # Arrange — §7.1 手順1の反映前に読んだ場合の取りこぼしを補う経路
+        # （`load_weighted_interest_articles` docstring と同じ想定）
+        user_id = uuid.uuid4()
+        article = make_article(db_session, title="フィードバックのみ")
+        add_feedback(db_session, user_id, article, FeedbackAction.GOOD)
+
+        # Act
+        counts = count_interest_articles_by_origin(db_session, user_id)
+
+        # Assert
+        assert counts[ArticleOrigin.GOOD] == 1
+        assert sum(counts.values()) == 1
+
+    def test_user_articles_origin_takes_precedence_over_article_feedback_good(
+        self, db_session: Session
+    ) -> None:
+        """受入基準: 同じ記事に両方の記録があれば `user_articles` 側の origin を数える。"""
+        # Arrange — 保存した記事に後から Good も付けたケース（§7.1 手順1で
+        # user_articles にも記録されるのが通常だが、ここでは意図的にズラして
+        # user_articles 優先のマージを確かめる）
+        user_id = uuid.uuid4()
+        article = make_article(db_session, title="保存してからGood")
+        add_user_article(db_session, user_id, article, ArticleOrigin.SAVED)
+        add_feedback(db_session, user_id, article, FeedbackAction.GOOD)
+
+        # Act
+        counts = count_interest_articles_by_origin(db_session, user_id)
+
+        # Assert
+        assert counts[ArticleOrigin.SAVED] == 1
+        assert counts[ArticleOrigin.GOOD] == 0
+
+    def test_returns_zero_counts_for_a_user_without_interest_articles(
+        self, db_session: Session
+    ) -> None:
+        # Arrange / Act
+        counts = count_interest_articles_by_origin(db_session, uuid.uuid4())
+
+        # Assert
+        assert sum(counts.values()) == 0
+        assert set(counts) == {
+            ArticleOrigin.MANUAL,
+            ArticleOrigin.GOOD,
+            ArticleOrigin.SAVED,
+            ArticleOrigin.READ_FULL,
+            ArticleOrigin.CLICKED,
+        }
+
+    def test_does_not_mix_in_another_users_articles(self, db_session: Session) -> None:
+        # Arrange
+        other_article = make_article(db_session, title="他人の記事")
+        add_user_article(db_session, uuid.uuid4(), other_article, ArticleOrigin.MANUAL)
+
+        # Act
+        counts = count_interest_articles_by_origin(db_session, uuid.uuid4())
+
+        # Assert
+        assert sum(counts.values()) == 0
 
 
 class TestRebuildInterestClusters:

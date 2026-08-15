@@ -34,6 +34,13 @@ describe("InterestsPage", () => {
           content_types: [],
           difficulties: [],
           suppressed_topics: [],
+          origin_counts: {
+            manual_count: 0,
+            good_count: 0,
+            saved_count: 0,
+            read_full_count: 0,
+            clicked_count: 0,
+          },
         });
       }),
     );

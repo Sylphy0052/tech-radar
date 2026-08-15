@@ -347,6 +347,11 @@ export interface paths {
          *     ここも topic 粒度で返す（`GET /api/interests` と同じ ORM クエリ）。
          *
          *     集計は SQL 側で完結させ、Python へ全件ロードしない（`/timeline` と同じ方針）。
+         *     ただし `origin_counts` だけは例外で、Python 側で数える（Issue #92）。この項目は
+         *     集計元が他と違い（`article_feedback JOIN articles` ではなく関心プロファイルの
+         *     構築対象）、母集団の決定に `user_articles` と `article_feedback` のマージが要る。
+         *     `load_weighted_interest_articles` と同じ `_load_interest_article_population` を
+         *     通さないと母集団がずれて画面の数字が嘘になるため、SQL 側での再実装は避けている。
          *     データが 1 件も無いときは各リストが空配列、`feedback_ratio` /
          *     `primary_source_ratio` は全項目 0 になる（GROUP BY 無しの集約クエリは
          *     行が無くても必ず 1 行返るため、例外にはならない）。
@@ -668,6 +673,7 @@ export interface components {
          * @description 関心記事一覧（`GET /api/articles`）1 件のレスポンス（`PROJECT_SPEC.md` §6.3）。
          */
         InterestArticleItem: {
+            analysis_status: components["schemas"]["JobStatus"] | null;
             /**
              * Article Id
              * Format: uuid
@@ -697,6 +703,8 @@ export interface components {
             registered_at: string;
             /** Source Domain */
             source_domain: string;
+            /** Technologies */
+            technologies: string[];
             /** Title */
             title: string;
             /** Topics */
@@ -801,6 +809,30 @@ export interface components {
             positive_count: number;
         };
         /**
+         * InterestOriginCounts
+         * @description 関心プロファイル構築対象の記事の origin 別件数（Issue #92）。
+         *
+         *     `interest/service.py` の `load_weighted_interest_articles`（Discover の
+         *     関心プロファイル）と同じ母集団（`count_interest_articles_by_origin`）を
+         *     使う。このレスポンスの他の項目（`article_feedback JOIN articles`、
+         *     多くは good/save のみに絞る）とは集計元が異なる点に注意（このクラスの
+         *     docstring と `get_interest_summary` の docstring を参照）。origin は
+         *     5値で固定のため、他の内容分布系（`InterestTechnologyItem` 等）のような
+         *     可変長リストではなく `InterestFeedbackRatio` と同じ固定フィールドの形にする。
+         */
+        InterestOriginCounts: {
+            /** Clicked Count */
+            clicked_count: number;
+            /** Good Count */
+            good_count: number;
+            /** Manual Count */
+            manual_count: number;
+            /** Read Full Count */
+            read_full_count: number;
+            /** Saved Count */
+            saved_count: number;
+        };
+        /**
          * InterestPrimarySourceRatio
          * @description 一次情報比率（`articles.is_primary_source`）。
          */
@@ -822,6 +854,7 @@ export interface components {
             feedback_ratio: components["schemas"]["InterestFeedbackRatio"];
             /** Genres */
             genres: components["schemas"]["InterestGenreItem"][];
+            origin_counts: components["schemas"]["InterestOriginCounts"];
             primary_source_ratio: components["schemas"]["InterestPrimarySourceRatio"];
             /** Suppressed Topics */
             suppressed_topics: components["schemas"]["SuppressedTopicItem"][];
@@ -940,6 +973,12 @@ export interface components {
             /** Type */
             type: string;
         };
+        /**
+         * JobStatus
+         * @description ジョブおよび記事登録の処理状態（`PROJECT_SPEC.md` §6.2）。
+         * @enum {string}
+         */
+        JobStatus: "pending" | "fetching" | "analyzing" | "searching" | "completed" | "failed";
         /**
          * RateLimitedResponse
          * @description 429 のレスポンスボディ（`HTTPException` の既定形）。
