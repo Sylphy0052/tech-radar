@@ -347,6 +347,11 @@ export interface paths {
          *     ここも topic 粒度で返す（`GET /api/interests` と同じ ORM クエリ）。
          *
          *     集計は SQL 側で完結させ、Python へ全件ロードしない（`/timeline` と同じ方針）。
+         *     ただし `origin_counts` だけは例外で、Python 側で数える（Issue #92）。この項目は
+         *     集計元が他と違い（`article_feedback JOIN articles` ではなく関心プロファイルの
+         *     構築対象）、母集団の決定に `user_articles` と `article_feedback` のマージが要る。
+         *     `load_weighted_interest_articles` と同じ `_load_interest_article_population` を
+         *     通さないと母集団がずれて画面の数字が嘘になるため、SQL 側での再実装は避けている。
          *     データが 1 件も無いときは各リストが空配列、`feedback_ratio` /
          *     `primary_source_ratio` は全項目 0 になる（GROUP BY 無しの集約クエリは
          *     行が無くても必ず 1 行返るため、例外にはならない）。
