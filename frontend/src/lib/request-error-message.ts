@@ -27,9 +27,11 @@ const SERVER_ERROR_STATUS_THRESHOLD = 500;
  * `GET /api/feed` と `POST /api/articles/{article_id}/recommendations`
  * （`api/rate_limit.py`）で、前者を呼ぶ `useFeed` はフィルターとページ番号の
  * 変化（＝ユーザーの操作か初回表示）でしか fetch せず、後者は UI から呼んで
- * いない。**この対応関係は仕組みで縛られてはいない。** 自動で再試行する
- * `usePolling` は 429 を他のエラーと区別しないため、レート制限の掛かった
- * エンドポイントをそこへ通すと連打になる（Issue #102）。
+ * いない。自動で再試行する `usePolling` は 429 を区別して `Retry-After` の
+ * 秒数だけ待つようになったため（Issue #102）、レート制限の掛かった
+ * エンドポイントを繋いでも連打にはならない。ただしそのとき画面には
+ * ローディングが出続けるだけで、このメッセージは出ない（`usePolling` は 429 を
+ * エラーとして確定させないため）。
  */
 function getRateLimitMessage(retryAfterSeconds: number | null): string {
   // 0 秒（境界ちょうどで弾かれた場合）は「約0秒後」が不自然なので秒数を出さない。

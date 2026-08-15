@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { isRateLimitError } from "@/lib/api";
+
 /** ポーリング間隔（ミリ秒）。マジックナンバーを避けるため名前付き定数にする。 */
 export const DEFAULT_POLLING_INTERVAL_MS = 2000;
 
@@ -48,6 +50,12 @@ function toError(value: unknown): Error {
  *   再試行し、そこに達した時点でエラーを確定させてポーリングを止める（無限に
  *   エラーを繰り返してバックグラウンドでリクエストを送り続けないため）。
  *   成功が1回でも挟まれば連続回数は 0 に戻る。
+ * - レート制限（HTTP 429）は上記の連続失敗数には数えない。サーバーが
+ *   `Retry-After` で再開時刻を明示しているため、待てば回復するとみなし、
+ *   その秒数（無ければ既定間隔 `intervalMs`）だけ待って再試行し続ける。
+ *   429 には**回数の上限を設けていない**。上限は通信障害向けのもので、
+ *   429 は待てば回復する前提のため意図的に別扱いにしてある。恒久的に
+ *   429 が返り続ける状況（設定ミス等）では、エラーを出さずに待ち続ける。
  * - アンマウント時・`id` 変更時には必ずタイマーを解除し、リークさせない。
  *
  * `fetchFn` / `isTerminal` は毎レンダーで新しい関数参照が渡されてもポーリングが
@@ -105,6 +113,22 @@ export function usePolling<T>(
         })
         .catch((error: unknown) => {
           if (cancelled) {
+            return;
+          }
+          if (isRateLimitError(error)) {
+            // レート制限は通信障害とは性質が違う。サーバーが再開時刻を
+            // 明示しているため、consecutiveErrors は増やさず（＝3回で
+            // 諦める対象に含めず）、Retry-After の秒数だけ待って再試行する。
+            // ヘッダが無い／読めない場合は待ち時間不明のため既定間隔へ倒す。
+            // 0 秒も同じ扱いにする。backend は待機秒数を整数へ切り上げるため
+            // 境界ちょうどで 0 になりうるが、そのまま使うと間を置かずに
+            // 叩き直すことになる。
+            const retryAfterSeconds = error.retryAfterSeconds;
+            const waitMs =
+              retryAfterSeconds !== null && retryAfterSeconds > 0
+                ? retryAfterSeconds * 1000
+                : intervalMs;
+            timeoutId = setTimeout(poll, waitMs);
             return;
           }
           consecutiveErrors += 1;
