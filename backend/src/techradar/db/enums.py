@@ -116,3 +116,5 @@ class DiscoveredFeedStatus(StrEnum):
     NOT_FOUND = "not_found"
     # ドメインのトップページ自体を取得できなかった（ネットワーク・SSRF拒否等）。
     FETCH_FAILED = "fetch_failed"
+    # 巡回が連続で失敗し続けたため無効化した（Issue #105）。
+    DISABLED = "disabled"

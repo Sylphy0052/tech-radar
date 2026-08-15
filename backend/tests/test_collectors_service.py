@@ -633,3 +633,251 @@ class TestFeedDiscoveryIntegration:
         assert result.enqueued_count == 1
         db_session.flush()
         assert len(db_session.scalars(select(Job)).all()) == 1
+
+
+class TestFeedHealthRecording:
+    """`collect_candidates` からの発見済みフィード死活監視反映（Issue #105）を検証する。
+
+    `DiscoveredFeedCollector` は `RssCollector` の `fetch_resource` 呼び出しを
+    そのまま使うため（`DiscoveredFeedCollector` 自体は取得処理を上書きしない）、
+    `techradar.collectors.rss` モジュール内の `fetch_resource` 参照をスタブに
+    差し替えて実 HTTP を出さないようにする（`test_collectors_discovery.py` の
+    `TestDiscoveredFeedCollector` と同じ方針）。
+    """
+
+    def _make_discovered_feed_collector(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        settings: Settings,
+        *,
+        feed_url: str,
+        succeeds: bool,
+    ):  # type: ignore[no-untyped-def]
+        from techradar.collectors import rss as rss_module
+        from techradar.collectors.config import FeedEntryConfig
+        from techradar.collectors.discovery import DiscoveredFeedCollector
+        from techradar.fetcher.errors import FetchError
+        from techradar.fetcher.http import FetchedResource
+
+        fake = _FakeFetchResourceForRss()
+        monkeypatch.setattr(rss_module, "fetch_resource", fake)
+        feed = FeedEntryConfig(name="discovered.example.com", url=feed_url)
+        if succeeds:
+            fake.set_response(
+                feed_url,
+                FetchedResource(
+                    final_url=feed_url,
+                    body=b"<rss><channel></channel></rss>",
+                    text="<rss><channel></channel></rss>",
+                    content_type="application/rss+xml",
+                    status_code=200,
+                ),
+            )
+        else:
+            fake.set_error(feed_url, FetchError("取得に失敗しました"))
+        return DiscoveredFeedCollector([feed], settings)
+
+    def test_records_feed_health_after_collecting(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 巡回後に `DiscoveredFeedCollector` の成否が
+        `discovered_feeds` へ反映される。
+        """
+        # Arrange
+        from techradar.db.enums import DiscoveredFeedStatus
+        from techradar.db.models import DiscoveredFeed
+
+        feed_url = "https://discovered.example.com/feed.xml"
+        row = DiscoveredFeed(
+            domain="discovered.example.com",
+            feed_url=feed_url,
+            status=DiscoveredFeedStatus.FOUND.value,
+            article_count=1,
+            last_attempted_at=NOW,
+            enabled=True,
+        )
+        db_session.add(row)
+        db_session.flush()
+
+        discovered_collector = self._make_discovered_feed_collector(
+            monkeypatch, settings, feed_url=feed_url, succeeds=False
+        )
+        working = _FakeCollector("working", [make_candidate("https://example.com/articles/ok")])
+
+        # Act
+        result = collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[working, discovered_collector],
+        )
+
+        # Assert — 候補の enqueue は成功し、失敗も反映されている
+        assert result.enqueued_count == 1
+        db_session.refresh(row)
+        assert row.consecutive_failures == 1
+
+    def test_frees_a_discovery_slot_within_the_same_collect_run(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 無効化した分の枠は、同じ `collect_candidates` の呼び出し中に空く。
+
+        `collect_candidates` は死活監視の反映を `_collect_all` の直後に置き、新規発見
+        （`_discover_new_feeds_safely`）を末尾に置いている（docstring の処理順序）。
+        反映が末尾より後になると、無効化した枠をその巡回では使えない。両者を個別に
+        検証するだけではこの順序が保証されないため、1 回の呼び出しを通して確かめる。
+        """
+        # Arrange — 次の 1 回の失敗で閾値に達する FOUND 行
+        from techradar.collectors.discovery import (
+            MAX_CONSECUTIVE_FEED_FAILURES,
+            _available_slots,
+        )
+        from techradar.db.enums import DiscoveredFeedStatus
+        from techradar.db.models import DiscoveredFeed
+
+        feed_url = "https://discovered.example.com/feed.xml"
+        db_session.add(
+            DiscoveredFeed(
+                domain="discovered.example.com",
+                feed_url=feed_url,
+                status=DiscoveredFeedStatus.FOUND.value,
+                article_count=1,
+                last_attempted_at=NOW,
+                enabled=True,
+                consecutive_failures=MAX_CONSECUTIVE_FEED_FAILURES - 1,
+            )
+        )
+        db_session.flush()
+        slots_before = _available_slots(db_session)
+
+        discovered_collector = self._make_discovered_feed_collector(
+            monkeypatch, settings, feed_url=feed_url, succeeds=False
+        )
+
+        # 新規発見の中で残り枠を観測し、反映が済んだ後に呼ばれていることを確かめる
+        observed_slots: list[int] = []
+
+        def _spy_discover_feeds(session: Session, **kwargs: object) -> int:
+            observed_slots.append(_available_slots(session))
+            return 0
+
+        monkeypatch.setattr(service, "discover_feeds", _spy_discover_feeds)
+        working = _FakeCollector("working", [make_candidate("https://example.com/articles/ok")])
+
+        # Act
+        collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[working, discovered_collector],
+        )
+
+        # Assert — 新規発見の時点で、無効化した 1 件ぶんの枠が空いている
+        assert observed_slots == [slots_before + 1]
+
+    def test_feed_health_recording_failure_does_not_break_candidate_collection(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 反映処理が想定外の例外を送出しても、巡回自体（候補の enqueue）は成功する
+        （savepoint の効果）。
+        """
+        # Arrange
+        from techradar.db.enums import DiscoveredFeedStatus
+        from techradar.db.models import DiscoveredFeed
+
+        feed_url = "https://discovered.example.com/feed.xml"
+        db_session.add(
+            DiscoveredFeed(
+                domain="discovered.example.com",
+                feed_url=feed_url,
+                status=DiscoveredFeedStatus.FOUND.value,
+                article_count=1,
+                last_attempted_at=NOW,
+                enabled=True,
+            )
+        )
+        db_session.flush()
+
+        discovered_collector = self._make_discovered_feed_collector(
+            monkeypatch, settings, feed_url=feed_url, succeeds=True
+        )
+        monkeypatch.setattr(
+            service,
+            "record_feed_health",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("health boom")),
+        )
+        working = _FakeCollector("working", [make_candidate("https://example.com/articles/ok")])
+
+        # Act
+        result = collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[working, discovered_collector],
+        )
+
+        # Assert
+        assert result.enqueued_count == 1
+        db_session.flush()
+        assert len(db_session.scalars(select(Job)).all()) == 1
+
+    def test_does_not_record_health_for_a_manual_feeds_yaml_collector(
+        self, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: `feeds.yaml` 由来の `RssCollector` は対象外
+        （自動追加の枠を消費せず無効化する動機が無いため）。
+        """
+        # Arrange
+
+        from techradar.collectors.rss import RssCollector
+
+        called: list[object] = []
+        original_record_feed_health = service.record_feed_health
+
+        def spy_record_feed_health(
+            session: Session, feed_results: dict[str, bool], *, now: datetime | None = None
+        ) -> None:
+            called.append(True)
+            original_record_feed_health(session, feed_results, now=now)
+
+        manual_rss = RssCollector([], settings)
+        working = _FakeCollector("working", [make_candidate("https://example.com/articles/ok")])
+
+        # Act
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(service, "record_feed_health", spy_record_feed_health)
+            collect_candidates(
+                db_session,
+                settings=settings,
+                feeds_config=make_feeds_config(),
+                collectors=[working, manual_rss],
+            )
+
+        # Assert — 対象の DiscoveredFeedCollector が無いので反映関数は呼ばれない
+        assert called == []
+
+
+class _FakeFetchResourceForRss:
+    """`techradar.collectors.rss.fetch_resource` を差し替える小さなヘルパー。
+
+    `test_collectors_rss.py` / `test_collectors_discovery.py` の
+    `_FakeFetchResource` と同じ方針だが、循環 import を避けるためこのファイルに
+    独立して定義する。
+    """
+
+    def __init__(self) -> None:
+        self.responses: dict[str, object] = {}
+
+    def set_response(self, url: str, resource: object) -> None:
+        self.responses[url] = resource
+
+    def set_error(self, url: str, error: Exception) -> None:
+        self.responses[url] = error
+
+    def __call__(
+        self, url: str, *, allowed_content_types: tuple[str, ...], settings: Settings | None = None
+    ) -> object:
+        result = self.responses[url]
+        if isinstance(result, Exception):
+            raise result
+        return result

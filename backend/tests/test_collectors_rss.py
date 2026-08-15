@@ -55,6 +55,20 @@ ATOM_FEED = """<?xml version="1.0" encoding="UTF-8"?>
 </feed>
 """
 
+# パースは成功するがエントリが 0 件のフィード（フィードは生きているが記事が無いだけ）。
+EMPTY_RSS2_FEED = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+<title>Empty Feed</title>
+<link>https://example.com/</link>
+<description>desc</description>
+</channel>
+</rss>
+"""
+
+# パース自体が壊れているフィード（bozo かつエントリ 0 件）。
+BROKEN_FEED = "<not-a-feed>"
+
 
 def _feed_entry(
     name: str = "Example Feed", url: str = "https://example.com/feed.xml"
@@ -258,3 +272,87 @@ class TestFetchResourceUsage:
         call = fake_fetch_resource.calls[0]
         assert call["url"] == feed.url
         assert call["allowed_content_types"] == FEED_CONTENT_TYPES
+
+
+class TestFeedResults:
+    """フィード URL ごとの成否記録（Issue #105）。`collect()` の戻り値は変えないまま、
+    別メソッドで取り出せることを検証する。
+    """
+
+    def test_records_success_for_a_feed_that_was_fetched_and_parsed(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        collector.collect()
+
+        # Assert
+        assert collector.feed_results() == {feed.url: True}
+
+    def test_records_failure_when_fetch_raises_a_fetch_error(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_error(feed.url, FetchError("取得に失敗しました"))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        collector.collect()
+
+        # Assert
+        assert collector.feed_results() == {feed.url: False}
+
+    def test_records_failure_when_parsing_is_bozo_with_no_entries(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange — パース自体が壊れていてエントリが 1 件も取れない
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(BROKEN_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        collector.collect()
+
+        # Assert
+        assert collector.feed_results() == {feed.url: False}
+
+    def test_records_success_when_parsed_but_has_zero_entries(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        """受入基準: エントリ 0 件でもパース成功なら失敗にしない
+        （フィードが生きていて記事が無いだけのため）。
+        """
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(EMPTY_RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        collector.collect()
+
+        # Assert
+        assert collector.feed_results() == {feed.url: True}
+
+    def test_resets_results_when_collect_is_called_a_second_time(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        """受入基準: 同じインスタンスを2回呼んでも前回の記録が混ざらない。"""
+        # Arrange — 1回目は失敗、2回目は同じフィードが成功する
+        feed = _feed_entry()
+        fake_fetch_resource.set_error(feed.url, FetchError("1回目は失敗"))
+        collector = RssCollector([feed], settings)
+        collector.collect()
+        assert collector.feed_results() == {feed.url: False}
+
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+
+        # Act
+        collector.collect()
+
+        # Assert — 1回目の失敗記録が残っていない
+        assert collector.feed_results() == {feed.url: True}
