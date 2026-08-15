@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from techradar.openapi_export import build_openapi_schema, main, render_openapi_schema
 
 
@@ -72,67 +74,146 @@ def test_main_defaults_to_the_repository_openapi_json_path(monkeypatch, tmp_path
     assert default_path.exists()
 
 
-def test_main_rejects_option_like_arguments(tmp_path: Path, capsys, monkeypatch):
-    # Arrange — このモジュールにオプションは無い。`--check` のような引数を出力パスとして
-    # 扱うと `backend/--check` のようなファイルが作られ、`git add -A` で commit へ紛れ込む
-    # (Issue #103 で実際に起きた)。既定の出力先も差し替えて、そちらへ書かれないことを見る。
+@pytest.fixture
+def isolated_output(monkeypatch, tmp_path: Path) -> Path:
+    """既定の出力先とカレントディレクトリを `tmp_path` へ閉じ込める。
+
+    引数検証のテストは「どこにもファイルを作らない」ことを見る。既定の出力先を
+    差し替えないとリポジトリ内の `backend/openapi.json` が書き換わり、相対パスを
+    渡すテストではカレントディレクトリにファイルが残る。
+    """
     from techradar import openapi_export as module
 
     monkeypatch.setattr(module, "DEFAULT_OUTPUT_PATH", tmp_path / "openapi.json")
     monkeypatch.chdir(tmp_path)
-
-    # Act
-    exit_code = main(["--check"])
-
-    # Assert — エラー終了し、どこにもファイルを作らない
-    assert exit_code == 2
-    assert list(tmp_path.iterdir()) == []
-    assert "--check" in capsys.readouterr().err
+    return tmp_path
 
 
-def test_main_rejects_extra_arguments(tmp_path: Path, capsys, monkeypatch):
-    # Arrange — 受け付けるのは出力パス1つだけ。2つ目を黙って捨てると、書き出し先が
-    # 呼び出し側の意図とずれたまま気付けない。
-    from techradar import openapi_export as module
+class TestArgumentValidation:
+    """引数の誤りは終了コード 2 で落ち、ファイルを作らない。
 
-    monkeypatch.setattr(module, "DEFAULT_OUTPUT_PATH", tmp_path / "openapi.json")
-    monkeypatch.chdir(tmp_path)
+    判定は `argparse` に任せる（Issue #106）。`argparse` は誤りを見つけると usage を
+    stderr へ出して `SystemExit(2)` を送出するため、`main` からは返らない。
+    """
 
-    # Act
-    exit_code = main([str(tmp_path / "first.json"), str(tmp_path / "second.json")])
+    def test_rejects_option_like_arguments(self, isolated_output: Path, capsys):
+        # Arrange — このモジュールにオプションは無い。`--check` のような引数を出力パスと
+        # して扱うと `backend/--check` のようなファイルが作られ、`git add -A` で commit へ
+        # 紛れ込む (Issue #103 で実際に起きた)。
 
-    # Assert
-    assert exit_code == 2
-    assert list(tmp_path.iterdir()) == []
-    assert "引数が多すぎます" in capsys.readouterr().err
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--check"])
 
+        # Assert
+        assert excinfo.value.code == 2
+        assert list(isolated_output.iterdir()) == []
+        assert "--check" in capsys.readouterr().err
 
-def test_main_reports_the_unknown_option_even_with_extra_arguments(tmp_path: Path, capsys):
-    # Arrange — `--check foo.json` は「オプション風」と「引数が多い」の両方に当たる。
-    # 個数だけを先に見ると「引数が多すぎます」としか出ず、オプションが無いことが伝わらない。
-    # 誤用の実態はオプションの取り違えなので、そちらを優先して報告する。
+    def test_rejects_an_abbreviated_option(self, isolated_output: Path, capsys):
+        # Arrange — argparse は既定 (allow_abbrev=True) で未知のオプションを前方一致で
+        # 既知のものへ解決する。`--che` が `--check`… ではなく `--help` のような既知の
+        # オプションへ化けると、誤入力がエラーではなく別の動作になる。
 
-    # Act
-    exit_code = main(["--check", str(tmp_path / "openapi.json")])
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--che"])
 
-    # Assert
-    assert exit_code == 2
-    assert list(tmp_path.iterdir()) == []
-    assert "不明なオプション" in capsys.readouterr().err
+        # Assert
+        assert excinfo.value.code == 2
+        assert list(isolated_output.iterdir()) == []
+        assert "--che" in capsys.readouterr().err
 
+    def test_rejects_extra_arguments(self, isolated_output: Path, capsys):
+        # Arrange — 受け付けるのは出力パス1つだけ。2つ目を黙って捨てると、書き出し先が
+        # 呼び出し側の意図とずれたまま気付けない。
 
-def test_main_rejects_an_empty_path(tmp_path: Path, capsys, monkeypatch):
-    # Arrange — 空文字列はシェルの展開ミスで渡りうる。`Path("")` はカレントディレクトリを
-    # 指すため、素通りさせると書き出し時に IsADirectoryError の生トレースバックで落ちる。
-    from techradar import openapi_export as module
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            main([str(isolated_output / "first.json"), str(isolated_output / "second.json")])
 
-    monkeypatch.setattr(module, "DEFAULT_OUTPUT_PATH", tmp_path / "openapi.json")
-    monkeypatch.chdir(tmp_path)
+        # Assert — 捨てた引数がエラーの理由として報告される
+        assert excinfo.value.code == 2
+        assert list(isolated_output.iterdir()) == []
+        assert "second.json" in capsys.readouterr().err
 
-    # Act
-    exit_code = main([""])
+    def test_reports_the_unknown_option_even_with_extra_arguments(
+        self, isolated_output: Path, capsys
+    ):
+        # Arrange — `--check foo.json` は「オプション風」と「引数が多い」の両方に当たる。
+        # 誤用の実態はオプションの取り違えなので、そちらが報告されてほしい。
 
-    # Assert
-    assert exit_code == 2
-    assert list(tmp_path.iterdir()) == []
-    assert capsys.readouterr().err != ""
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--check", str(isolated_output / "openapi.json")])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert list(isolated_output.iterdir()) == []
+        assert "--check" in capsys.readouterr().err
+
+    def test_rejects_an_empty_path(self, isolated_output: Path, capsys):
+        # Arrange — 空文字列はシェルの展開ミスで渡りうる。`Path("")` はカレント
+        # ディレクトリを指すため、素通りさせると書き出し時に IsADirectoryError の
+        # 生トレースバックで落ちる。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            main([""])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert list(isolated_output.iterdir()) == []
+        assert "パスが空です" in capsys.readouterr().err
+
+    def test_rejects_a_whitespace_only_path(self, isolated_output: Path, capsys):
+        # Arrange — 空白だけの引数も空文字列と同じ原因 (シェルの展開ミス) で渡りうる。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            main([" "])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert list(isolated_output.iterdir()) == []
+        assert "パスが空です" in capsys.readouterr().err
+
+    def test_rejects_a_single_dash(self, isolated_output: Path, capsys):
+        # Arrange — argparse は `-` 単体を標準出力の慣習としてオプション扱いせず、
+        # 位置引数として受け取る。このモジュールは標準出力へ書き出さないため、
+        # `-` という名前のファイルが作られてしまう。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            main(["-"])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert list(isolated_output.iterdir()) == []
+        assert "-" in capsys.readouterr().err
+
+    def test_rejects_a_negative_number_like_argument(self, isolated_output: Path, capsys):
+        # Arrange — 数値オプションを持たないパーサでは、`-1` のような負数形式も
+        # 位置引数として通ってしまう。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            main(["-1"])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert list(isolated_output.iterdir()) == []
+        assert "-1" in capsys.readouterr().err
+
+    def test_rejects_a_directory_path(self, isolated_output: Path, capsys):
+        # Arrange — `.` のようにディレクトリを指す引数は、現状では未処理の
+        # IsADirectoryError で落ちる (終了コードが 2 に揃わず、生トレースバックが出る)。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            main(["."])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert list(isolated_output.iterdir()) == []
+        assert "ディレクトリ" in capsys.readouterr().err
