@@ -66,6 +66,7 @@ from techradar.db.models import (
     Article,
     ArticleFeedback,
     ArticleRegistration,
+    DiscoveredFeed,
     Job,
     OperationLog,
     Recommendation,
@@ -402,7 +403,13 @@ MODEL_SPECS: tuple[ModelParitySpec, ...] = (
 # API 公開スキーマを一切持たない内部専用モデル。
 # UserSourcePreference は推薦スコアの計算にのみ使い、API では公開しない（Issue #34）。
 # 関心分析画面（Issue #16）へ出すかどうかは後続 Issue で判断する。
-INTERNAL_ONLY_MODELS: tuple[type[DeclarativeBase], ...] = (OperationLog, UserSourcePreference)
+# DiscoveredFeed は自動発見した巡回対象の内部状態で、確認 UI はスコープ外
+# （Issue #93 ヒアリングでの決定）。
+INTERNAL_ONLY_MODELS: tuple[type[DeclarativeBase], ...] = (
+    DiscoveredFeed,
+    OperationLog,
+    UserSourcePreference,
+)
 
 # モデル列由来ではない、スキーマ側の派生フィールド。
 DERIVED_FIELDS: tuple[DerivedField, ...] = (

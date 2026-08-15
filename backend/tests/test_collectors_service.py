@@ -478,6 +478,11 @@ class TestBuildDefaultCollectors:
             service, "ArxivCollector", _stub_collector_factory("arxiv", built_names)
         )
         monkeypatch.setattr(
+            service,
+            "DiscoveredFeedCollector",
+            _stub_collector_factory("discovered_feeds", built_names),
+        )
+        monkeypatch.setattr(
             service, "BraveSearchCollector", _stub_collector_factory("brave_search", built_names)
         )
         disabled_settings = Settings(_env_file=None, brave_search_api_key=None)
@@ -489,7 +494,14 @@ class TestBuildDefaultCollectors:
 
         # Assert
         assert "brave_search" not in built_names
-        assert set(built_names) == {"rss", "jp_media", "hacker_news", "github_releases", "arxiv"}
+        assert set(built_names) == {
+            "rss",
+            "jp_media",
+            "hacker_news",
+            "github_releases",
+            "arxiv",
+            "discovered_feeds",
+        }
         assert result.collected_count == 0
 
     def test_builds_brave_with_queries_from_recent_analyzed_articles_when_enabled(
@@ -526,6 +538,9 @@ class TestBuildDefaultCollectors:
             service, "GitHubReleasesCollector", _stub_collector_factory("github_releases", [])
         )
         monkeypatch.setattr(service, "ArxivCollector", _stub_collector_factory("arxiv", []))
+        monkeypatch.setattr(
+            service, "DiscoveredFeedCollector", _stub_collector_factory("discovered_feeds", [])
+        )
         monkeypatch.setattr(service, "BraveSearchCollector", fake_brave)
         enabled_settings = Settings(_env_file=None, brave_search_api_key="dummy-key")
 
@@ -535,3 +550,86 @@ class TestBuildDefaultCollectors:
         # Assert — 記事の topics/technologies に基づくクエリが生成されている
         assert len(received_queries) == 1
         assert received_queries[0] != ()
+
+
+class TestFeedDiscoveryIntegration:
+    """`collect_candidates` からのフィード自動発見（Issue #93）呼び出しを検証する。"""
+
+    def test_feed_discovery_failure_does_not_break_candidate_collection(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 発見処理が想定外の例外を送出しても、巡回自体（候補の enqueue）は成功する。"""
+        # Arrange
+        monkeypatch.setattr(
+            service,
+            "discover_feeds",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("discovery boom")),
+        )
+        working = _FakeCollector("working", [make_candidate("https://example.com/articles/ok")])
+
+        # Act
+        result = collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[working],
+        )
+
+        # Assert
+        assert result.enqueued_count == 1
+
+    def test_calls_discover_feeds_with_the_default_user_id(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        received: list[dict[str, object]] = []
+
+        def fake_discover_feeds(session: Session, *, user_id: object, settings: Settings) -> int:
+            received.append({"session": session, "user_id": user_id, "settings": settings})
+            return 0
+
+        monkeypatch.setattr(service, "discover_feeds", fake_discover_feeds)
+        working = _FakeCollector("working", [])
+
+        # Act
+        collect_candidates(
+            db_session, settings=settings, feeds_config=make_feeds_config(), collectors=[working]
+        )
+
+        # Assert
+        assert len(received) == 1
+        assert received[0]["user_id"] == settings.default_user_id
+        assert received[0]["session"] is db_session
+
+    def test_a_failed_discovery_query_does_not_poison_the_session(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 発見処理が DB エラーで落ちても、巡回のトランザクションは使える状態で残る。
+
+        PostgreSQL はエラーが起きたトランザクションを中断状態にするため、savepoint で
+        囲っていないと、以降のクエリも呼び出し元の commit もすべて失敗し、enqueue 済みの
+        候補まで巻き添えで消える。ここでは実際に DB 側のエラー（ゼロ除算）を起こし、
+        その後もセッションが使えることを確かめる。
+        """
+        # Arrange
+        from sqlalchemy import text
+
+        def raise_a_database_error(session: Session, **kwargs: object) -> int:
+            session.execute(text("SELECT 1 / 0"))
+            return 0
+
+        monkeypatch.setattr(service, "discover_feeds", raise_a_database_error)
+        working = _FakeCollector("working", [make_candidate("https://example.com/articles/ok")])
+
+        # Act
+        result = collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[working],
+        )
+
+        # Assert — enqueue は残り、セッションは中断状態になっていない
+        assert result.enqueued_count == 1
+        db_session.flush()
+        assert len(db_session.scalars(select(Job)).all()) == 1

@@ -19,6 +19,11 @@ from techradar.collectors.arxiv import ArxivCollector
 from techradar.collectors.base import CandidateArticle, SourceCollector
 from techradar.collectors.brave import BraveSearchCollector
 from techradar.collectors.config import FeedsConfig, get_feeds_config
+from techradar.collectors.discovery import (
+    DiscoveredFeedCollector,
+    discover_feeds,
+    load_enabled_discovered_feeds,
+)
 from techradar.collectors.filters import filter_recent, limit_candidates
 from techradar.collectors.github_releases import GitHubReleasesCollector
 from techradar.collectors.hackernews import HackerNewsCollector
@@ -78,6 +83,8 @@ def collect_candidates(
     6. 既に pending / 実行中の `fetch_article` ジョブがある URL を除外する
     7. `max_candidates_per_run` で上限を適用する
     8. 残った候補を `fetch_article` として enqueue する
+    9. 登録記事のドメインから新規巡回先を自動発見し `discovered_feeds` へ反映する
+       （Issue #93、次回以降の巡回で拾われる。今回の収集結果には使わない）
     """
     resolved_settings = settings or get_settings()
     resolved_feeds_config = feeds_config or get_feeds_config()
@@ -112,19 +119,45 @@ def collect_candidates(
         result.enqueued_count,
         source_domain,
     )
+    _discover_new_feeds_safely(session, settings=resolved_settings)
     return result
+
+
+def _discover_new_feeds_safely(session: Session, *, settings: Settings) -> None:
+    """登録記事のドメインから新規巡回先を発見する（Issue #93）。
+
+    1 ドメインの発見失敗は `discovery.discover_feeds` の内部で吸収されるが、
+    ドメイン集計クエリ自体の失敗など想定外の例外まで含めて、この処理の失敗で
+    巡回結果（既に enqueue 済みの候補）を失わせないよう、ここでも `_collect_all`
+    と同じ「1 箇所の失敗が全体を止めない」方針で広く捕捉する。
+
+    捕捉するだけでは足りないため、発見処理全体を savepoint で囲む。`discover_feeds`
+    は `discovered_feeds` へ書き込むので、その flush が失敗するとセッションが
+    「rollback 待ち」のまま残り、呼び出し元（`jobs.handlers._shared._run_sync`）の
+    `session.commit()` が `PendingRollbackError` で落ちて、enqueue 済みの候補まで
+    巻き添えで消える。savepoint を張っておけば、例外時に発見処理ぶんだけを巻き戻して
+    セッションを使える状態へ戻せる。
+    """
+    try:
+        with session.begin_nested():
+            discover_feeds(session, user_id=settings.default_user_id, settings=settings)
+    except Exception:
+        logger.warning("collectors.service.feed_discovery_failed", exc_info=True)
 
 
 def _build_default_collectors(
     session: Session, settings: Settings, feeds_config: FeedsConfig
 ) -> tuple[SourceCollector, ...]:
-    """既定の巡回対象（RSS / 国内メディア / HN / GitHub Releases / arXiv / Brave）を組み立てる。"""
+    """既定の巡回対象（RSS / 国内メディア / HN / GitHub Releases / arXiv / 発見済み / Brave）
+    を組み立てる。
+    """
     collectors: list[SourceCollector] = [
         RssCollector(feeds_config.rss, settings),
         JpMediaCollector(feeds_config.jp_media, settings),
         HackerNewsCollector(feeds_config=feeds_config, settings=settings),
         GitHubReleasesCollector(feeds_config=feeds_config, settings=settings),
         ArxivCollector(feeds_config.arxiv_categories, settings),
+        DiscoveredFeedCollector(load_enabled_discovered_feeds(session), settings),
     ]
 
     # Brave は API キー未設定時、コレクター自身の `collect()` でも空リストを返す

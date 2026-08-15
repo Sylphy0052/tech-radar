@@ -105,3 +105,14 @@ class RecommendationMode(StrEnum):
 
     ARTICLE_BASED = "article_based"
     DISCOVER = "discover"
+
+
+class DiscoveredFeedStatus(StrEnum):
+    """登録記事のドメインから自動発見したフィードの状態（Issue #93）。"""
+
+    # フィードを発見し、巡回対象として使える状態。
+    FOUND = "found"
+    # ドメインのトップページは取得できたが、フィードを発見できなかった。
+    NOT_FOUND = "not_found"
+    # ドメインのトップページ自体を取得できなかった（ネットワーク・SSRF拒否等）。
+    FETCH_FAILED = "fetch_failed"
