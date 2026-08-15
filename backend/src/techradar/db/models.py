@@ -501,3 +501,49 @@ class OperationLog(Base):
         Index("ix_operation_logs_created_at", "created_at"),
         Index("ix_operation_logs_operation_status", "operation", "status"),
     )
+
+
+class DiscoveredFeed(Base):
+    """登録記事のドメイン集計から自動発見した巡回対象（Issue #93）。
+
+    `source_registry` は情報源の権威スコア判定用の規則であり巡回対象リストでは
+    ないため、ここを流用せず専用テーブルを持つ（Issue #93 ヒアリングでの決定）。
+
+    ドメイン集計は `interest.service._load_interest_article_population` とは
+    共用しない。あちらは関心スコア計算用の母集団（`article_feedback` の
+    action='good' による補完・重み計算を含む）で戻り値の型・責務が異なり、
+    無理に共用するとインターフェースが歪むため、
+    `techradar.collectors.discovery.aggregate_domain_counts` として単純な
+    GROUP BY 集計を別に持つ。
+    """
+
+    __tablename__ = "discovered_feeds"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    domain: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # 発見できた場合のみ値を持つ。`FeedEntryConfig` の制約に合わせ https 限定
+    # （発見処理側で https 以外の候補を採用しない）。
+    feed_url: Mapped[str | None] = mapped_column(Text)
+    # DiscoveredFeedStatus の値。
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    # 発見を試みた時点の、このドメインの登録記事件数（再試行のたびに更新する）。
+    article_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # status=FOUND のときのみ True にする（発見処理側が明示的に立てる。
+    # feed_url が無いのに enabled でも意味が無いため既定は False）。
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.statement_timestamp(),
+    )
+
+    __table_args__ = (
+        # 巡回時に「発見済みで有効なフィードだけ」を抽出するのに使う
+        # （`collectors.discovery.load_enabled_discovered_feeds`）。
+        Index("ix_discovered_feeds_status_enabled", "status", "enabled"),
+    )
