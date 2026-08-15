@@ -168,6 +168,8 @@ class TestArgumentValidation:
 
     def test_rejects_a_whitespace_only_path(self, isolated_output: Path, capsys):
         # Arrange — 空白だけの引数も空文字列と同じ原因 (シェルの展開ミス) で渡りうる。
+        # 素通りさせると、空白 1 文字を名前に持つファイルが黙って作られる
+        # (空文字列と違い IsADirectoryError にはならないため、気付く機会が無い)。
 
         # Act
         with pytest.raises(SystemExit) as excinfo:
@@ -181,7 +183,10 @@ class TestArgumentValidation:
     def test_rejects_a_single_dash(self, isolated_output: Path, capsys):
         # Arrange — argparse は `-` 単体を標準出力の慣習としてオプション扱いせず、
         # 位置引数として受け取る。このモジュールは標準出力へ書き出さないため、
-        # `-` という名前のファイルが作られてしまう。
+        # 素通りさせると `-` という名前のファイルが作られてしまう。
+        #
+        # 理由まで見るのは、usage 行に `[-h]` が含まれており `"-" in err` では
+        # どんな失敗でも通ってしまうため。
 
         # Act
         with pytest.raises(SystemExit) as excinfo:
@@ -190,7 +195,7 @@ class TestArgumentValidation:
         # Assert
         assert excinfo.value.code == 2
         assert list(isolated_output.iterdir()) == []
-        assert "-" in capsys.readouterr().err
+        assert "不明なオプション: -" in capsys.readouterr().err
 
     def test_rejects_a_negative_number_like_argument(self, isolated_output: Path, capsys):
         # Arrange — 数値オプションを持たないパーサでは、`-1` のような負数形式も
@@ -203,11 +208,12 @@ class TestArgumentValidation:
         # Assert
         assert excinfo.value.code == 2
         assert list(isolated_output.iterdir()) == []
-        assert "-1" in capsys.readouterr().err
+        assert "不明なオプション: -1" in capsys.readouterr().err
 
     def test_rejects_a_directory_path(self, isolated_output: Path, capsys):
-        # Arrange — `.` のようにディレクトリを指す引数は、現状では未処理の
-        # IsADirectoryError で落ちる (終了コードが 2 に揃わず、生トレースバックが出る)。
+        # Arrange — `.` のようにディレクトリを指す引数は、素通りさせると書き出し時に
+        # 未処理の IsADirectoryError で落ちる (終了コードが 2 に揃わず、生トレース
+        # バックが出る)。argparse へ寄せる前の実装が実際にそうなっていた。
 
         # Act
         with pytest.raises(SystemExit) as excinfo:
@@ -217,3 +223,16 @@ class TestArgumentValidation:
         assert excinfo.value.code == 2
         assert list(isolated_output.iterdir()) == []
         assert "ディレクトリ" in capsys.readouterr().err
+
+    def test_shows_help_without_writing_a_file(self, isolated_output: Path, capsys):
+        # Arrange — argparse へ寄せたことで `-h` が新たに使えるようになった。
+        # 引数エラーと違って終了コードは 0 だが、ファイルを作らないことは同じ。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            main(["-h"])
+
+        # Assert
+        assert excinfo.value.code == 0
+        assert list(isolated_output.iterdir()) == []
+        assert "usage: python -m techradar.openapi_export" in capsys.readouterr().out
