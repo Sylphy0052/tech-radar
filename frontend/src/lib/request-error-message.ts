@@ -17,9 +17,14 @@ const SERVER_ERROR_STATUS_THRESHOLD = 500;
 /**
  * レート制限（429）は通信障害ではなく意図的な拒否なので、待てば回復すると伝える。
  *
- * 待機中に再提示する呼び出し側（`useFeed`）が残り秒数を計算し直して使うため export する。
+ * 待機中に残り秒数を数え直して再提示する仕組みは無い。表示した秒数はその時点の
+ * 値のまま止まる。以前は `useFeed` が無限スクロール（`IntersectionObserver`）の
+ * 自動再試行を止めるためにカウントダウンを持っており、この関数はそのために
+ * export していたが、番号付きページングへ書き換えたとき（Issue #90）に一緒に
+ * 消えた。ページャはユーザーのクリック起点でしか fetch しないので、自動で
+ * 過剰にリクエストを送る経路そのものが無くなっている（Issue #101）。
  */
-export function getRateLimitMessage(retryAfterSeconds: number | null): string {
+function getRateLimitMessage(retryAfterSeconds: number | null): string {
   // 0 秒（境界ちょうどで弾かれた場合）は「約0秒後」が不自然なので秒数を出さない。
   if (retryAfterSeconds === null || retryAfterSeconds <= 0) {
     return RATE_LIMIT_MESSAGE;
