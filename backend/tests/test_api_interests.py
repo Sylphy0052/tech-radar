@@ -138,12 +138,17 @@ def add_feedback(
 
 
 def add_user_article(
-    session: Session, user_id: uuid.UUID, article: Article, *, created_at: datetime
+    session: Session,
+    user_id: uuid.UUID,
+    article: Article,
+    *,
+    created_at: datetime,
+    origin: str = "good",
 ) -> UserArticle:
     row = UserArticle(
         user_id=user_id,
         article_id=article.id,
-        origin="good",
+        origin=origin,
         interest_weight=0.8,
         created_at=created_at,
     )
@@ -425,6 +430,13 @@ class TestInterestSummary:
         assert body["suppressed_topics"] == []
         assert body["feedback_ratio"] == {"good_count": 0, "bad_count": 0, "save_count": 0}
         assert body["primary_source_ratio"] == {"primary_count": 0, "secondary_count": 0}
+        assert body["origin_counts"] == {
+            "manual_count": 0,
+            "good_count": 0,
+            "saved_count": 0,
+            "read_full_count": 0,
+            "clicked_count": 0,
+        }
 
     def test_counts_feedback_ratio_by_action(
         self, client: TestClient, db_session: Session, settings: Settings
@@ -695,3 +707,70 @@ class TestInterestSummary:
         # Assert
         topics = [item["topic"] for item in response.json()["suppressed_topics"]]
         assert topics == ["beta", "alpha", "zeta"]
+
+
+class TestInterestSummaryOriginCounts:
+    """`origin_counts`（Issue #92）を検証する。
+
+    `interest/service.py` の `load_weighted_interest_articles`（関心プロファイル
+    構築対象）と同じ母集団を数える。集計元がこの画面の他の項目（`article_feedback
+    JOIN articles`、good/save に絞る）とは異なる点に注意（`user_articles` の
+    manual/good/saved/read_full/clicked 5経路 + article_feedback の good のみの
+    取りこぼし補完）。母集団がずれると内訳が実際のプロファイルと食い違うため、
+    ここで一致を確かめる。
+    """
+
+    def test_counts_each_of_the_five_origins_from_user_articles(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        # Arrange
+        user_id = settings.default_user_id
+        for origin in ("manual", "good", "saved", "read_full", "clicked"):
+            article = make_article(db_session)
+            add_user_article(db_session, user_id, article, created_at=NOW, origin=origin)
+
+        # Act
+        response = client.get("/api/interests/summary")
+
+        # Assert
+        assert response.json()["origin_counts"] == {
+            "manual_count": 1,
+            "good_count": 1,
+            "saved_count": 1,
+            "read_full_count": 1,
+            "clicked_count": 1,
+        }
+
+    def test_counts_an_article_feedback_only_good_as_good(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: `user_articles` に無く `article_feedback` の good だけの記事も Good扱い。"""
+        # Arrange
+        user_id = settings.default_user_id
+        article = make_article(db_session)
+        add_feedback(db_session, user_id, article, "good", created_at=NOW)
+
+        # Act
+        response = client.get("/api/interests/summary")
+
+        # Assert
+        assert response.json()["origin_counts"]["good_count"] == 1
+
+    def test_does_not_mix_in_another_users_articles(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange
+        other_article = make_article(db_session)
+        add_user_article(db_session, uuid.uuid4(), other_article, created_at=NOW, origin="manual")
+
+        # Act
+        response = client.get("/api/interests/summary")
+
+        # Assert
+        assert response.json()["origin_counts"] == {
+            "manual_count": 0,
+            "good_count": 0,
+            "saved_count": 0,
+            "read_full_count": 0,
+            "clicked_count": 0,
+        }

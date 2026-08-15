@@ -12,6 +12,8 @@ import {
   CONTENT_TYPE_LABELS,
   originLabel,
   parseArticleFiltersFromSearchParams,
+  TECHNOLOGY_STATUS_LABELS,
+  technologyDisplayStatus,
 } from "@/lib/interest-articles";
 import type { InterestArticleItem } from "@/lib/interest-articles";
 import { FIRST_PAGE, parsePageOrFirst } from "@/lib/pagination";
@@ -32,6 +34,7 @@ interface InterestArticleCardProps {
 /** 記事1件分のカード。関心記事一覧の表示項目（`PROJECT_SPEC.md` §6.3）をまとめる。 */
 function InterestArticleCard({ item, onRemove }: InterestArticleCardProps) {
   const contentType = contentTypeLabel(item.content_type);
+  const technologyStatus = technologyDisplayStatus(item.analysis_status, item.technologies);
 
   return (
     <article className="panel panel-interactive flex flex-col gap-2">
@@ -71,6 +74,24 @@ function InterestArticleCard({ item, onRemove }: InterestArticleCardProps) {
           ))}
         </div>
       )}
+
+      {/* トピックと違い、この行は常に出す（Issue #92）。タグが0件でも
+          「未解析だから空」（pending/analyzing/null）と「解析済みだが実際に
+          0件」（completed）を区別できるようにするため、行ごと消さない。 */}
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="mono-label">技術:</span>
+        {technologyStatus === "tags" ? (
+          item.technologies.map((technology) => (
+            <span key={technology} className="chip">
+              {technology}
+            </span>
+          ))
+        ) : (
+          <span className="text-sm text-ink-subtle">
+            {TECHNOLOGY_STATUS_LABELS[technologyStatus]}
+          </span>
+        )}
+      </div>
 
       <div className="flex flex-wrap items-center gap-2 pt-1">
         <button type="button" onClick={onRemove} className="btn">

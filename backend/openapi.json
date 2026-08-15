@@ -400,6 +400,16 @@
       "InterestArticleItem": {
         "description": "関心記事一覧（`GET /api/articles`）1 件のレスポンス（`PROJECT_SPEC.md` §6.3）。",
         "properties": {
+          "analysis_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "article_id": {
             "format": "uuid",
             "title": "Article Id",
@@ -485,6 +495,13 @@
             "title": "Source Domain",
             "type": "string"
           },
+          "technologies": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Technologies",
+            "type": "array"
+          },
           "title": {
             "title": "Title",
             "type": "string"
@@ -519,6 +536,8 @@
           "source_domain",
           "language",
           "topics",
+          "technologies",
+          "analysis_status",
           "domain",
           "category",
           "content_type",
@@ -722,6 +741,40 @@
         "title": "InterestGenreItem",
         "type": "object"
       },
+      "InterestOriginCounts": {
+        "description": "関心プロファイル構築対象の記事の origin 別件数（Issue #92）。\n\n`interest/service.py` の `load_weighted_interest_articles`（Discover の\n関心プロファイル）と同じ母集団（`count_interest_articles_by_origin`）を\n使う。このレスポンスの他の項目（`article_feedback JOIN articles`、\n多くは good/save のみに絞る）とは集計元が異なる点に注意（このクラスの\ndocstring と `get_interest_summary` の docstring を参照）。origin は\n5値で固定のため、他の内容分布系（`InterestTechnologyItem` 等）のような\n可変長リストではなく `InterestFeedbackRatio` と同じ固定フィールドの形にする。",
+        "properties": {
+          "clicked_count": {
+            "title": "Clicked Count",
+            "type": "integer"
+          },
+          "good_count": {
+            "title": "Good Count",
+            "type": "integer"
+          },
+          "manual_count": {
+            "title": "Manual Count",
+            "type": "integer"
+          },
+          "read_full_count": {
+            "title": "Read Full Count",
+            "type": "integer"
+          },
+          "saved_count": {
+            "title": "Saved Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "manual_count",
+          "good_count",
+          "saved_count",
+          "read_full_count",
+          "clicked_count"
+        ],
+        "title": "InterestOriginCounts",
+        "type": "object"
+      },
       "InterestPrimarySourceRatio": {
         "description": "一次情報比率（`articles.is_primary_source`）。",
         "properties": {
@@ -768,6 +821,9 @@
             "title": "Genres",
             "type": "array"
           },
+          "origin_counts": {
+            "$ref": "#/components/schemas/InterestOriginCounts"
+          },
           "primary_source_ratio": {
             "$ref": "#/components/schemas/InterestPrimarySourceRatio"
           },
@@ -793,6 +849,7 @@
           "primary_source_ratio",
           "content_types",
           "difficulties",
+          "origin_counts",
           "suppressed_topics"
         ],
         "title": "InterestSummaryResponse",
@@ -1005,6 +1062,19 @@
         ],
         "title": "JobResponse",
         "type": "object"
+      },
+      "JobStatus": {
+        "description": "ジョブおよび記事登録の処理状態（`PROJECT_SPEC.md` §6.2）。",
+        "enum": [
+          "pending",
+          "fetching",
+          "analyzing",
+          "searching",
+          "completed",
+          "failed"
+        ],
+        "title": "JobStatus",
+        "type": "string"
       },
       "RateLimitedResponse": {
         "description": "429 のレスポンスボディ（`HTTPException` の既定形）。",

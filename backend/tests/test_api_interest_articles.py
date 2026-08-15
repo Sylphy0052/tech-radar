@@ -19,7 +19,7 @@ from techradar.api.deps import get_session
 from techradar.api.query_filters import MAX_PAGE_NUMBER
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, UserArticle
-from techradar.db.enums import ArticleOrigin, FeedbackAction
+from techradar.db.enums import ArticleOrigin, FeedbackAction, JobStatus
 from techradar.main import create_app
 
 NOW = datetime(2026, 8, 1, tzinfo=UTC)
@@ -40,6 +40,7 @@ def make_article(
     content_type: str | None = "implementation",
     is_primary_source: bool = False,
     published_at: datetime | None = NOW,
+    analysis_status: str | None = JobStatus.COMPLETED.value,
 ) -> Article:
     """関心記事一覧の対象として使う記事を DB へ保存する。"""
     canonical_url = f"https://example.com/{uuid.uuid4().hex[:10]}"
@@ -58,6 +59,7 @@ def make_article(
         content_type=content_type,
         is_primary_source=is_primary_source,
         published_at=published_at,
+        analysis_status=analysis_status,
         fetched_at=NOW,
     )
     session.add(article)
@@ -205,6 +207,7 @@ class TestListInterestArticles:
             category="llm",
             content_type="research",
             is_primary_source=True,
+            technologies=["Python", "FastAPI"],
         )
         add_user_article(
             db_session, settings.default_user_id, article, ArticleOrigin.MANUAL, created_at=NOW
@@ -225,6 +228,8 @@ class TestListInterestArticles:
         assert item["source_domain"] == "blog.example.com"
         assert item["language"] == "en"
         assert item["topics"] == []
+        assert item["technologies"] == ["Python", "FastAPI"]
+        assert item["analysis_status"] == "completed"
         assert item["domain"] == "ai"
         assert item["category"] == "llm"
         assert item["content_type"] == "research"
@@ -244,6 +249,83 @@ class TestListInterestArticles:
 
         # Assert
         assert response.json()["items"] == []
+
+
+class TestListInterestArticlesTechnologiesAndAnalysisStatus:
+    """受入基準: 技術タグの表示に使う `analysis_status` が状態別に読める（Issue #92）。
+
+    関心プロファイルは既に登録記事を集計対象にしており、技術タグも LLM 解析が
+    付与しているが、`InterestArticleItem` に `technologies` が無いために画面へ
+    出せていなかった（機能は動いているのに見えない状態）。タグが空のとき
+    「未解析だから空」と「解析済みだが実際に0件」を区別できるよう、
+    `analysis_status` も一緒に返す。
+    """
+
+    def test_returns_a_null_analysis_status_for_an_article_analyzed_before_the_column_existed(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: `analysis_status` が未設定（古いデータ）の記事は null で返る。"""
+        # Arrange
+        article = make_article(db_session, analysis_status=None, technologies=[])
+        add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles")
+
+        # Assert
+        item = response.json()["items"][0]
+        assert item["analysis_status"] is None
+        assert item["technologies"] == []
+
+    def test_returns_a_pending_analysis_status(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: 解析待ちの記事は `pending` のまま返る（タグはまだ無い）。"""
+        # Arrange
+        article = make_article(db_session, analysis_status=JobStatus.PENDING.value, technologies=[])
+        add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles")
+
+        # Assert
+        item = response.json()["items"][0]
+        assert item["analysis_status"] == "pending"
+        assert item["technologies"] == []
+
+    def test_returns_a_failed_analysis_status(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: 解析に失敗した記事は `failed` のまま返る。"""
+        # Arrange
+        article = make_article(db_session, analysis_status=JobStatus.FAILED.value, technologies=[])
+        add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles")
+
+        # Assert
+        item = response.json()["items"][0]
+        assert item["analysis_status"] == "failed"
+        assert item["technologies"] == []
+
+    def test_returns_completed_with_zero_technologies(
+        self, client: TestClient, db_session: Session, settings: Settings
+    ) -> None:
+        """受入基準: 解析済みでもタグ0件の記事は空配列で返る（未解析と区別できる）。"""
+        # Arrange
+        article = make_article(
+            db_session, analysis_status=JobStatus.COMPLETED.value, technologies=[]
+        )
+        add_user_article(db_session, settings.default_user_id, article, ArticleOrigin.MANUAL)
+
+        # Act
+        response = client.get("/api/articles")
+
+        # Assert
+        item = response.json()["items"][0]
+        assert item["analysis_status"] == "completed"
+        assert item["technologies"] == []
 
 
 class TestListInterestArticlesFilters:

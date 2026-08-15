@@ -20,6 +20,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function makeItem(overrides: Partial<InterestArticleItem> & { article_id: string }): InterestArticleItem {
   return {
+    analysis_status: "completed",
     canonical_url: `https://example.com/${overrides.article_id}`,
     original_url: `https://example.com/${overrides.article_id}`,
     category: null,
@@ -31,6 +32,7 @@ function makeItem(overrides: Partial<InterestArticleItem> & { article_id: string
     published_at: "2026-07-28T00:00:00Z",
     registered_at: "2026-08-01T12:00:00Z",
     source_domain: "example.com",
+    technologies: [],
     title: "Title",
     topics: [],
     translated_title: null,

@@ -8,7 +8,9 @@ import {
   jstDateToRegisteredFromIso,
   jstDateToRegisteredToIso,
   listInterestArticles,
+  originLabel,
   parseArticleFiltersFromSearchParams,
+  technologyDisplayStatus,
 } from "@/lib/interest-articles";
 import type { ArticleFilters } from "@/lib/interest-articles";
 import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
@@ -319,5 +321,45 @@ describe("deleteInterestArticle", () => {
       expect.stringContaining("/api/articles/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/interest"),
       expect.objectContaining({ method: "DELETE" }),
     );
+  }, TEST_TIMEOUT_MS);
+});
+
+describe("originLabel", () => {
+  it("returns the Japanese label for each of the five origins", () => {
+    // Arrange / Act / Assert
+    expect(originLabel("manual")).toBe("手動登録");
+    expect(originLabel("good")).toBe("Good");
+    expect(originLabel("saved")).toBe("保存");
+    expect(originLabel("read_full")).toBe("全文閲覧");
+    expect(originLabel("clicked")).toBe("クリック");
+  }, TEST_TIMEOUT_MS);
+});
+
+describe("technologyDisplayStatus", () => {
+  // 受入基準（Issue #92）: analysis_status と technologies から、技術タグ欄に
+  // 何を出すかが状態別に決まる。「未解析だから空」と「解析済みだが実際に0件」を
+  // 区別できることが目的のため、pending/analyzing/null は同じ扱いにまとめる。
+  it("returns pending when analysis_status is null", () => {
+    expect(technologyDisplayStatus(null, [])).toBe("pending");
+  }, TEST_TIMEOUT_MS);
+
+  it("returns pending when analysis_status is pending", () => {
+    expect(technologyDisplayStatus("pending", [])).toBe("pending");
+  }, TEST_TIMEOUT_MS);
+
+  it("returns pending when analysis_status is analyzing", () => {
+    expect(technologyDisplayStatus("analyzing", [])).toBe("pending");
+  }, TEST_TIMEOUT_MS);
+
+  it("returns failed when analysis_status is failed", () => {
+    expect(technologyDisplayStatus("failed", [])).toBe("failed");
+  }, TEST_TIMEOUT_MS);
+
+  it("returns empty when completed but technologies is empty", () => {
+    expect(technologyDisplayStatus("completed", [])).toBe("empty");
+  }, TEST_TIMEOUT_MS);
+
+  it("returns tags when completed and technologies has entries", () => {
+    expect(technologyDisplayStatus("completed", ["Python"])).toBe("tags");
   }, TEST_TIMEOUT_MS);
 });

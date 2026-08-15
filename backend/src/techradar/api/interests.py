@@ -18,7 +18,9 @@ from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_current_user_id, get_now, get_session
 from techradar.api.query_filters import MAX_OFFSET
+from techradar.db.enums import ArticleOrigin
 from techradar.db.models import UserInterestCluster, UserTopicPreference
+from techradar.interest.service import count_interest_articles_by_origin
 from techradar.recommendation.config import get_scoring_config
 
 router = APIRouter(prefix="/api/interests", tags=["interests"])
@@ -334,6 +336,25 @@ class SuppressedTopicItem(BaseModel):
     effective_weight: float
 
 
+class InterestOriginCounts(BaseModel):
+    """関心プロファイル構築対象の記事の origin 別件数（Issue #92）。
+
+    `interest/service.py` の `load_weighted_interest_articles`（Discover の
+    関心プロファイル）と同じ母集団（`count_interest_articles_by_origin`）を
+    使う。このレスポンスの他の項目（`article_feedback JOIN articles`、
+    多くは good/save のみに絞る）とは集計元が異なる点に注意（このクラスの
+    docstring と `get_interest_summary` の docstring を参照）。origin は
+    5値で固定のため、他の内容分布系（`InterestTechnologyItem` 等）のような
+    可変長リストではなく `InterestFeedbackRatio` と同じ固定フィールドの形にする。
+    """
+
+    manual_count: int
+    good_count: int
+    saved_count: int
+    read_full_count: int
+    clicked_count: int
+
+
 class InterestSummaryResponse(BaseModel):
     """`GET /api/interests/summary` のレスポンス（関心分析画面向け、Issue #16）。"""
 
@@ -343,6 +364,7 @@ class InterestSummaryResponse(BaseModel):
     primary_source_ratio: InterestPrimarySourceRatio
     content_types: list[InterestContentTypeItem]
     difficulties: list[InterestDifficultyItem]
+    origin_counts: InterestOriginCounts
     suppressed_topics: list[SuppressedTopicItem]
 
 
@@ -498,6 +520,9 @@ def get_interest_summary(
         .order_by(UserTopicPreference.negative_weight.desc(), UserTopicPreference.topic.asc())
         .limit(MAX_SUMMARY_SUPPRESSED_TOPICS)
     ).all()
+    # 集計元が他の項目と異なる（`article_feedback JOIN articles` ではなく
+    # `interest/service.py` の関心プロファイル構築対象、Issue #92）。
+    origin_counts = count_interest_articles_by_origin(session, user_id)
 
     return InterestSummaryResponse(
         genres=[
@@ -535,4 +560,11 @@ def get_interest_summary(
             )
             for row in suppressed_rows
         ],
+        origin_counts=InterestOriginCounts(
+            manual_count=origin_counts[ArticleOrigin.MANUAL],
+            good_count=origin_counts[ArticleOrigin.GOOD],
+            saved_count=origin_counts[ArticleOrigin.SAVED],
+            read_full_count=origin_counts[ArticleOrigin.READ_FULL],
+            clicked_count=origin_counts[ArticleOrigin.CLICKED],
+        ),
     )
