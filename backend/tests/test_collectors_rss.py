@@ -8,7 +8,7 @@ import pytest
 
 from techradar.collectors import rss as rss_module
 from techradar.collectors.config import FeedEntryConfig
-from techradar.collectors.rss import RssCollector
+from techradar.collectors.rss import FeedFetchResult, RssCollector
 from techradar.config import Settings
 from techradar.fetcher.errors import FetchError
 from techradar.fetcher.http import FEED_CONTENT_TYPES, FetchedResource
@@ -275,14 +275,15 @@ class TestFetchResourceUsage:
 
 
 class TestFeedResults:
-    """フィード URL ごとの成否記録（Issue #105）。`collect()` の戻り値は変えないまま、
-    別メソッドで取り出せることを検証する。
+    """フィード URL ごとの結果記録（Issue #105, #108）。`collect()` の戻り値は
+    変えないまま、別メソッドで `FeedFetchResult`（成否とエントリ件数）を
+    取り出せることを検証する。
     """
 
     def test_records_success_for_a_feed_that_was_fetched_and_parsed(
         self, settings: Settings, fake_fetch_resource: _FakeFetchResource
     ):
-        # Arrange
+        # Arrange — RSS2_FEED の 4 item のうち link/title が揃っているのは 2 件
         feed = _feed_entry()
         fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
         collector = RssCollector([feed], settings)
@@ -291,7 +292,9 @@ class TestFeedResults:
         collector.collect()
 
         # Assert
-        assert collector.feed_results() == {feed.url: True}
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=True, entry_count=2)
+        }
 
     def test_records_failure_when_fetch_raises_a_fetch_error(
         self, settings: Settings, fake_fetch_resource: _FakeFetchResource
@@ -305,7 +308,9 @@ class TestFeedResults:
         collector.collect()
 
         # Assert
-        assert collector.feed_results() == {feed.url: False}
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=False, entry_count=0)
+        }
 
     def test_records_failure_when_parsing_is_bozo_with_no_entries(
         self, settings: Settings, fake_fetch_resource: _FakeFetchResource
@@ -319,13 +324,16 @@ class TestFeedResults:
         collector.collect()
 
         # Assert
-        assert collector.feed_results() == {feed.url: False}
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=False, entry_count=0)
+        }
 
     def test_records_success_when_parsed_but_has_zero_entries(
         self, settings: Settings, fake_fetch_resource: _FakeFetchResource
     ):
         """受入基準: エントリ 0 件でもパース成功なら失敗にしない
-        （フィードが生きていて記事が無いだけのため）。
+        （フィードが生きていて記事が無いだけのため）。`entry_count` も 0 になる
+        （Issue #108 の連続空配信判定はこの値を見る）。
         """
         # Arrange
         feed = _feed_entry()
@@ -336,7 +344,28 @@ class TestFeedResults:
         collector.collect()
 
         # Assert
-        assert collector.feed_results() == {feed.url: True}
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=True, entry_count=0)
+        }
+
+    def test_entry_count_reflects_deliverable_candidates_not_raw_entries(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        """受入基準: `entry_count` は link/title を欠いて配信できなかった item を
+        含まない。パース上の生エントリ数（4）ではなく配信できた候補数（2）を返す
+        （Issue #108、`RssCollector._to_candidate` が弾く分は「配信していない」ため）。
+        """
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert
+        assert len(candidates) == 2
+        assert collector.feed_results()[feed.url].entry_count == len(candidates)
 
     def test_resets_results_when_collect_is_called_a_second_time(
         self, settings: Settings, fake_fetch_resource: _FakeFetchResource
@@ -347,7 +376,9 @@ class TestFeedResults:
         fake_fetch_resource.set_error(feed.url, FetchError("1回目は失敗"))
         collector = RssCollector([feed], settings)
         collector.collect()
-        assert collector.feed_results() == {feed.url: False}
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=False, entry_count=0)
+        }
 
         fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
 
@@ -355,4 +386,6 @@ class TestFeedResults:
         collector.collect()
 
         # Assert — 1回目の失敗記録が残っていない
-        assert collector.feed_results() == {feed.url: True}
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=True, entry_count=2)
+        }

@@ -13,6 +13,7 @@ import calendar
 import logging
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -40,10 +41,28 @@ def _to_utc_datetime(value: time.struct_time | None) -> datetime | None:
     return datetime.fromtimestamp(calendar.timegm(value), tz=UTC)
 
 
+@dataclass(frozen=True)
+class FeedFetchResult:
+    """1 フィードぶんの巡回結果（Issue #105, #108）。
+
+    `succeeded` は「取得でき、かつパースが破綻していない」こと（`RssCollector`
+    docstring 参照）。`entry_count` は取得できた候補記事の件数（`_to_candidate`
+    で link/title 欠落として弾かれた分は含まない。「記事を配信できたか」を見る
+    Issue #108 の用途では、パース上のエントリ数より配信できた件数のほうが
+    意味を持つため）。取得・パースに失敗した場合は `entry_count=0` になるが、
+    「記事が無かった」わけではなく「件数が分からない」ことを表す。呼び出し側
+    （`discovery.record_feed_health`）は `succeeded=False` の行を「エントリ 0 件
+    だった」とは数えない。
+    """
+
+    succeeded: bool
+    entry_count: int
+
+
 class RssCollector:
     """公式 RSS/Atom フィードを巡回するコレクター。
 
-    フィード URL ごとの成否を `_feed_results` へ記録する（Issue #105）。
+    フィード URL ごとの結果を `_feed_results` へ記録する（Issue #105, #108）。
     「成功」は「取得でき、かつパースが破綻していない（`bozo` かつエントリ 0 件、
     ではない）」こと。エントリが 0 件でもパースに成功していれば成功として扱う
     （フィードが生きていて記事が無いだけであり、フィード自体の不調ではないため）。
@@ -58,7 +77,7 @@ class RssCollector:
     def __init__(self, feeds: Sequence[FeedEntryConfig], settings: Settings) -> None:
         self._feeds = tuple(feeds)
         self._settings = settings
-        self._feed_results: dict[str, bool] = {}
+        self._feed_results: dict[str, FeedFetchResult] = {}
 
     def collect(self) -> Sequence[CandidateArticle]:
         """設定された全フィードを巡回し、候補記事をまとめて返す。
@@ -78,10 +97,10 @@ class RssCollector:
             candidates.extend(self._collect_feed(feed))
         return tuple(candidates)
 
-    def feed_results(self) -> dict[str, bool]:
-        """直近の `collect()` におけるフィード URL ごとの成否を返す。
+    def feed_results(self) -> dict[str, FeedFetchResult]:
+        """直近の `collect()` におけるフィード URL ごとの結果を返す。
 
-        キーはフィード URL、値は成功なら True。`collect()` を呼ぶ前は空。
+        キーはフィード URL、値は `FeedFetchResult`。`collect()` を呼ぶ前は空。
         """
         return dict(self._feed_results)
 
@@ -100,7 +119,7 @@ class RssCollector:
             )
         except FetchError as exc:
             logger.warning("フィードの取得に失敗しました: %s (%s)", feed.name, exc)
-            self._feed_results[feed.url] = False
+            self._feed_results[feed.url] = FeedFetchResult(succeeded=False, entry_count=0)
             return []
 
         parsed = feedparser.parse(resource.text)
@@ -114,7 +133,7 @@ class RssCollector:
                 feed.name,
                 parsed.get("bozo_exception"),
             )
-            self._feed_results[feed.url] = False
+            self._feed_results[feed.url] = FeedFetchResult(succeeded=False, entry_count=0)
             return []
         if parsed.bozo:
             logger.warning(
@@ -123,12 +142,13 @@ class RssCollector:
                 parsed.get("bozo_exception"),
             )
 
-        self._feed_results[feed.url] = True
-        return [
+        candidates = [
             candidate
             for entry in entries
             if (candidate := self._to_candidate(entry, feed)) is not None
         ]
+        self._feed_results[feed.url] = FeedFetchResult(succeeded=True, entry_count=len(candidates))
+        return candidates
 
     def _to_candidate(self, entry: Any, feed: FeedEntryConfig) -> CandidateArticle | None:
         """1 エントリを `CandidateArticle` へ変換する。作れない場合は None。"""
