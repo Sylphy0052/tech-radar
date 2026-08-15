@@ -6,6 +6,7 @@ import {
   DEFAULT_POLLING_INTERVAL_MS,
   usePolling,
 } from "@/hooks/usePolling";
+import { ApiError } from "@/lib/api";
 import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
 
 interface Item {
@@ -189,5 +190,70 @@ describe("usePolling", () => {
     // Assert
     expect(fetchFn).toHaveBeenNthCalledWith(1, "abc");
     expect(fetchFn).toHaveBeenNthCalledWith(2, "def");
+  }, TEST_TIMEOUT_MS);
+});
+
+// Issue #102: 429（レート制限）は他のエラーと区別し、Retry-After の秒数だけ待って
+// 再試行する。通信障害と違って「待てば回復する」とサーバー側が明示している状況の
+// ため、consecutiveErrors も増やさない（3回で諦める挙動は通信障害向けのもの）。
+describe("usePolling — 429 のレート制限応答", () => {
+  it("waits for the Retry-After duration before retrying, instead of the default interval", async () => {
+    // Arrange — Retry-After: 5秒 のレート制限を1回返してから成功する
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError(429, "rate limited", 5))
+      .mockResolvedValueOnce({ status: "pending" } satisfies Item);
+
+    // Act
+    const { result } = renderHook(() => usePolling<Item>("abc", fetchFn, { isTerminal }));
+    await advanceTimersAndFlush(0);
+    // 既定間隔（2秒）が経過しても Retry-After（5秒）にはまだ届いていない
+    await advanceTimersAndFlush(DEFAULT_POLLING_INTERVAL_MS);
+
+    // Assert — 既定間隔では再試行しない
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toBeNull();
+
+    // Act — Retry-After の残り秒数まで進める
+    await advanceTimersAndFlush(5000 - DEFAULT_POLLING_INTERVAL_MS);
+
+    // Assert — Retry-After の秒数が経過したところで再試行し、成功する
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(result.current.data).toEqual({ status: "pending" });
+    expect(result.current.error).toBeNull();
+  }, TEST_TIMEOUT_MS);
+
+  it("falls back to the default interval when the 429 has no Retry-After", async () => {
+    // Arrange — Retry-After ヘッダが無い（parseRetryAfterSeconds が null を返す）429
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError(429, "rate limited", null))
+      .mockResolvedValueOnce({ status: "pending" } satisfies Item);
+
+    // Act
+    renderHook(() => usePolling<Item>("abc", fetchFn, { isTerminal }));
+    await advanceTimersAndFlush(0);
+    await advanceTimersAndFlush(DEFAULT_POLLING_INTERVAL_MS);
+
+    // Assert — 待ち時間不明のため既定間隔で再試行する
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  }, TEST_TIMEOUT_MS);
+
+  it("keeps retrying through repeated 429s without ever surfacing an error", async () => {
+    // Arrange — DEFAULT_MAX_CONSECUTIVE_ERRORS を超える回数、429 を返し続ける。
+    // 通信障害なら3回連続でエラー確定するが、429 はサーバーが再開時刻を
+    // 明示しているため、待てば回復するとみなして諦めない。
+    const fetchFn = vi.fn().mockRejectedValue(new ApiError(429, "rate limited", 1));
+
+    // Act
+    const { result } = renderHook(() => usePolling<Item>("abc", fetchFn, { isTerminal }));
+    await advanceTimersAndFlush(0);
+    for (let i = 0; i < DEFAULT_MAX_CONSECUTIVE_ERRORS + 5; i += 1) {
+      await advanceTimersAndFlush(1000);
+    }
+
+    // Assert — consecutiveErrors の上限を超えて呼ばれ続けても、エラーは確定しない
+    expect(fetchFn.mock.calls.length).toBeGreaterThan(DEFAULT_MAX_CONSECUTIVE_ERRORS);
+    expect(result.current.error).toBeNull();
   }, TEST_TIMEOUT_MS);
 });
