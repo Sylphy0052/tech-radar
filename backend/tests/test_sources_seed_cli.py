@@ -83,6 +83,20 @@ class TestSeedCli:
         assert "--force" in capsys.readouterr().err
         assert cli_session.scalars(select(SourceRegistry)).all() == []
 
+    def test_rejects_an_abbreviated_option(self, cli_session: Session, capsys):
+        # Arrange — argparse は既定 (allow_abbrev=True) で未知のオプションを前方一致で
+        # 既知のものへ解決する。`--he` が `--help` として通ると、誤入力がエラーではなく
+        # 別の動作になる。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            seed_module.main(["--he"])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert "--he" in capsys.readouterr().err
+        assert cli_session.scalars(select(SourceRegistry)).all() == []
+
     def test_rejects_extra_arguments(self, cli_session: Session, tmp_path: Path, capsys):
         # Arrange — 受け付けるのは設定ファイルのパス1つだけ。2つ目を黙って捨てると、
         # 読み込んだ設定が呼び出し側の意図とずれたまま気付けない。
@@ -100,8 +114,9 @@ class TestSeedCli:
         with pytest.raises(SystemExit) as excinfo:
             seed_module.main([str(first), str(tmp_path / "second.yaml")])
 
-        # Assert
+        # Assert — 捨てた引数がエラーの理由として報告される
         assert excinfo.value.code == 2
+        assert "second.yaml" in capsys.readouterr().err
         assert cli_session.scalars(select(SourceRegistry)).all() == []
 
     def test_rejects_an_empty_path(self, cli_session: Session, capsys):
@@ -115,5 +130,59 @@ class TestSeedCli:
 
         # Assert
         assert excinfo.value.code == 2
-        assert capsys.readouterr().err != ""
+        assert "パスが空です" in capsys.readouterr().err
+        assert cli_session.scalars(select(SourceRegistry)).all() == []
+
+    def test_rejects_a_whitespace_only_path(self, cli_session: Session, capsys):
+        # Arrange — 空白だけの引数も空文字列と同じくカレントディレクトリ相当へ落ちる。
+        # 空文字列だけを弾いても、シェルの展開ミスという同じ原因を拾いきれない。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            seed_module.main([" "])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert "パスが空です" in capsys.readouterr().err
+        assert cli_session.scalars(select(SourceRegistry)).all() == []
+
+    def test_rejects_a_single_dash(self, cli_session: Session, capsys):
+        # Arrange — argparse は `-` 単体を標準入力の慣習としてオプション扱いしない。
+        # このコマンドは標準入力から設定を読まないため、`--force` と同じ扱いで弾く
+        # (弾かないと「そんなファイルは無い」という終了コード 1 のエラーになり、
+        # オプションが存在しないことが伝わらないという Issue #104 の問題が残る)。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            seed_module.main(["-"])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert "-" in capsys.readouterr().err
+        assert cli_session.scalars(select(SourceRegistry)).all() == []
+
+    def test_rejects_a_negative_number_like_argument(self, cli_session: Session, capsys):
+        # Arrange — 数値オプションを持たないパーサでは、`-1` のような負数形式も
+        # 位置引数として通ってしまう。これも `-` 単体と同じ理由で弾く。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            seed_module.main(["-1"])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert "-1" in capsys.readouterr().err
+        assert cli_session.scalars(select(SourceRegistry)).all() == []
+
+    def test_rejects_a_directory_path(self, cli_session: Session, tmp_path: Path, capsys):
+        # Arrange — `.` や `./` のようにディレクトリを指す引数は、設定ファイルとして
+        # 読もうとして分かりにくいエラーになる。引数の誤りとして先に弾く。
+
+        # Act
+        with pytest.raises(SystemExit) as excinfo:
+            seed_module.main([str(tmp_path)])
+
+        # Assert
+        assert excinfo.value.code == 2
+        assert "ディレクトリ" in capsys.readouterr().err
         assert cli_session.scalars(select(SourceRegistry)).all() == []
