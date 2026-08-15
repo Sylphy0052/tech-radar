@@ -23,6 +23,11 @@ from techradar.main import create_app
 
 DEFAULT_OUTPUT_PATH = REPO_ROOT / "backend" / "openapi.json"
 
+_USAGE = "使い方: python -m techradar.openapi_export [出力先パス]"
+
+# 引数の検証が失敗したときの終了コード。慣例（`argparse` が使う値）に合わせる。
+_USAGE_ERROR_EXIT_CODE = 2
+
 
 def build_openapi_schema() -> dict[str, Any]:
     """DB 接続なしで FastAPI アプリを組み立て、OpenAPI スキーマを返す。"""
@@ -41,13 +46,26 @@ def render_openapi_schema(schema: dict[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     """OpenAPI スキーマをファイルへ書き出す。
 
+    受け付ける引数は出力先パス1つだけで、オプションは持たない。`-` で始まる引数を
+    そのまま出力先として扱うと、`--check` のような誤った呼び出しで `backend/--check`
+    というファイルが作られ、`git add -A` で commit へ紛れ込む（Issue #103 で実際に
+    起きた）。オプションらしき引数と余分な引数は、書き出す前に弾く。
+
     Args:
         argv: 引数。1つ目に出力先パスを指定できる（省略時は `backend/openapi.json`）。
 
     Returns:
-        終了コード。常に 0。
+        終了コード。成功なら 0、引数が不正なら 2（このときファイルは作らない）。
     """
     arguments = sys.argv[1:] if argv is None else argv
+    if len(arguments) > 1:
+        print(f"引数が多すぎます: {' '.join(arguments)}", file=sys.stderr)
+        print(_USAGE, file=sys.stderr)
+        return _USAGE_ERROR_EXIT_CODE
+    if arguments and arguments[0].startswith("-"):
+        print(f"不明なオプション: {arguments[0]}", file=sys.stderr)
+        print(_USAGE, file=sys.stderr)
+        return _USAGE_ERROR_EXIT_CODE
     output_path = Path(arguments[0]) if arguments else DEFAULT_OUTPUT_PATH
 
     schema = build_openapi_schema()

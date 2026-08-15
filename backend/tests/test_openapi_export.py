@@ -70,3 +70,38 @@ def test_main_defaults_to_the_repository_openapi_json_path(monkeypatch, tmp_path
     # Assert
     assert exit_code == 0
     assert default_path.exists()
+
+
+def test_main_rejects_option_like_arguments(tmp_path: Path, capsys, monkeypatch):
+    # Arrange — このモジュールにオプションは無い。`--check` のような引数を出力パスとして
+    # 扱うと `backend/--check` のようなファイルが作られ、`git add -A` で commit へ紛れ込む
+    # (Issue #103 で実際に起きた)。既定の出力先も差し替えて、そちらへ書かれないことを見る。
+    from techradar import openapi_export as module
+
+    monkeypatch.setattr(module, "DEFAULT_OUTPUT_PATH", tmp_path / "openapi.json")
+    monkeypatch.chdir(tmp_path)
+
+    # Act
+    exit_code = main(["--check"])
+
+    # Assert — エラー終了し、どこにもファイルを作らない
+    assert exit_code == 2
+    assert list(tmp_path.iterdir()) == []
+    assert "--check" in capsys.readouterr().err
+
+
+def test_main_rejects_extra_arguments(tmp_path: Path, capsys, monkeypatch):
+    # Arrange — 受け付けるのは出力パス1つだけ。2つ目を黙って捨てると、書き出し先が
+    # 呼び出し側の意図とずれたまま気付けない。
+    from techradar import openapi_export as module
+
+    monkeypatch.setattr(module, "DEFAULT_OUTPUT_PATH", tmp_path / "openapi.json")
+    monkeypatch.chdir(tmp_path)
+
+    # Act
+    exit_code = main([str(tmp_path / "first.json"), str(tmp_path / "second.json")])
+
+    # Assert
+    assert exit_code == 2
+    assert list(tmp_path.iterdir()) == []
+    assert capsys.readouterr().err != ""
