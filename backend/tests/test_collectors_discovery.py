@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from techradar.collectors import discovery as discovery_module
 from techradar.collectors.discovery import (
+    MAX_CONSECUTIVE_EMPTY_FETCHES,
     MAX_CONSECUTIVE_FEED_FAILURES,
     MAX_DISCOVERED_FEEDS_TOTAL,
     MAX_DISCOVERY_DOMAINS_PER_RUN,
@@ -29,6 +31,7 @@ from techradar.collectors.discovery import (
     record_feed_health,
     select_discovery_targets,
 )
+from techradar.collectors.rss import FeedFetchResult
 from techradar.config import Settings
 from techradar.db.enums import ArticleOrigin, DiscoveredFeedStatus
 from techradar.db.models import Article, DiscoveredFeed, UserArticle
@@ -81,6 +84,7 @@ def make_discovered_feed(
     article_count: int = 1,
     consecutive_failures: int = 0,
     last_succeeded_at: datetime | None = None,
+    consecutive_empty_fetches: int = 0,
 ) -> DiscoveredFeed:
     row = DiscoveredFeed(
         domain=domain,
@@ -91,6 +95,7 @@ def make_discovered_feed(
         enabled=enabled,
         consecutive_failures=consecutive_failures,
         last_succeeded_at=last_succeeded_at,
+        consecutive_empty_fetches=consecutive_empty_fetches,
     )
     session.add(row)
     session.flush()
@@ -660,12 +665,94 @@ class TestDiscoverFeeds:
         assert row.consecutive_failures == 0
 
         # Act — 復活後に 1 回失敗しても無効化されない
-        record_feed_health(db_session, {"https://revived.example.com/feed.xml": False}, now=NOW)
+        record_feed_health(
+            db_session,
+            {
+                "https://revived.example.com/feed.xml": FeedFetchResult(
+                    succeeded=False, entry_count=0
+                )
+            },
+            now=NOW,
+        )
 
         # Assert
         db_session.refresh(row)
         assert row.status == DiscoveredFeedStatus.FOUND.value
         assert row.consecutive_failures == 1
+
+    def test_resets_the_empty_fetch_counter_when_a_disabled_domain_is_rediscovered(
+        self, db_session: Session, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ) -> None:
+        """受入基準: 復活したフィードは連続空配信回数も持ち越さない（Issue #108）。
+
+        `test_resets_the_failure_counter_when_a_disabled_domain_is_rediscovered` の
+        `consecutive_empty_fetches` 版。#105 ではこのリセット漏れが欠陥として
+        見つかっているため、新しい列でも同じ観点を必ず押さえる。持ち越したままだと
+        復活直後の 1 回の空配信で閾値に達して即座に無効化されてしまう。
+        """
+        # Arrange — 閾値まで空配信して無効化された行が、クールダウンを過ぎている
+        user_id = uuid.uuid4()
+        make_user_article(
+            db_session,
+            make_article(
+                db_session,
+                "https://revived-empty.example.com/1",
+                source_domain="revived-empty.example.com",
+            ),
+            user_id=user_id,
+            origin=ArticleOrigin.MANUAL,
+        )
+        make_discovered_feed(
+            db_session,
+            domain="revived-empty.example.com",
+            status=DiscoveredFeedStatus.DISABLED,
+            last_attempted_at=NOW - timedelta(days=31),
+            feed_url="https://revived-empty.example.com/feed.xml",
+            enabled=False,
+            consecutive_empty_fetches=MAX_CONSECUTIVE_EMPTY_FETCHES,
+        )
+        homepage_html = (
+            '<html><head><link rel="alternate" type="application/rss+xml" href="/feed.xml">'
+            "</head><body></body></html>"
+        )
+        fake_fetch_resource.set_response(
+            "https://revived-empty.example.com/",
+            _resource(homepage_html, final_url="https://revived-empty.example.com/"),
+        )
+        fake_fetch_resource.set_response(
+            "https://revived-empty.example.com/feed.xml",
+            _resource(
+                VALID_FEED_XML,
+                final_url="https://revived-empty.example.com/feed.xml",
+                content_type="application/rss+xml",
+            ),
+        )
+
+        # Act
+        discover_feeds(db_session, user_id=user_id, settings=settings, now=NOW)
+
+        # Assert — FOUND へ戻り、空配信回数は 0 から数え直す
+        row = db_session.scalars(
+            select(DiscoveredFeed).where(DiscoveredFeed.domain == "revived-empty.example.com")
+        ).one()
+        assert row.status == DiscoveredFeedStatus.FOUND.value
+        assert row.consecutive_empty_fetches == 0
+
+        # Act — 復活後に 1 回空配信でも無効化されない
+        record_feed_health(
+            db_session,
+            {
+                "https://revived-empty.example.com/feed.xml": FeedFetchResult(
+                    succeeded=True, entry_count=0
+                )
+            },
+            now=NOW,
+        )
+
+        # Assert
+        db_session.refresh(row)
+        assert row.status == DiscoveredFeedStatus.FOUND.value
+        assert row.consecutive_empty_fetches == 1
 
     def test_does_not_start_discovery_when_no_slots_are_available(
         self, db_session: Session, settings: Settings, fake_fetch_resource: _FakeFetchResource
@@ -1268,7 +1355,9 @@ class TestRecordFeedHealth:
         )
 
         # Act
-        record_feed_health(db_session, {feed_url: False}, now=NOW)
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=False, entry_count=0)}, now=NOW
+        )
 
         # Assert
         db_session.refresh(row)
@@ -1292,7 +1381,9 @@ class TestRecordFeedHealth:
         )
 
         # Act — 閾値目の失敗
-        record_feed_health(db_session, {feed_url: False}, now=NOW)
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=False, entry_count=0)}, now=NOW
+        )
 
         # Assert
         db_session.refresh(row)
@@ -1316,7 +1407,9 @@ class TestRecordFeedHealth:
         )
 
         # Act
-        record_feed_health(db_session, {feed_url: True}, now=NOW)
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=True, entry_count=1)}, now=NOW
+        )
 
         # Assert
         db_session.refresh(row)
@@ -1345,7 +1438,9 @@ class TestRecordFeedHealth:
         slots_before = _available_slots(db_session)
 
         # Act
-        record_feed_health(db_session, {feed_url: False}, now=NOW)
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=False, entry_count=0)}, now=NOW
+        )
 
         # Assert
         db_session.refresh(row)
@@ -1377,7 +1472,9 @@ class TestRecordFeedHealth:
         ]
 
         # Act
-        record_feed_health(db_session, {feed_url: False}, now=NOW)
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=False, entry_count=0)}, now=NOW
+        )
 
         # Assert — 両方が無効化される
         for row in rows:
@@ -1389,4 +1486,296 @@ class TestRecordFeedHealth:
     def test_ignores_a_feed_url_with_no_matching_row(self, db_session: Session) -> None:
         """受入基準: 巡回中に行が消えた場合など、対象の行が見つからない URL は黙って無視する。"""
         # Act / Assert — 例外を送出しない
-        record_feed_health(db_session, {"https://gone.example.com/feed.xml": False}, now=NOW)
+        record_feed_health(
+            db_session,
+            {"https://gone.example.com/feed.xml": FeedFetchResult(succeeded=False, entry_count=0)},
+            now=NOW,
+        )
+
+
+class TestRecordFeedHealthEmptyFetches:
+    """`record_feed_health` の連続空配信による無効化を検証する（Issue #108）。
+
+    記事を1件も配信しないフィードが `MAX_DISCOVERED_FEEDS_TOTAL` の枠を専有し
+    続ける問題への対応。取得・パースには成功する（`FeedFetchResult.succeeded=True`）
+    が `entry_count=0` が続く状態を扱う。
+    """
+
+    def test_does_not_disable_after_a_single_empty_fetch(self, db_session: Session) -> None:
+        # Arrange
+        feed_url = "https://once-empty.example.com/feed.xml"
+        row = make_discovered_feed(
+            db_session,
+            domain="once-empty.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+        )
+
+        # Act
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=True, entry_count=0)}, now=NOW
+        )
+
+        # Assert
+        db_session.refresh(row)
+        assert row.consecutive_empty_fetches == 1
+        assert row.status == DiscoveredFeedStatus.FOUND.value
+        assert row.enabled is True
+
+    def test_does_not_disable_a_low_frequency_feed_with_a_couple_of_empty_fetches(
+        self, db_session: Session
+    ) -> None:
+        """受入基準: 新着が無いだけの正常なフィードは、1回や2回の0件では無効化されない。"""
+        # Arrange
+        feed_url = "https://slow.example.com/feed.xml"
+        row = make_discovered_feed(
+            db_session,
+            domain="slow.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+            consecutive_empty_fetches=1,
+        )
+
+        # Act — 2 回目の空配信（閾値の 10 にはまだ遠い）
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=True, entry_count=0)}, now=NOW
+        )
+
+        # Assert
+        db_session.refresh(row)
+        assert row.consecutive_empty_fetches == 2
+        assert row.status == DiscoveredFeedStatus.FOUND.value
+        assert row.enabled is True
+
+    def test_disables_after_reaching_the_consecutive_empty_fetch_threshold(
+        self, db_session: Session
+    ) -> None:
+        # Arrange — 閾値未満まで空配信を積んでおく
+        feed_url = "https://silent.example.com/feed.xml"
+        row = make_discovered_feed(
+            db_session,
+            domain="silent.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+            consecutive_empty_fetches=MAX_CONSECUTIVE_EMPTY_FETCHES - 1,
+        )
+
+        # Act — 閾値目の空配信
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=True, entry_count=0)}, now=NOW
+        )
+
+        # Assert
+        db_session.refresh(row)
+        assert row.consecutive_empty_fetches == MAX_CONSECUTIVE_EMPTY_FETCHES
+        assert row.status == DiscoveredFeedStatus.DISABLED.value
+        assert row.enabled is False
+
+    def test_resets_the_empty_fetch_counter_on_a_non_empty_success(
+        self, db_session: Session
+    ) -> None:
+        # Arrange — 空配信を積んだ状態から記事が配信される
+        feed_url = "https://recovered-empty.example.com/feed.xml"
+        row = make_discovered_feed(
+            db_session,
+            domain="recovered-empty.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+            consecutive_empty_fetches=MAX_CONSECUTIVE_EMPTY_FETCHES - 1,
+        )
+
+        # Act
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=True, entry_count=3)}, now=NOW
+        )
+
+        # Assert
+        db_session.refresh(row)
+        assert row.consecutive_empty_fetches == 0
+        assert row.status == DiscoveredFeedStatus.FOUND.value
+
+    def test_a_failed_fetch_does_not_count_as_an_empty_fetch(self, db_session: Session) -> None:
+        """受入基準: 失敗と0件が同時に起きたときの扱い。取得に失敗した回は「0件だった」
+        とは数えない。取得できていない以上、記事の有無は分からないため。失敗の
+        カウンタだけを増やし、0件のカウンタは据え置く（0へ戻さない）。
+        """
+        # Arrange — 空配信を積んだ状態で取得自体が失敗する
+        feed_url = "https://flaky-empty.example.com/feed.xml"
+        row = make_discovered_feed(
+            db_session,
+            domain="flaky-empty.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+            consecutive_empty_fetches=5,
+        )
+
+        # Act
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=False, entry_count=0)}, now=NOW
+        )
+
+        # Assert — 空配信カウンタは据え置き、失敗カウンタだけ増える
+        db_session.refresh(row)
+        assert row.consecutive_empty_fetches == 5
+        assert row.consecutive_failures == 1
+
+    def test_frees_a_slot_after_disabling_a_feed_for_empty_fetches(
+        self, db_session: Session
+    ) -> None:
+        """受入基準: 記事を1件も配信しない状態が続くフィードが無効化され、枠が空く。"""
+        # Arrange
+        feed_url = "https://toremove-empty.example.com/feed.xml"
+        row = make_discovered_feed(
+            db_session,
+            domain="toremove-empty.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+            consecutive_empty_fetches=MAX_CONSECUTIVE_EMPTY_FETCHES - 1,
+        )
+        slots_before = _available_slots(db_session)
+
+        # Act
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=True, entry_count=0)}, now=NOW
+        )
+
+        # Assert
+        db_session.refresh(row)
+        assert row.status == DiscoveredFeedStatus.DISABLED.value
+        assert _available_slots(db_session) == slots_before + 1
+
+    def test_disables_every_row_sharing_the_same_feed_url(self, db_session: Session) -> None:
+        """受入基準: 同じ `feed_url` を持つ行が複数あれば、そのすべてが空配信で無効化される。
+
+        `feed_url` に一意制約は無く、別々のドメインのトップページが同じフィード URL
+        を指していれば行が並ぶ（`record_feed_health` docstring 参照）。取得失敗による
+        無効化では `test_updates_every_row_sharing_the_same_feed_url` が同じことを
+        押さえている。空配信の経路にも同じ回帰テストを置く。
+        """
+        # Arrange — 同じ feed_url を指す 2 ドメイン。どちらも次の 0 件で閾値へ届く
+        feed_url = "https://shared-empty.example.com/feed.xml"
+        rows = [
+            make_discovered_feed(
+                db_session,
+                domain=domain,
+                status=DiscoveredFeedStatus.FOUND,
+                last_attempted_at=NOW,
+                feed_url=feed_url,
+                enabled=True,
+                consecutive_empty_fetches=MAX_CONSECUTIVE_EMPTY_FETCHES - 1,
+            )
+            for domain in ("shared-empty.example.com", "blog.shared-empty.example.com")
+        ]
+
+        # Act
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=True, entry_count=0)}, now=NOW
+        )
+
+        # Assert
+        for row in rows:
+            db_session.refresh(row)
+            assert row.status == DiscoveredFeedStatus.DISABLED.value
+            assert row.enabled is False
+            assert row.consecutive_empty_fetches == MAX_CONSECUTIVE_EMPTY_FETCHES
+
+    def test_does_not_touch_an_already_disabled_row_sharing_the_feed_url(
+        self, db_session: Session
+    ) -> None:
+        """受入基準: 無効化済みの行は、同じ `feed_url` の生きた行の巡回結果を巻き込まない。
+
+        無効化済みの行は巡回対象ではない（`load_enabled_discovered_feeds` は
+        `status=FOUND` かつ `enabled` のみを返す）。同じ `feed_url` を持つ別ドメインが
+        まだ生きていると、その巡回結果が相乗りで届く。取得していない行の成否を数えると
+        カウンタが際限なく増え、無効化のログも巡回のたびに出続ける。
+        """
+        # Arrange — 無効化済みの行と、同じ feed_url を指す生きた行
+        feed_url = "https://mixed.example.com/feed.xml"
+        disabled = make_discovered_feed(
+            db_session,
+            domain="mixed.example.com",
+            status=DiscoveredFeedStatus.DISABLED,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=False,
+            consecutive_empty_fetches=MAX_CONSECUTIVE_EMPTY_FETCHES,
+            consecutive_failures=MAX_CONSECUTIVE_FEED_FAILURES,
+        )
+        alive = make_discovered_feed(
+            db_session,
+            domain="blog.mixed.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+        )
+
+        # Act — 空配信と取得失敗の両方を通す
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=True, entry_count=0)}, now=NOW
+        )
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=False, entry_count=0)}, now=NOW
+        )
+
+        # Assert — 無効化済みの行は据え置き、生きた行だけが数えられる
+        db_session.refresh(disabled)
+        assert disabled.consecutive_empty_fetches == MAX_CONSECUTIVE_EMPTY_FETCHES
+        assert disabled.consecutive_failures == MAX_CONSECUTIVE_FEED_FAILURES
+        db_session.refresh(alive)
+        assert alive.consecutive_empty_fetches == 1
+        assert alive.consecutive_failures == 1
+
+    def test_logs_a_distinct_event_from_the_failure_based_disablement(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 「取得に失敗して無効化した」のか「記事が無いまま続いたので
+        無効化した」のかがログから区別できる。イベント名で見分ける。
+
+        `caplog` ではなく `discovery_module.logger.info` を直接差し替えて検証する。
+        `db_session` 経由で alembic の `env.py` が呼ぶ
+        `logging.config.fileConfig`（既定で `disable_existing_loggers=True`）により
+        このモジュールの logger インスタンスがセッション内で disabled になりうるため
+        （`test_jobs_worker.py` の同種テストと同じ理由）、`caplog` が記録を
+        拾えないことがある。ロガーの有効/無効に依存しない検証にする。
+        """
+        # Arrange
+        info_calls: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(
+            discovery_module.logger, "info", lambda *args, **_kwargs: info_calls.append(args)
+        )
+        feed_url = "https://noisy-empty.example.com/feed.xml"
+        make_discovered_feed(
+            db_session,
+            domain="noisy-empty.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+            consecutive_empty_fetches=MAX_CONSECUTIVE_EMPTY_FETCHES - 1,
+        )
+
+        # Act
+        record_feed_health(
+            db_session, {feed_url: FeedFetchResult(succeeded=True, entry_count=0)}, now=NOW
+        )
+
+        # Assert — 空配信専用のイベント名が出る。失敗用のイベント名（末尾が
+        # "feed_disabled " とスペースで続く形）は出ない
+        # （"feed_disabled_empty" は前方一致するため、素朴な部分文字列一致では
+        # 区別できない）。
+        messages = [call[0] for call in info_calls]
+        assert any("collectors.discovery.feed_disabled_empty " in message for message in messages)
+        assert not any("collectors.discovery.feed_disabled " in message for message in messages)

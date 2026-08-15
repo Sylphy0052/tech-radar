@@ -116,5 +116,9 @@ class DiscoveredFeedStatus(StrEnum):
     NOT_FOUND = "not_found"
     # ドメインのトップページ自体を取得できなかった（ネットワーク・SSRF拒否等）。
     FETCH_FAILED = "fetch_failed"
-    # 巡回が連続で失敗し続けたため無効化した（Issue #105）。
+    # 巡回で使えなくなったため無効化した。理由は2種類あり、取得・パースが連続で
+    # 失敗した場合（Issue #105）と、取得はできるが記事を1件も配信しない状態が
+    # 連続した場合（Issue #108）。どちらで無効化したかは `discovered_feeds` の
+    # `consecutive_failures` / `consecutive_empty_fetches` と、無効化時のログの
+    # イベント名（`feed_disabled` / `feed_disabled_empty`）で区別する。
     DISABLED = "disabled"

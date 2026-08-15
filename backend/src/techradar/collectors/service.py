@@ -30,7 +30,7 @@ from techradar.collectors.github_releases import GitHubReleasesCollector
 from techradar.collectors.hackernews import HackerNewsCollector
 from techradar.collectors.jp_media import JpMediaCollector
 from techradar.collectors.query import build_search_queries
-from techradar.collectors.rss import RssCollector
+from techradar.collectors.rss import FeedFetchResult, RssCollector
 from techradar.config import Settings, get_settings
 from techradar.db.enums import JobStatus, JobType
 from techradar.db.models import Article, Job
@@ -130,11 +130,11 @@ def collect_candidates(
 
 
 def _record_feed_health_safely(session: Session, collectors: Sequence[SourceCollector]) -> None:
-    """`DiscoveredFeedCollector` の巡回結果を `discovered_feeds` へ反映する（Issue #105）。
+    """`DiscoveredFeedCollector` の巡回結果を `discovered_feeds` へ反映する（Issue #105, #108）。
 
     `collectors` の中から `DiscoveredFeedCollector` のインスタンスだけを見つけて
-    `feed_results()`（`RssCollector` が持つ、フィード URL ごとの成否の記録。
-    `techradar.collectors.rss.RssCollector` docstring 参照）を読み、まとめて
+    `feed_results()`（`RssCollector` が持つ、フィード URL ごとの結果の記録。
+    `techradar.collectors.rss.RssCollector` / `FeedFetchResult` docstring 参照）を読み、まとめて
     `discovery.record_feed_health` へ渡す。`feeds.yaml` 由来の `RssCollector` /
     `JpMediaCollector`（`DiscoveredFeedCollector` のインスタンスではない）は
     対象にしない。自動追加の枠（`discovery.MAX_DISCOVERED_FEEDS_TOTAL`）を
@@ -156,7 +156,7 @@ def _record_feed_health_safely(session: Session, collectors: Sequence[SourceColl
     クラスではなくなるため、ここが失敗しても巡回結果を巻き込まないようにする。
     """
     try:
-        feed_results: dict[str, bool] = {}
+        feed_results: dict[str, FeedFetchResult] = {}
         for collector in collectors:
             if isinstance(collector, DiscoveredFeedCollector):
                 feed_results.update(collector.feed_results())

@@ -19,6 +19,7 @@ import techradar.collectors.service as service
 from techradar.collectors.base import CandidateArticle, CollectorError
 from techradar.collectors.brave import BraveSearchCollector
 from techradar.collectors.config import FeedsConfig
+from techradar.collectors.rss import FeedFetchResult
 from techradar.collectors.service import CRAWL_ORIGIN, collect_candidates
 from techradar.config import Settings
 from techradar.db.enums import JobStatus, JobType
@@ -835,7 +836,10 @@ class TestFeedHealthRecording:
         original_record_feed_health = service.record_feed_health
 
         def spy_record_feed_health(
-            session: Session, feed_results: dict[str, bool], *, now: datetime | None = None
+            session: Session,
+            feed_results: dict[str, FeedFetchResult],
+            *,
+            now: datetime | None = None,
         ) -> None:
             called.append(True)
             original_record_feed_health(session, feed_results, now=now)

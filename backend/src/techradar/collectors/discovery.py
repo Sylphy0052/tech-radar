@@ -54,7 +54,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from techradar.collectors.config import FeedEntryConfig
-from techradar.collectors.rss import RssCollector
+from techradar.collectors.rss import FeedFetchResult, RssCollector
 from techradar.config import Settings
 from techradar.db.enums import ArticleOrigin, DiscoveredFeedStatus
 from techradar.db.errors import is_unique_violation
@@ -80,6 +80,13 @@ MAX_FEED_CANDIDATES_PER_DOMAIN = 5
 # 達すると status=DISABLED / enabled=False にして巡回対象から外す。1 回程度の
 # 失敗はネットワークの一時的な不調でも起きうるため、単発の失敗では無効化しない。
 MAX_CONSECUTIVE_FEED_FAILURES = 3
+
+# 発見済みフィードの「記事を配信しない」無効化（Issue #108）で許容する連続
+# エントリ 0 件回数の上限。失敗の閾値（`MAX_CONSECUTIVE_FEED_FAILURES` = 3）より
+# 十分に大きく取る。巡回は UI の実行ボタンからの手動起動で実時間の間隔が
+# 読めないため、更新頻度の低い（数回に 1 回しか新着が無い）フィードを
+# 巻き込んで無効化しないよう、失敗より遥かに粘る値にしてある。
+MAX_CONSECUTIVE_EMPTY_FETCHES = 10
 
 # ドメイン集計の対象にする UserArticle.origin。「実際に登録した記事のサイト」を
 # 見たいだけなので、関心スコア計算用の5経路のうち read_full/clicked は含めない
@@ -228,22 +235,30 @@ def _available_slots(session: Session) -> int:
 
 
 def record_feed_health(
-    session: Session, feed_results: dict[str, bool], *, now: datetime | None = None
+    session: Session, feed_results: dict[str, FeedFetchResult], *, now: datetime | None = None
 ) -> None:
-    """`DiscoveredFeedCollector` の巡回結果を `discovered_feeds` へ反映する（Issue #105）。
+    """`DiscoveredFeedCollector` の巡回結果を `discovered_feeds` へ反映する（Issue #105, #108）。
 
     `feed_results` は `RssCollector.feed_results()`（`DiscoveredFeedCollector` が
-    継承する）が返す「フィード URL → 成否」の対応をそのまま渡す想定。
+    継承する）が返す「フィード URL → `FeedFetchResult`」の対応をそのまま渡す想定。
     `feeds.yaml` 由来の手動フィード（`RssCollector` / `JpMediaCollector`）は
     対象外にする。自動追加の枠（`MAX_DISCOVERED_FEEDS_TOTAL`）を消費しないため
     無効化する動機が無く、人が意図して置いたフィードを機械が黙って外す方が
     危ういため（呼び出し側の `collectors.service` が `DiscoveredFeedCollector`
     のときだけこの関数を呼ぶことで、対象を絞る）。
 
-    成功したフィードは `consecutive_failures` を 0 へリセットし
-    `last_succeeded_at` を更新する。失敗したフィードは `consecutive_failures`
-    を 1 増やし、`MAX_CONSECUTIVE_FEED_FAILURES` に達したら
-    `status=DISABLED` / `enabled=False` にする。対象の行が見つからない URL
+    取得・パースに成功したフィードは `consecutive_failures` を 0 へリセットし
+    `last_succeeded_at` を更新する。そのうえでエントリ 0 件だったかどうかで
+    `consecutive_empty_fetches` を扱う（Issue #108）。1 件でも配信できていれば
+    0 へ戻し、0 件なら 1 増やして `MAX_CONSECUTIVE_EMPTY_FETCHES` に達したら
+    `status=DISABLED` / `enabled=False` にする（記事を配信しないフィードが
+    `MAX_DISCOVERED_FEEDS_TOTAL` の枠を専有し続けるのを防ぐ）。取得・パース自体に
+    失敗したフィードは `consecutive_failures` を 1 増やし、
+    `MAX_CONSECUTIVE_FEED_FAILURES` に達したら同様に無効化する。失敗の回は
+    「記事が無かった」とは数えない（取得できていない以上、記事の有無は
+    分からないため）ので `consecutive_empty_fetches` には一切触れない
+    （増やしも、0 へ戻しもしない）。無効化の理由（失敗によるものか、空配信に
+    よるものか）はログのイベント名で区別する。対象の行が見つからない URL
     （巡回中に行が消えた場合など）は黙って無視する。
 
     1 つの `feed_url` に複数の行が対応することを許す。一意なのは `domain` だけで
@@ -260,11 +275,11 @@ def record_feed_health(
     `_available_slots` の残り枠が増え、同時に `_already_found_domains` の
     対象から外れて `_cooldown_domains`（`status != FOUND` を対象にする）
     経由で `DISCOVERY_RETRY_COOLDOWN_DAYS` 後に再発見の対象へ戻る。
-    この3関数は変更しない。
+    この3関数は変更しない（新しい status は増やさない、Issue #108 の設計判断）。
     """
     resolved_now = now or datetime.now(UTC)
     rows_by_feed_url = _discovered_feeds_by_url(session, feed_results.keys())
-    for feed_url, succeeded in feed_results.items():
+    for feed_url, result in feed_results.items():
         rows = rows_by_feed_url.get(feed_url, ())
         if not rows:
             # 巡回中に行が消えた場合などに起こりうる。反映すべき対象が無いだけなので
@@ -274,9 +289,19 @@ def record_feed_health(
             logger.debug("collectors.discovery.feed_health_row_missing feed_url=%s", feed_url)
             continue
         for row in rows:
-            if succeeded:
+            if row.status == DiscoveredFeedStatus.DISABLED.value:
+                # 既に無効化した行は巡回対象ではない（`load_enabled_discovered_feeds`
+                # は status=FOUND かつ enabled のみを返す）。ここへ来るのは、同じ
+                # feed_url を持つ別ドメインの行がまだ生きていて、その巡回結果が
+                # 相乗りしてくる場合だけ。取得していない行の成否を数える意味は無く、
+                # 放置するとカウンタが際限なく増え、無効化のログも巡回のたびに
+                # 出続ける。復活は再発見（`_apply_discovery_result`）が担う。
+                continue
+
+            if result.succeeded:
                 row.consecutive_failures = 0
                 row.last_succeeded_at = resolved_now
+                _apply_empty_fetch_result(row, result, feed_url=feed_url)
                 continue
 
             row.consecutive_failures += 1
@@ -294,6 +319,31 @@ def record_feed_health(
     # だが、テストや直接呼び出しでも変更が即座に読めるよう明示的に flush する
     # （`_upsert_discovered_feed` と同じ流儀）。
     session.flush()
+
+
+def _apply_empty_fetch_result(
+    row: DiscoveredFeed, result: FeedFetchResult, *, feed_url: str
+) -> None:
+    """取得・パースに成功した1行へ、エントリ 0 件の連続回数を反映する（Issue #108）。
+
+    `record_feed_health` から、`result.succeeded` が True の行に対してのみ呼ぶ
+    （呼び出し元で分岐済み）。
+    """
+    if result.entry_count > 0:
+        row.consecutive_empty_fetches = 0
+        return
+
+    row.consecutive_empty_fetches += 1
+    if row.consecutive_empty_fetches >= MAX_CONSECUTIVE_EMPTY_FETCHES:
+        row.status = DiscoveredFeedStatus.DISABLED.value
+        row.enabled = False
+        logger.info(
+            "collectors.discovery.feed_disabled_empty "
+            "domain=%s feed_url=%s consecutive_empty_fetches=%d",
+            row.domain,
+            feed_url,
+            row.consecutive_empty_fetches,
+        )
 
 
 def _discovered_feeds_by_url(
@@ -497,11 +547,13 @@ def _apply_discovery_result(
 ) -> None:
     """発見結果を既存の `DiscoveredFeed` 行へ反映する（新規作成・更新の両方から使う共通処理）。
 
-    `status=FOUND` になったときは `consecutive_failures` を 0 へ戻す（Issue #105）。
-    連続失敗で `DISABLED` にした行は `DISCOVERY_RETRY_COOLDOWN_DAYS` 後に再発見の
-    対象へ戻るが、失敗回数を持ち越したままだと復活直後の 1 回の失敗で
-    `MAX_CONSECUTIVE_FEED_FAILURES` に達して即座に無効化されてしまい、
-    「一時的な失敗では無効化しない」という前提が復活後だけ成り立たなくなるため。
+    `status=FOUND` になったときは `consecutive_failures` と
+    `consecutive_empty_fetches` の両方を 0 へ戻す（Issue #105, #108）。連続失敗・
+    連続空配信で `DISABLED` にした行は `DISCOVERY_RETRY_COOLDOWN_DAYS` 後に再発見の
+    対象へ戻るが、回数を持ち越したままだと復活直後の 1 回の失敗・空配信で
+    `MAX_CONSECUTIVE_FEED_FAILURES` / `MAX_CONSECUTIVE_EMPTY_FETCHES` に達して
+    即座に無効化されてしまい、「一時的な不調では無効化しない」という前提が
+    復活後だけ成り立たなくなるため。
     """
     row.feed_url = feed_url
     row.status = status
@@ -510,6 +562,7 @@ def _apply_discovery_result(
     row.enabled = status == DiscoveredFeedStatus.FOUND.value
     if status == DiscoveredFeedStatus.FOUND.value:
         row.consecutive_failures = 0
+        row.consecutive_empty_fetches = 0
 
 
 def load_enabled_discovered_feeds(session: Session) -> tuple[FeedEntryConfig, ...]:

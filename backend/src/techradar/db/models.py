@@ -544,6 +544,15 @@ class DiscoveredFeed(Base):
     consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     # 直近の巡回成功時刻（Issue #105）。一度も成功していなければ NULL のまま。
     last_succeeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 取得・パースには成功したが記事を1件も配信しなかった連続回数（Issue #108）。
+    # 1件でも配信できたら 0 へリセットする。取得・パース自体に失敗した回は
+    # 「0件だった」と数えない（`consecutive_failures` の方でのみ数え、この列には
+    # 触れない）。`MAX_CONSECUTIVE_EMPTY_FETCHES` に達すると status=DISABLED /
+    # enabled=False にする。`feeds.yaml` 由来の手動フィードは対象外
+    # （`collectors.discovery` docstring 参照）。
+    consecutive_empty_fetches: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
