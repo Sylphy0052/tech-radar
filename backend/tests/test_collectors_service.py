@@ -717,6 +717,64 @@ class TestFeedHealthRecording:
         db_session.refresh(row)
         assert row.consecutive_failures == 1
 
+    def test_frees_a_discovery_slot_within_the_same_collect_run(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 無効化した分の枠は、同じ `collect_candidates` の呼び出し中に空く。
+
+        `collect_candidates` は死活監視の反映を `_collect_all` の直後に置き、新規発見
+        （`_discover_new_feeds_safely`）を末尾に置いている（docstring の処理順序）。
+        反映が末尾より後になると、無効化した枠をその巡回では使えない。両者を個別に
+        検証するだけではこの順序が保証されないため、1 回の呼び出しを通して確かめる。
+        """
+        # Arrange — 次の 1 回の失敗で閾値に達する FOUND 行
+        from techradar.collectors.discovery import (
+            MAX_CONSECUTIVE_FEED_FAILURES,
+            _available_slots,
+        )
+        from techradar.db.enums import DiscoveredFeedStatus
+        from techradar.db.models import DiscoveredFeed
+
+        feed_url = "https://discovered.example.com/feed.xml"
+        db_session.add(
+            DiscoveredFeed(
+                domain="discovered.example.com",
+                feed_url=feed_url,
+                status=DiscoveredFeedStatus.FOUND.value,
+                article_count=1,
+                last_attempted_at=NOW,
+                enabled=True,
+                consecutive_failures=MAX_CONSECUTIVE_FEED_FAILURES - 1,
+            )
+        )
+        db_session.flush()
+        slots_before = _available_slots(db_session)
+
+        discovered_collector = self._make_discovered_feed_collector(
+            monkeypatch, settings, feed_url=feed_url, succeeds=False
+        )
+
+        # 新規発見の中で残り枠を観測し、反映が済んだ後に呼ばれていることを確かめる
+        observed_slots: list[int] = []
+
+        def _spy_discover_feeds(session: Session, **kwargs: object) -> int:
+            observed_slots.append(_available_slots(session))
+            return 0
+
+        monkeypatch.setattr(service, "discover_feeds", _spy_discover_feeds)
+        working = _FakeCollector("working", [make_candidate("https://example.com/articles/ok")])
+
+        # Act
+        collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[working, discovered_collector],
+        )
+
+        # Assert — 新規発見の時点で、無効化した 1 件ぶんの枠が空いている
+        assert observed_slots == [slots_before + 1]
+
     def test_feed_health_recording_failure_does_not_break_candidate_collection(
         self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
     ) -> None:

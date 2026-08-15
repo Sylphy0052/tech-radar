@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urljoin, urlsplit
@@ -246,6 +246,14 @@ def record_feed_health(
     `status=DISABLED` / `enabled=False` にする。対象の行が見つからない URL
     （巡回中に行が消えた場合など）は黙って無視する。
 
+    1 つの `feed_url` に複数の行が対応することを許す。一意なのは `domain` だけで
+    `feed_url` に一意制約は無く、別々のドメインのトップページが同じフィード URL
+    を指していれば行が並ぶ（`_extract_feed_link_candidates` はトップページと同じ
+    ホストかそのサブドメインであることしか求めないため、`a.example.com` と
+    `b.example.com` の両方が `https://example.com/feed.xml` を指す形は通る）。
+    1 行だけ更新すると残りの行の成否が黙って捨てられるため、一致する行はすべて
+    更新する。
+
     無効化すると、なぜ枠が空き・復活も拾えるかは `_available_slots` /
     `_already_found_domains` / `_cooldown_domains` の3関数が
     `status == FOUND` だけを見ているため。`DISABLED` にした時点で
@@ -255,34 +263,57 @@ def record_feed_health(
     この3関数は変更しない。
     """
     resolved_now = now or datetime.now(UTC)
+    rows_by_feed_url = _discovered_feeds_by_url(session, feed_results.keys())
     for feed_url, succeeded in feed_results.items():
-        row = session.scalars(
-            select(DiscoveredFeed).where(DiscoveredFeed.feed_url == feed_url)
-        ).first()
-        if row is None:
-            # 巡回中に行が消えた場合などに起こりうる。反映すべき対象が無いだけ
-            # なので、他の URL の反映は続ける。
+        rows = rows_by_feed_url.get(feed_url, ())
+        if not rows:
+            # 巡回中に行が消えた場合などに起こりうる。反映すべき対象が無いだけなので
+            # 他の URL の反映は続けるが、この分岐へ頻繁に入るのは巡回対象と
+            # `discovered_feeds` が乖離しているということなので、痕跡は残しておく
+            # （常駐監視も CI も持たないため、事後にログだけで追えるようにする）。
+            logger.debug("collectors.discovery.feed_health_row_missing feed_url=%s", feed_url)
             continue
+        for row in rows:
+            if succeeded:
+                row.consecutive_failures = 0
+                row.last_succeeded_at = resolved_now
+                continue
 
-        if succeeded:
-            row.consecutive_failures = 0
-            row.last_succeeded_at = resolved_now
-            continue
-
-        row.consecutive_failures += 1
-        if row.consecutive_failures >= MAX_CONSECUTIVE_FEED_FAILURES:
-            row.status = DiscoveredFeedStatus.DISABLED.value
-            row.enabled = False
-            logger.info(
-                "collectors.discovery.feed_disabled domain=%s feed_url=%s consecutive_failures=%d",
-                row.domain,
-                feed_url,
-                row.consecutive_failures,
-            )
+            row.consecutive_failures += 1
+            if row.consecutive_failures >= MAX_CONSECUTIVE_FEED_FAILURES:
+                row.status = DiscoveredFeedStatus.DISABLED.value
+                row.enabled = False
+                logger.info(
+                    "collectors.discovery.feed_disabled "
+                    "domain=%s feed_url=%s consecutive_failures=%d",
+                    row.domain,
+                    feed_url,
+                    row.consecutive_failures,
+                )
     # 呼び出し側（`collectors.service`）が savepoint（`begin_nested`）で囲む前提
     # だが、テストや直接呼び出しでも変更が即座に読めるよう明示的に flush する
     # （`_upsert_discovered_feed` と同じ流儀）。
     session.flush()
+
+
+def _discovered_feeds_by_url(
+    session: Session, feed_urls: Iterable[str]
+) -> dict[str, list[DiscoveredFeed]]:
+    """`feed_url` をキーに `discovered_feeds` の行をまとめて引く（Issue #105）。
+
+    URL ごとに SELECT を出さず 1 クエリで済ませる。`feed_url` は一意ではないため
+    値は行のリストになる（`record_feed_health` docstring 参照）。
+    """
+    urls = list(feed_urls)
+    if not urls:
+        return {}
+    rows = session.scalars(select(DiscoveredFeed).where(DiscoveredFeed.feed_url.in_(urls))).all()
+    grouped: dict[str, list[DiscoveredFeed]] = {}
+    for row in rows:
+        if row.feed_url is None:
+            continue
+        grouped.setdefault(row.feed_url, []).append(row)
+    return grouped
 
 
 def _discover_feed_url(domain: str, *, settings: Settings) -> tuple[str, str | None]:

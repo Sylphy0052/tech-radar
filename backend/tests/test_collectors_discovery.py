@@ -1352,6 +1352,40 @@ class TestRecordFeedHealth:
         assert row.status == DiscoveredFeedStatus.DISABLED.value
         assert _available_slots(db_session) == slots_before + 1
 
+    def test_updates_every_row_sharing_the_same_feed_url(self, db_session: Session) -> None:
+        """受入基準: 同じ `feed_url` を持つ行が複数あれば、そのすべてへ成否を反映する。
+
+        一意なのは `domain` だけで `feed_url` に一意制約は無い。別々のドメインの
+        トップページが同じフィード URL を指していれば行が並ぶ（`_is_same_site` は
+        トップページと同じホストかそのサブドメインであることしか求めないため、
+        リダイレクト等でこの形は成立しうる）。1 行だけ更新すると、残りの行の成否が
+        黙って捨てられて無効化の判定が狂う。
+        """
+        # Arrange — 同じ feed_url を指す 2 ドメイン。どちらも次の失敗で閾値へ届く
+        feed_url = "https://shared.example.com/feed.xml"
+        rows = [
+            make_discovered_feed(
+                db_session,
+                domain=domain,
+                status=DiscoveredFeedStatus.FOUND,
+                last_attempted_at=NOW,
+                feed_url=feed_url,
+                enabled=True,
+                consecutive_failures=MAX_CONSECUTIVE_FEED_FAILURES - 1,
+            )
+            for domain in ("shared.example.com", "blog.shared.example.com")
+        ]
+
+        # Act
+        record_feed_health(db_session, {feed_url: False}, now=NOW)
+
+        # Assert — 両方が無効化される
+        for row in rows:
+            db_session.refresh(row)
+            assert row.status == DiscoveredFeedStatus.DISABLED.value
+            assert row.enabled is False
+            assert row.consecutive_failures == MAX_CONSECUTIVE_FEED_FAILURES
+
     def test_ignores_a_feed_url_with_no_matching_row(self, db_session: Session) -> None:
         """受入基準: 巡回中に行が消えた場合など、対象の行が見つからない URL は黙って無視する。"""
         # Act / Assert — 例外を送出しない
