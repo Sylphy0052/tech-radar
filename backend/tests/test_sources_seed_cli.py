@@ -134,8 +134,9 @@ class TestSeedCli:
         assert cli_session.scalars(select(SourceRegistry)).all() == []
 
     def test_rejects_a_whitespace_only_path(self, cli_session: Session, capsys):
-        # Arrange — 空白だけの引数も空文字列と同じくカレントディレクトリ相当へ落ちる。
-        # 空文字列だけを弾いても、シェルの展開ミスという同じ原因を拾いきれない。
+        # Arrange — 空白だけの引数も空文字列と同じ原因 (シェルの展開ミス) で渡りうる。
+        # 素通りさせると、空白 1 文字を名前に持つファイルを読もうとして「そんなファイルは
+        # 無い」で落ちる (空文字列と違いカレントディレクトリは指さない)。
 
         # Act
         with pytest.raises(SystemExit) as excinfo:
@@ -151,6 +152,9 @@ class TestSeedCli:
         # このコマンドは標準入力から設定を読まないため、`--force` と同じ扱いで弾く
         # (弾かないと「そんなファイルは無い」という終了コード 1 のエラーになり、
         # オプションが存在しないことが伝わらないという Issue #104 の問題が残る)。
+        #
+        # 理由まで見るのは、usage 行に `[-h]` が含まれており `"-" in err` では
+        # どんな失敗でも通ってしまうため (Issue #107)。
 
         # Act
         with pytest.raises(SystemExit) as excinfo:
@@ -158,7 +162,7 @@ class TestSeedCli:
 
         # Assert
         assert excinfo.value.code == 2
-        assert "-" in capsys.readouterr().err
+        assert "不明なオプション: -" in capsys.readouterr().err
         assert cli_session.scalars(select(SourceRegistry)).all() == []
 
     def test_rejects_a_negative_number_like_argument(self, cli_session: Session, capsys):
@@ -171,7 +175,7 @@ class TestSeedCli:
 
         # Assert
         assert excinfo.value.code == 2
-        assert "-1" in capsys.readouterr().err
+        assert "不明なオプション: -1" in capsys.readouterr().err
         assert cli_session.scalars(select(SourceRegistry)).all() == []
 
     def test_rejects_a_directory_path(self, cli_session: Session, tmp_path: Path, capsys):
