@@ -296,8 +296,7 @@ def record_feed_health(
 
         row.consecutive_failures += 1
         if row.consecutive_failures >= MAX_CONSECUTIVE_FEED_FAILURES:
-            row.status = DiscoveredFeedStatus.DISABLED.value
-            row.enabled = False
+            _disable_feed(row)
             logger.info(
                 "collectors.discovery.feed_disabled domain=%s feed_url=%s consecutive_failures=%d",
                 row.domain,
@@ -391,8 +390,7 @@ def _apply_new_entry_count(
 
     row.consecutive_no_new_entries += 1
     if row.consecutive_no_new_entries >= MAX_CONSECUTIVE_NO_NEW_ENTRIES:
-        row.status = DiscoveredFeedStatus.DISABLED.value
-        row.enabled = False
+        _disable_feed(row)
         logger.info(
             "collectors.discovery.feed_disabled_stale "
             "domain=%s feed_url=%s consecutive_no_new_entries=%d",
@@ -416,8 +414,7 @@ def _apply_empty_fetch_result(
 
     row.consecutive_empty_fetches += 1
     if row.consecutive_empty_fetches >= MAX_CONSECUTIVE_EMPTY_FETCHES:
-        row.status = DiscoveredFeedStatus.DISABLED.value
-        row.enabled = False
+        _disable_feed(row)
         logger.info(
             "collectors.discovery.feed_disabled_empty "
             "domain=%s feed_url=%s consecutive_empty_fetches=%d",
@@ -425,6 +422,17 @@ def _apply_empty_fetch_result(
             feed_url,
             row.consecutive_empty_fetches,
         )
+
+
+def _disable_feed(row: DiscoveredFeed) -> None:
+    """行を巡回対象から外す（Issue #105, #108, #109 の無効化に共通）。
+
+    無効化の理由（連続失敗・連続空配信・連続新着ゼロ）はログのイベント名で
+    区別するため、ログは呼び出し側に置く。`status` と `enabled` は必ず対で
+    倒す（`load_enabled_discovered_feeds` は両方を見る）。
+    """
+    row.status = DiscoveredFeedStatus.DISABLED.value
+    row.enabled = False
 
 
 def _discovered_feeds_by_url(

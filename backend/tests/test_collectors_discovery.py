@@ -2053,6 +2053,51 @@ class TestRecordFeedNovelty:
         db_session.refresh(alive)
         assert alive.consecutive_no_new_entries == 1
 
+    def test_does_not_revive_an_already_disabled_row_with_a_new_entry(
+        self, db_session: Session
+    ) -> None:
+        """受入基準: 無効化済みの行は、新着ありの結果が相乗りしても復活しない。
+
+        新着なしを相乗りさせない検証（直前のテスト）と対になる。同じ `feed_url` を
+        持つ別ドメインの行が生きていると、その巡回結果は新着ありのときも届く。
+        ここでカウンタを 0 へ戻したり `status` を戻したりすると、取得すらしていない
+        行が枠を持ち続けることになる。復活は再発見（`_apply_discovery_result`）
+        だけが担う（`_iter_live_rows` の docstring）。
+        """
+        # Arrange — 閾値に達して無効化済みの行と、同じ feed_url を指す生きた行
+        feed_url = "https://revive-stale.example.com/feed.xml"
+        disabled = make_discovered_feed(
+            db_session,
+            domain="revive-stale.example.com",
+            status=DiscoveredFeedStatus.DISABLED,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=False,
+            consecutive_no_new_entries=MAX_CONSECUTIVE_NO_NEW_ENTRIES,
+        )
+        alive = make_discovered_feed(
+            db_session,
+            domain="blog.revive-stale.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+        )
+
+        # Act — 新着ありの結果を通す
+        record_feed_novelty(db_session, {feed_url: 3}, now=NOW)
+
+        # Assert — 無効化済みの行は status も enabled もカウンタも据え置き
+        db_session.refresh(disabled)
+        assert disabled.status == DiscoveredFeedStatus.DISABLED.value
+        assert disabled.enabled is False
+        assert disabled.consecutive_no_new_entries == MAX_CONSECUTIVE_NO_NEW_ENTRIES
+        assert disabled.last_new_entry_at is None
+        # 生きた行にだけ新着が記録される
+        db_session.refresh(alive)
+        assert alive.consecutive_no_new_entries == 0
+        assert alive.last_new_entry_at == NOW
+
     def test_ignores_a_feed_url_with_no_matching_row(self, db_session: Session) -> None:
         """受入基準: 対象の行が無い URL は黙って無視する（例外にしない）。"""
         # Act & Assert — 例外が出ないこと自体が期待
