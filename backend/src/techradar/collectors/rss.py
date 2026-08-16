@@ -179,4 +179,5 @@ class RssCollector:
             published_at=published_at,
             collector_name=self.name,
             source_hint=feed.name,
+            feed_url=feed.url,
         )
