@@ -237,7 +237,20 @@ git diff origin/main...HEAD --name-only | scripts/ai-harness/check-mr-scope.sh -
 
 条件を「テストのみ」ではなく「実装が無い」にしてある。#109 の MR は RED のテストだけだったが、テストと ADR だけ・テストとドキュメントだけ、という形でも同じ事故になる。実装の有無で見れば、この種を一様に捕まえられる。逆に、テストの変更を含まない MR (ドキュメントのみ、実装のみ) は対象外にした。「実装にテストが無い」ことも問題ではあるが、それはこの検査が扱う失敗とは別のものなので混ぜない。
 
-実装として数えるのは `backend/src/`、`backend/migrations/`、`frontend/src/`、`frontend/eslint-rules/`、`scripts/`。**テストか否かを先に見る** — 本リポジトリは `frontend/src/lib/api.test.ts` のようにテストを実装と同居させるため、実装として数えると「実装が入っている」と誤認して検査が素通りする。実装ファイルの置き場が増えたときは、判定側の一覧も足す (足し忘れるとテストが落ちる)。
+実装として数えるのは `backend/src/`、`backend/scripts/`、`backend/migrations/`、`backend/tests/`、`frontend/src/`、`frontend/eslint-rules/`、`frontend/*.ts`、`frontend/*.mts`、`scripts/`、`infra/`。**実装ファイルの置き場が増えたときは、判定側の一覧も足す** (足し忘れるとテストが落ちる)。
+
+**テストか否かを先に見る。** テストの判定はファイル名の規約 (`*.test.*` / `*.spec.*` / `test_*.py` / `*_test.py`) とテスト専用ディレクトリ (`__tests__/`、`test-utils/`、`__mocks__/`) だけで行い、**`backend/tests/` というディレクトリ名では判定しない**。理由は両方向にある。
+
+- 実装のディレクトリにテストが同居する。`frontend/src/lib/api.test.ts` や `frontend/src/test-utils/timeouts.ts` を実装として数えると、「実装が入っている」と誤認して検査が素通りする
+- テストのディレクトリに実装が同居する。`backend/tests/db_process_isolation.py`、`backend/tests/fake_worktree_roots.py`、`backend/tests/schema_parity.py`、`backend/tests/conftest.py` は、いずれもこの文書が名指しする判定ロジックそのものである。ディレクトリ名だけで test に倒すと、この種の実装の変更が「実装0件」に埋もれ、実装が入っている MR まで警告してしまう
+
+`backend/tests/test_foo.py` のような通常のテストは、ディレクトリより先に効くファイル名の規約で拾われるため引き続き test になる。
+
+`glab` の応答が想定外だったとき (認証切れ、404、非JSON) は、警告なしで素通りせず rc=2 で止まる。安全網が黙って壊れるのを防ぐため、`.changes` が配列であることを確認してから読む。
+
+#### check.sh には組み込まない
+
+この検査を `check.sh` のジョブへ入れると、TDD で RED の commit を打った時点から恒常的に警告が出る。常時出る警告は読まれなくなり、本来止めたい場面でも無視される — 派生元の鮮度検査 (下記) を見送ったのと同じ理由である。呼ぶのは MR を出す前と、マージする前の2箇所でよい。**後から「親切のつもりで」自動化しないこと。**
 
 #### 派生元の鮮度は検査しない
 

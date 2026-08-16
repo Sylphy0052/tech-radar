@@ -22,13 +22,24 @@
 # **テストか否かを先に見る。** 実装のディレクトリ配下にテストが置かれることがあり
 # （`frontend/src/lib/api.test.ts` のように実装と同居する形が本リポジトリの流儀）、
 # 実装として数えると「実装が入っている」と誤認してこの検査が素通りする。
+#
+# **テストの判定にディレクトリ名（`backend/tests/`）は使わない。** self review 指摘
+# （Issue #112 の MR !139）で分かったが、このディレクトリには判定ロジックそのもの
+# （`backend/tests/db_process_isolation.py` や `backend/tests/fake_worktree_roots.py`、
+# `backend/tests/schema_parity.py`。いずれも CLAUDE.md が名指しする実装）や
+# `conftest.py` が同居している。ディレクトリ名だけで test に倒すと、この種の実装の
+# 変更が「実装0件」に埋もれて見えなくなり、実装が入っている MR まで警告してしまう。
+# テストはファイル名の規約（*.test.* / *.spec.* / test_*.py / *_test.py）とテスト専用
+# ディレクトリ（__tests__/、test-utils/、__mocks__/）で判定し、`backend/tests/` は
+# 実装側のディレクトリ一覧に含める。`backend/tests/test_foo.py` のような通常のテスト
+# ファイルは、ディレクトリより先に効くファイル名の規約で拾われるため引き続き test になる。
 classify_changed_path() {
   local path="$1"
 
-  # テスト。ファイル名の規約（*.test.* / *.spec.* / test_*.py / *_test.py）と、
-  # テスト専用のディレクトリ（backend/tests/ と __tests__/）の両方を見る。
+  # テスト専用ディレクトリ。ファイル名がテストの命名規約に従っていなくてもテストとして
+  # 扱う（`frontend/src/test-utils/timeouts.ts` のようなヘルパーが実例）。
   case "$path" in
-    backend/tests/* | */__tests__/* | __tests__/*)
+    */__tests__/* | __tests__/* | */test-utils/* | */__mocks__/*)
       printf 'test'
       return 0
       ;;
@@ -41,9 +52,14 @@ classify_changed_path() {
       ;;
   esac
 
-  # 実装。ソースツリーと、実行される側のスクリプト。
+  # 実装。ソースツリー、実行される側のスクリプト、そして backend/tests/ 配下のうち
+  # テストの命名規約に合わないファイル。**上のテスト判定が先に効くことに依存する。**
+  # `frontend/*.ts` は `frontend/vitest.global-setup.test.ts` のようなテストも含む
+  # パターンだが、テスト判定が先に走るため誤って impl へ落ちることはない。
   case "$path" in
-    backend/src/* | backend/migrations/* | frontend/src/* | frontend/eslint-rules/* | scripts/*)
+    backend/src/* | backend/scripts/* | backend/migrations/* | backend/tests/* | \
+      frontend/src/* | frontend/eslint-rules/* | frontend/*.ts | frontend/*.mts | \
+      scripts/* | infra/*)
       printf 'impl'
       return 0
       ;;
@@ -76,10 +92,9 @@ _count_diff_scope() {
 # テストの変更を含まない MR（ドキュメントのみ、実装のみ）は対象外。「実装にテストが
 # 無い」ことも問題ではあるが、それはこの検査が扱う失敗とは別のものなので混ぜない。
 diff_lacks_implementation() {
-  local counts tests impls
+  local counts tests impls others
   counts="$(_count_diff_scope "$@")"
-  tests="${counts%% *}"
-  impls="$(printf '%s' "$counts" | cut -d' ' -f2)"
+  IFS=' ' read -r tests impls others <<< "$counts"
 
   [[ "$tests" -gt 0 && "$impls" -eq 0 ]]
 }
@@ -88,9 +103,7 @@ diff_lacks_implementation() {
 describe_diff_scope() {
   local counts tests impls others
   counts="$(_count_diff_scope "$@")"
-  tests="${counts%% *}"
-  impls="$(printf '%s' "$counts" | cut -d' ' -f2)"
-  others="${counts##* }"
+  IFS=' ' read -r tests impls others <<< "$counts"
 
   printf '変更 %s件: テスト %s件 / 実装 %s件 / その他 %s件' \
     "$#" "$tests" "$impls" "$others"

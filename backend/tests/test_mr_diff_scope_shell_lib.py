@@ -24,6 +24,12 @@ review は diff を読むが「diff に**無い**もの」は見ない。RED の
 - 「テストの変更があり、実装の変更が1つも無い」ときだけ警告になること。ドキュメント
   だけの MR や、実装を伴う MR では警告しない
 - Issue #109 と #111 の実際のファイル一覧で、前者が警告・後者が非警告になること
+
+`TestCheckMrScopeWrapper` はラッパー本体（`check-mr-scope.sh`）の統合テスト。
+self review（Issue #112 の MR !139）で、ラッパー側の glab/jq 呼び出しに2件の不具合
+が見つかった（`.changes` を持たない応答でのフェイルオープン、`--stdin` の末尾改行
+欠落）。どちらもライブラリ関数の単体テストだけでは検出できなかったため、ここで
+ラッパーを直接起動して固定する。
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LIB = _REPO_ROOT / "scripts" / "ai-harness" / "lib" / "mr-diff-scope.sh"
+_WRAPPER = _REPO_ROOT / "scripts" / "ai-harness" / "check-mr-scope.sh"
 
 _BASH = shutil.which("bash") or "/bin/bash"
 _SHELL_ARGV0 = "./test-entrypoint"
@@ -86,6 +93,7 @@ def _run_lib(snippet: str, *args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         env=dict(os.environ),
         check=False,
+        timeout=30,
     )
 
 
@@ -102,17 +110,31 @@ def _lacks_implementation(*paths: str) -> bool:
 
 
 class TestClassifyChangedPath:
-    """パスを「テスト / 実装 / その他」へ分ける。"""
+    """パスを「テスト / 実装 / その他」へ分ける。
+
+    テスト判定はファイル名の規約とテスト専用ディレクトリだけで行い、`backend/tests/`
+    というディレクトリ名では判定しない（self review 指摘、Issue #112）。理由は
+    `backend/tests/conftest.py` や `backend/tests/db_process_isolation.py` のように、
+    テストディレクトリに判定ロジックそのものが実装として同居しているため。ディレクトリ
+    名だけで test に倒すと、この種の実装ファイルの変更が「実装0件」に埋もれて見えなく
+    なり、実装が入っているのに警告してしまう（このリポジトリ自身が誤検知の実例）。
+    """
 
     @pytest.mark.parametrize(
         "path",
         [
             "backend/tests/test_collectors_service.py",
-            "backend/tests/conftest.py",
             "frontend/src/lib/api.test.ts",
             "frontend/src/app/page.test.tsx",
             "frontend/vitest.global-setup.test.ts",
             "frontend/eslint-rules/require-test-timeout.test.mjs",
+            # テスト専用ディレクトリ。ファイル名自体がテストの命名規約に従わなくても
+            # テストとして扱う（`test-utils/` 配下の実例）。
+            "frontend/src/test-utils/timeouts.ts",
+            "frontend/src/test-utils/next-navigation-test-context.tsx",
+            "frontend/src/components/__tests__/ArticleCard.test.tsx",
+            "__tests__/setup.ts",
+            "frontend/src/__mocks__/api.ts",
         ],
     )
     def test_classifies_test_files(self, path: str) -> None:
@@ -124,11 +146,24 @@ class TestClassifyChangedPath:
             "backend/src/techradar/collectors/service.py",
             "backend/src/techradar/db/models.py",
             "backend/migrations/versions/20260817_0f3a7c81b2d4_replace_stale.py",
+            # `backend/tests/` はディレクトリ名では判定しない。ファイル名がテストの
+            # 規約に合わないものは実装として数える（CLAUDE.md が「判定ロジックは
+            # ここにある」と名指しする2件を含む）。
+            "backend/tests/conftest.py",
+            "backend/tests/db_process_isolation.py",
+            "backend/tests/fake_worktree_roots.py",
+            "backend/tests/schema_parity.py",
+            "backend/scripts/cleanup_test_databases.py",
+            "backend/scripts/requeue_failed_jobs.py",
             "frontend/src/lib/api.ts",
             "frontend/src/components/features/ArticleCard.tsx",
             "frontend/eslint-rules/require-test-timeout.mjs",
+            "frontend/vitest.global-setup.ts",
+            "frontend/vitest.orphaned-coverage-dirs.ts",
+            "frontend/next.config.ts",
             "scripts/ai-harness/check.sh",
             "scripts/cleanup-test-databases.sh",
+            "infra/docker-compose.yml",
         ],
     )
     def test_classifies_implementation_files(self, path: str) -> None:
@@ -157,6 +192,18 @@ class TestClassifyChangedPath:
         """
         assert _classify("backend/src/techradar/test_something.py") == "test"
         assert _classify("frontend/src/lib/articles.test.ts") == "test"
+
+    def test_test_wins_over_frontend_extension_rule_for_paths_matching_both(
+        self,
+    ) -> None:
+        """`frontend/*.ts` は実装だが、テストの命名規約が先に効く。
+
+        `frontend/vitest.global-setup.ts` は実装、`frontend/vitest.global-setup.test.ts`
+        はテスト。拡張子ベースの実装判定とテストの命名規約が競合しうるため、この順序
+        依存を固定する。
+        """
+        assert _classify("frontend/vitest.global-setup.ts") == "impl"
+        assert _classify("frontend/vitest.global-setup.test.ts") == "test"
 
 
 class TestDiffLacksImplementation:
@@ -227,3 +274,130 @@ class TestDescribeDiffScope:
         assert result.returncode == 0, result.stderr
         assert "テスト 0件" in result.stdout
         assert "実装 0件" in result.stdout
+        assert "その他 0件" in result.stdout
+
+
+class TestCheckMrScopeWrapper:
+    """`check-mr-scope.sh` 本体の統合テスト（self review 指摘、Issue #112 の MR !139）。
+
+    ライブラリ関数の単体テストは「分類」と「判定」しか見ておらず、ラッパー側で
+    `glab api` の応答を読む部分は素通りしていた。ここでラッパーを直接起動し、次の
+    2件を固定する。
+
+    - `.changes` を持たない応答（認証エラー等）が来たときに、フェイルオープンせず
+      rc=2（判定できず）で止まること
+    - `--stdin` の入力に末尾改行が無くても、最終行を読み落とさないこと
+    """
+
+    def _run_wrapper(
+        self,
+        args: list[str],
+        *,
+        input_text: str | None = None,
+        bin_dir: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        if bin_dir is not None:
+            # PATH は丸ごと差し替えない。`jq` は本物を使わせる必要があるため、
+            # 偽の `glab` を置いたディレクトリを先頭に足すだけにする。
+            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        return subprocess.run(  # noqa: S603
+            [_BASH, str(_WRAPPER), *args],
+            input=input_text,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+            timeout=30,
+        )
+
+    def _write_fake_glab(self, tmp_path: Path, script_body: str) -> Path:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        glab = bin_dir / "glab"
+        glab.write_text(f"#!/usr/bin/env bash\n{script_body}\n", encoding="utf-8")
+        glab.chmod(0o755)
+        return bin_dir
+
+    def test_stdin_with_trailing_newline_warns(self) -> None:
+        result = self._run_wrapper(["--stdin"], input_text="backend/tests/test_only_red.py\n")
+        assert result.returncode == 1, result.stderr
+
+    def test_stdin_without_trailing_newline_warns(self) -> None:
+        """実測で欠落していた挙動。末尾改行が無いと最終行が消え、警告が出なかった。"""
+        result = self._run_wrapper(["--stdin"], input_text="backend/tests/test_only_red.py")
+        assert result.returncode == 1, result.stderr
+
+    def test_stdin_trailing_newline_does_not_change_the_count(self) -> None:
+        """末尾改行の有無で件数がずれないこと（片方だけ多く/少なく数えない）。"""
+        with_newline = self._run_wrapper(["--stdin"], input_text="backend/tests/test_only_red.py\n")
+        without_newline = self._run_wrapper(
+            ["--stdin"], input_text="backend/tests/test_only_red.py"
+        )
+        assert "変更 1件" in with_newline.stderr
+        assert "変更 1件" in without_newline.stderr
+
+    def test_stdin_issue_109_list_warns(self) -> None:
+        result = self._run_wrapper(["--stdin"], input_text="\n".join(_ISSUE_109_PATHS) + "\n")
+        assert result.returncode == 1, result.stderr
+
+    def test_stdin_issue_111_list_does_not_warn(self) -> None:
+        result = self._run_wrapper(["--stdin"], input_text="\n".join(_ISSUE_111_PATHS) + "\n")
+        assert result.returncode == 0, result.stderr
+
+    def test_stdin_empty_input_does_not_warn(self) -> None:
+        result = self._run_wrapper(["--stdin"], input_text="")
+        assert result.returncode == 0, result.stderr
+
+    @pytest.mark.parametrize(
+        "args",
+        [[], ["139", "extra"], ["not-a-number"]],
+        ids=["no-args", "two-args", "non-numeric-arg"],
+    )
+    def test_invalid_arguments_are_a_usage_error(self, args: list[str]) -> None:
+        result = self._run_wrapper(args, input_text="")
+        assert result.returncode == 2, result.stderr
+
+    def test_glab_success_is_parsed(self, tmp_path: Path) -> None:
+        bin_dir = self._write_fake_glab(
+            tmp_path,
+            "cat <<'JSON'\n"
+            '{"changes":[{"new_path":"backend/tests/test_collectors_feed_novelty.py"}]}\n'
+            "JSON",
+        )
+        result = self._run_wrapper(["139"], bin_dir=bin_dir)
+        assert result.returncode == 1, result.stderr
+
+    def test_glab_nonzero_exit_fails_closed(self, tmp_path: Path) -> None:
+        bin_dir = self._write_fake_glab(tmp_path, "echo 'boom' >&2\nexit 1")
+        result = self._run_wrapper(["139"], bin_dir=bin_dir)
+        assert result.returncode == 2, result.stderr
+
+    def test_glab_response_without_changes_field_fails_closed(self, tmp_path: Path) -> None:
+        """認証エラー等で `{"message": ...}` が返ってきたケース。
+
+        フェイルオープンしていた不具合の本体。`.changes` が無い応答でも
+        `jq -r '.changes[]?...'` は空文字を返すだけで exit 0 のため、以前の実装は
+        変更0件・rc=0（警告なし）のまま正常終了していた。
+        """
+        bin_dir = self._write_fake_glab(tmp_path, 'echo \'{"message":"404 Project Not Found"}\'')
+        result = self._run_wrapper(["139"], bin_dir=bin_dir)
+        assert result.returncode == 2, result.stderr
+
+    def test_glab_non_json_response_fails_closed(self, tmp_path: Path) -> None:
+        bin_dir = self._write_fake_glab(tmp_path, "echo 'not json at all'")
+        result = self._run_wrapper(["139"], bin_dir=bin_dir)
+        assert result.returncode == 2, result.stderr
+
+    def test_glab_path_with_embedded_newline_counts_as_one_file(self, tmp_path: Path) -> None:
+        """パスの抽出を NUL 区切りにした理由そのもの。改行を含むパスがコマンド置換や
+        改行区切りの読み取りだと2件に分裂し、内訳の件数がずれる。"""
+        bin_dir = self._write_fake_glab(
+            tmp_path,
+            "cat <<'JSON'\n"
+            r'{"changes":[{"new_path":"backend/tests/weird\nname.py"}]}'
+            "\n"
+            "JSON",
+        )
+        result = self._run_wrapper(["139"], bin_dir=bin_dir)
+        assert "変更 1件" in result.stderr, result.stderr

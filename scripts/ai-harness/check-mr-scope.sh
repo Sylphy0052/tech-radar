@@ -34,7 +34,9 @@ CHANGED_PATHS=()
 
 if [[ "$1" == "--stdin" ]]; then
   # 空行は捨てる。`git diff --name-only` の出力をそのまま流せるようにする。
-  while IFS= read -r line; do
+  # `|| [[ -n "$line" ]]` を付けて、末尾に改行の無い最後の行も拾う。`read` は
+  # 改行が来ないと非ゼロで終わるため、これが無いと最終行が黙って消える。
+  while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -n "$line" ]] && CHANGED_PATHS+=("$line")
   done
 else
@@ -43,13 +45,27 @@ else
   command -v glab >/dev/null 2>&1 || fail "glab が見つかりません（このリポジトリは gh ではなく glab を使います）"
   command -v jq >/dev/null 2>&1 || fail "jq が見つかりません"
 
+  # `2>/dev/null` は付けない。glab 自身のエラー（認証切れ・404・レート制限）が
+  # 見えなくなり、下の fail の汎用メッセージだけでは原因を診断できなくなるため。
+  RAW="$(glab api "projects/:id/merge_requests/${MR_IID}/changes")" \
+    || fail "MR !${MR_IID} の変更を取得できませんでした（glab api が非0で終了しました）"
+
+  # `.changes` が配列であることをプロセス置換の外で明示的に確認する。ここを飛ばすと、
+  # `{"message":"..."}` のような認証エラー応答や非JSONが来たときに jq が失敗しても
+  # プロセス置換の中で握り潰され、CHANGED_PATHS が空のまま rc=0（警告なし）で
+  # 正常終了してしまう（self review 指摘、Issue #112 の MR !139）。
+  printf '%s' "$RAW" | jq -e '.changes | type == "array"' >/dev/null \
+    || fail "MR !${MR_IID} の応答に .changes 配列がありません（glab のエラー応答や認証切れの可能性があります）: $(printf '%s' "$RAW" | head -c 200)"
+
   # `new_path` を見る。リネームや削除でも新しい側のパスで分類してよい（削除された
   # テストは「テストの変更」であり、実装が伴わないなら警告の対象に入る）。
-  RAW="$(glab api "projects/:id/merge_requests/${MR_IID}/changes" 2>/dev/null)" \
-    || fail "MR !${MR_IID} の変更を取得できませんでした"
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && CHANGED_PATHS+=("$line")
-  done < <(printf '%s' "$RAW" | jq -r '.changes[]?.new_path // empty')
+  #
+  # NUL 区切りで読む。改行を含むファイル名を挟むと、改行区切りの読み取りでは2件に
+  # 分裂して内訳の件数がずれる。コマンド置換（`$(...)`）は NUL を保持できないため、
+  # 抽出はプロセス置換のままにする（値の検証は上で済ませてあるので、ここは失敗しない）。
+  while IFS= read -r -d '' path; do
+    CHANGED_PATHS+=("$path")
+  done < <(printf '%s' "$RAW" | jq -j '.changes[] | (.new_path // empty) + "\u0000"')
 fi
 
 log "$(describe_diff_scope "${CHANGED_PATHS[@]+"${CHANGED_PATHS[@]}"}")"
