@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urljoin, urlsplit
@@ -87,6 +87,14 @@ MAX_CONSECUTIVE_FEED_FAILURES = 3
 # 読めないため、更新頻度の低い（数回に 1 回しか新着が無い）フィードを
 # 巻き込んで無効化しないよう、失敗より遥かに粘る値にしてある。
 MAX_CONSECUTIVE_EMPTY_FETCHES = 10
+
+# 発見済みフィードの「新着が出ない」無効化（Issue #109）で許容する連続回数の上限。
+# ここで数えるのは「エントリは配信したが、絞り込み（freshness / 重複排除 / 既存記事
+# 除外 / enqueue 済み除外）を通り抜けた新着が 1 件も無かった」回数。空配信の閾値
+# （`MAX_CONSECUTIVE_EMPTY_FETCHES` = 10）よりさらに大きく取る。既出記事だけを返す
+# こと自体は異常ではなく（更新の遅いフィード・巡回間隔が短い場合に普通に起きる）、
+# 配信そのものが止まったフィードは空配信の側が先に無効化するため。
+MAX_CONSECUTIVE_STALE_FETCHES = 20
 
 # ドメイン集計の対象にする UserArticle.origin。「実際に登録した記事のサイト」を
 # 見たいだけなので、関心スコア計算用の5経路のうち read_full/clicked は含めない
@@ -278,47 +286,25 @@ def record_feed_health(
     この3関数は変更しない（新しい status は増やさない、Issue #108 の設計判断）。
     """
     resolved_now = now or datetime.now(UTC)
-    rows_by_feed_url = _discovered_feeds_by_url(session, feed_results.keys())
-    for feed_url, result in feed_results.items():
-        rows = rows_by_feed_url.get(feed_url, ())
-        if not rows:
-            # 巡回中に行が消えた場合などに起こりうる。反映すべき対象が無いだけなので
-            # 他の URL の反映は続けるが、この分岐へ頻繁に入るのは巡回対象と
-            # `discovered_feeds` が乖離しているということなので、痕跡は残しておく
-            # （常駐監視も CI も持たないため、事後にログだけで追えるようにする）。
-            logger.debug("collectors.discovery.feed_health_row_missing feed_url=%s", feed_url)
+    for feed_url, result, row in _iter_live_feed_rows(
+        session, feed_results, missing_event="feed_health_row_missing"
+    ):
+        if result.succeeded:
+            row.consecutive_failures = 0
+            row.last_succeeded_at = resolved_now
+            _apply_empty_fetch_result(row, result, feed_url=feed_url)
             continue
-        for row in rows:
-            if row.status == DiscoveredFeedStatus.DISABLED.value:
-                # 既に無効化した行は巡回対象ではない（`load_enabled_discovered_feeds`
-                # は status=FOUND かつ enabled のみを返す）。ここへ来るのは、同じ
-                # feed_url を持つ別ドメインの行がまだ生きていて、その巡回結果が
-                # 相乗りしてくる場合だけ。取得していない行の成否を数える意味は無く、
-                # 放置するとカウンタが際限なく増え、無効化のログも巡回のたびに
-                # 出続ける。復活は再発見（`_apply_discovery_result`）が担う。
-                continue
 
-            if result.succeeded:
-                row.consecutive_failures = 0
-                row.last_succeeded_at = resolved_now
-                _apply_empty_fetch_result(row, result, feed_url=feed_url)
-                continue
-
-            row.consecutive_failures += 1
-            if row.consecutive_failures >= MAX_CONSECUTIVE_FEED_FAILURES:
-                row.status = DiscoveredFeedStatus.DISABLED.value
-                row.enabled = False
-                logger.info(
-                    "collectors.discovery.feed_disabled "
-                    "domain=%s feed_url=%s consecutive_failures=%d",
-                    row.domain,
-                    feed_url,
-                    row.consecutive_failures,
-                )
-    # 呼び出し側（`collectors.service`）が savepoint（`begin_nested`）で囲む前提
-    # だが、テストや直接呼び出しでも変更が即座に読めるよう明示的に flush する
-    # （`_upsert_discovered_feed` と同じ流儀）。
-    session.flush()
+        row.consecutive_failures += 1
+        if row.consecutive_failures >= MAX_CONSECUTIVE_FEED_FAILURES:
+            _disable_feed(row)
+            logger.info(
+                "collectors.discovery.feed_disabled domain=%s feed_url=%s consecutive_failures=%d",
+                row.domain,
+                feed_url,
+                row.consecutive_failures,
+            )
+    _flush_feed_updates(session)
 
 
 def _apply_empty_fetch_result(
@@ -335,8 +321,7 @@ def _apply_empty_fetch_result(
 
     row.consecutive_empty_fetches += 1
     if row.consecutive_empty_fetches >= MAX_CONSECUTIVE_EMPTY_FETCHES:
-        row.status = DiscoveredFeedStatus.DISABLED.value
-        row.enabled = False
+        _disable_feed(row)
         logger.info(
             "collectors.discovery.feed_disabled_empty "
             "domain=%s feed_url=%s consecutive_empty_fetches=%d",
@@ -344,6 +329,136 @@ def _apply_empty_fetch_result(
             feed_url,
             row.consecutive_empty_fetches,
         )
+
+
+@dataclass(frozen=True)
+class FeedNoveltyResult:
+    """1 フィードぶんの「新着が出たか」の巡回結果（Issue #109）。
+
+    `succeeded` と `entry_count` は `FeedFetchResult` と同じ意味（取得・パースの
+    成否と、絞り込み前の候補記事の件数）。`new_article_count` はそこへ
+    `collectors.service.collect_candidates` の絞り込み（`filter_recent` /
+    `_dedupe_by_normalized_url` / `_exclude_existing_articles` /
+    `_exclude_already_queued`）を通した後に残った件数、つまり実際に新着として
+    積まれた件数を表す。
+
+    `FeedFetchResult` を拡張せず別の型にしてあるのは、値が確定する時点が違う
+    ため。`FeedFetchResult` はコレクターが巡回した時点で確定するが、絞り込みは
+    その後段（DB を見る処理）で行われる。コレクターは DB を知らないままにする
+    という Issue #105 の設計判断を崩さないよう、絞り込み後の件数は
+    コレクターの結果型には持たせない。
+    """
+
+    succeeded: bool
+    entry_count: int
+    new_article_count: int
+
+
+def record_feed_novelty(session: Session, feed_results: dict[str, FeedNoveltyResult]) -> None:
+    """新着が出ないフィードを検出し `discovered_feeds` へ反映する（Issue #109）。
+
+    `record_feed_health`（#105 の連続失敗・#108 の連続空配信）とは列もイベント名も
+    分ける。あちらが見る `FeedFetchResult.entry_count` は絞り込み前の件数のため、
+    「毎回同じ既出記事だけを返すフィード」は `entry_count > 0` となって捕まらず、
+    実質的な新着ゼロのまま `MAX_DISCOVERED_FEEDS_TOTAL` の枠を専有し続ける。
+    ここではその分を `consecutive_stale_fetches` に別の閾値
+    （`MAX_CONSECUTIVE_STALE_FETCHES`）で数える。
+
+    数えるのは「取得・パースに成功し、かつエントリを 1 件以上配信した」回だけに
+    限る。判定を #105 / #108 と重ねないため:
+
+    - 取得・パースに失敗した回は新着の有無が分からない。カウンタへ触れない
+      （増やしも 0 へ戻しもしない）。失敗が続けば `consecutive_failures` が先に
+      閾値へ達する
+    - エントリ自体が 0 件だった回は `consecutive_empty_fetches` の担当
+      （#108）。同じ事象を二重に数えないよう、ここでは触れない
+
+    そのうえで、絞り込み後に新着が 1 件でも残っていれば 0 へ戻し、0 件なら 1 増やして
+    `MAX_CONSECUTIVE_STALE_FETCHES` に達した時点で `status=DISABLED` /
+    `enabled=False` にする。枠が空く仕組み・再発見で復活する仕組み・同じ
+    `feed_url` を持つ行をすべて更新する理由・無効化済みの行へ触れない理由は
+    `record_feed_health` の docstring と `_iter_live_feed_rows` を参照。
+
+    「一定期間にわたって新着が出ていない」の「期間」は連続した巡回の回数で数える。
+    巡回は UI の実行ボタンからの手動起動で実時間の間隔が読めないため、壁時計の
+    経過時間では判定できない（常駐スケジューラを置かないというプロジェクトの制約）。
+    そのため `record_feed_health` と違い、この関数は時刻を受け取らない。
+    """
+    for feed_url, result, row in _iter_live_feed_rows(
+        session, feed_results, missing_event="feed_novelty_row_missing"
+    ):
+        if not result.succeeded or result.entry_count <= 0:
+            continue
+
+        if result.new_article_count > 0:
+            row.consecutive_stale_fetches = 0
+            continue
+
+        row.consecutive_stale_fetches += 1
+        if row.consecutive_stale_fetches >= MAX_CONSECUTIVE_STALE_FETCHES:
+            _disable_feed(row)
+            logger.info(
+                "collectors.discovery.feed_disabled_stale "
+                "domain=%s feed_url=%s consecutive_stale_fetches=%d",
+                row.domain,
+                feed_url,
+                row.consecutive_stale_fetches,
+            )
+    _flush_feed_updates(session)
+
+
+def _disable_feed(row: DiscoveredFeed) -> None:
+    """行を巡回対象から外す（Issue #105, #108, #109 の無効化に共通）。
+
+    無効化の理由（連続失敗・連続空配信・連続新着ゼロ）はログのイベント名で
+    区別するため、ログは呼び出し側に置く。`status` と `enabled` は必ず対で
+    倒す（`load_enabled_discovered_feeds` は両方を見る）。
+    """
+    row.status = DiscoveredFeedStatus.DISABLED.value
+    row.enabled = False
+
+
+def _flush_feed_updates(session: Session) -> None:
+    """巡回結果の反映を flush する（Issue #105, #108, #109 に共通）。
+
+    呼び出し側（`collectors.service`）が savepoint（`begin_nested`）で囲む前提
+    だが、テストや直接呼び出しでも変更が即座に読めるよう明示的に flush する
+    （`_upsert_discovered_feed` と同じ流儀）。
+    """
+    session.flush()
+
+
+def _iter_live_feed_rows[ResultT](
+    session: Session, feed_results: Mapping[str, ResultT], *, missing_event: str
+) -> Iterator[tuple[str, ResultT, DiscoveredFeed]]:
+    """巡回結果と、反映先の `discovered_feeds` の行の組を順に返す（Issue #105, #108, #109）。
+
+    `record_feed_health` と `record_feed_novelty` に共通する走査。結果の型は
+    どちらでもよいので、行の絞り込みだけを担い、カウンタの扱いは呼び出し側に残す。
+
+    対象の行が見つからない `feed_url`（巡回中に行が消えた場合など）は黙って飛ばす。
+    反映すべき対象が無いだけなので他の URL の反映は続けるが、この分岐へ頻繁に
+    入るのは巡回対象と `discovered_feeds` が乖離しているということなので、痕跡は
+    残しておく（常駐監視も CI も持たないため、事後にログだけで追えるようにする）。
+    どちらの経路で起きたかを区別できるよう、イベント名は `missing_event` で受ける。
+
+    既に無効化した行も飛ばす。無効化済みの行は巡回対象ではない
+    （`load_enabled_discovered_feeds` は status=FOUND かつ enabled のみを返す）。
+    ここへ来るのは、同じ feed_url を持つ別ドメインの行がまだ生きていて、その巡回
+    結果が相乗りしてくる場合だけ。取得していない行の結果を数える意味は無く、
+    放置するとカウンタが際限なく増え、無効化のログも巡回のたびに出続ける。
+    復活は再発見（`_apply_discovery_result`）が担う。
+    """
+    rows_by_feed_url = _discovered_feeds_by_url(session, feed_results.keys())
+    for feed_url, result in feed_results.items():
+        rows = rows_by_feed_url.get(feed_url, ())
+        if not rows:
+            logger.debug("collectors.discovery.%s feed_url=%s", missing_event, feed_url)
+            continue
+        for row in rows:
+            if row.status == DiscoveredFeedStatus.DISABLED.value:
+                continue
+            yield feed_url, result, row
 
 
 def _discovered_feeds_by_url(
