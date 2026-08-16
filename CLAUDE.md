@@ -147,7 +147,9 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 3. **着手時のIssue更新** — ラベルを `Todo` → `InProgress` へ付け替え、実装計画 (受入基準・変更対象・想定リスク) をIssueにコメント追記する。ブランチ作成前後のどちらでもよいが、実装開始前に完了させる
 4. **ブランチ作成** — `gitlab-branch` でIssueを元に `<type>/<IID>/<slug>` を作成する (worktree隔離が既定)
 5. **実装** — `implement` (TDD: RED→GREEN→REFACTOR) → `gitlab-commit`
-6. **MR** — `gitlab-mr-flow` で MR作成 (Draft) → self review (`gitlab-mr-review` self) → 指摘修正 (`gitlab-mr-address`) → merge。マージ条件は下記「自己マージ許可」に従う
+6. **MR** — `gitlab-mr-flow` で MR作成 (Draft) → self review (`gitlab-mr-review` self) → 指摘修正 (`gitlab-mr-address`) → **diff と受入基準の突合** → merge。マージ条件は下記「自己マージ許可」に従う
+
+   マージする前に、**MR の diff が Issue の受入基準を満たしているか**を目で確かめる。self review は diff の中身を読むが、diff に**無い**ものは見ない。TDD で RED と GREEN を別 commit にしたときは、両方が同じ MR の diff に入っていることを確認する (`git diff origin/main...HEAD --stat` で足りる)。機械的な補助として `scripts/ai-harness/check-mr-scope.sh <MR_IID>` を用意してある。取りこぼした実例と、この検査が何を見て何を見ないかは下記「MR の diff に実装が入っていないことがある」に書く
 7. **終了時の更新** — `gitlab-cleanup` で Issue を `Done` + close、`docs/mr/` `docs/issue/` の移動、ブランチ/worktree掃除まで実行する。親ロードマップIssue (`label=roadmap`) のチェック項目も `gitlab-roadmap update` で更新する
 8. **セッション終了の明示** — cleanup 完了後、以下3点を必ず出力してから応答を終える。黙って次の作業へ進まない
    - **セッション終了**であることを明示する (「1サイクル完了、セッション終了」と書く)
@@ -181,6 +183,7 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 グローバル規約の「MR自己マージ禁止」は**本リポジトリでは適用しない**。以下を満たせば作成者自身が `glab mr merge <IID> --remove-source-branch` を実行してよい (理由: 1名運用でレビュアーが不在。承認待ちと冷却期間が無意味な遅延にしかならない)。
 
 - [ ] `gitlab-mr-review` skill の self モードを実行済みで、CRITICAL/HIGH の指摘がゼロ
+- [ ] MR の diff が Issue の受入基準を満たしている (`check-mr-scope.sh` が警告したときは、意図した追補かどうかを確認済み)
 
 上記を満たせば即マージする。以下のグローバル要件は本リポジトリでは**撤廃**する:
 
@@ -205,6 +208,53 @@ override はマージ主体と承認要件のみ。以下は**引き続き強制
 - `glab` CLI 使用 (`gh` 禁止)
 
 ## 注意点 (Gotcha)
+
+### MR の diff に実装が入っていないことがある (Issue #109, #111, #112)
+
+Issue #109 では、RED のテスト404行だけを含む MR が `Closes #109` 付きで main へマージされ、Issue が close された。GREEN の実装は書けていたが、MR を作ったブランチの派生元が RED commit の時点のままだったため diff に入らなかった。main は pytest の収集段階で落ちる状態になり、誰も気付かないまま残った (Issue #111 で直した)。
+
+**既存の仕組みは、どれもこれを見ていない。**
+
+- **commit 前の `check.sh` 自動実行は廃止済み** (Issue #76)。仮に走っていても、RED のテストだけを含むブランチでは落ちるため、緑にするには「実装を足す」か「テストを消す」しかない。実際にはブランチ上に実装があって緑だった。緑だったのはブランチであり、マージされたのは diff である
+- **CI も停止済み** (Issue #82)。マージ後の main で pytest を回す機会が無い
+- **`gitlab-mr-review` の self review は diff を読むが、diff に無いものは見ない。** RED のテストだけの diff は、テスト単体としては整合しているため指摘に上がらない
+- **`Closes #<IID>` は diff の中身を検査しない。** Issue は機械的に close される
+
+つまり「ブランチでは緑 → MR の diff からは実装が抜けている → 誰も見ない → Issue が close される」という経路が、どこにも引っかからずに通る。
+
+#### 機械的な検査 (Issue #112)
+
+`scripts/ai-harness/check-mr-scope.sh` が、MR の変更ファイル一覧から「テストの変更があり、実装の変更が1つも無い」状態を警告する。
+
+```bash
+scripts/ai-harness/check-mr-scope.sh <MR_IID>       # glab で変更ファイルを取る
+git diff origin/main...HEAD --name-only | scripts/ai-harness/check-mr-scope.sh --stdin   # MR を作る前でも使える
+```
+
+終了コードは 0 (対象外または実装あり) / 1 (警告) / 2 (判定できず)。判定の本体は [scripts/ai-harness/lib/mr-diff-scope.sh](scripts/ai-harness/lib/mr-diff-scope.sh) にあり、テストは [backend/tests/test_mr_diff_scope_shell_lib.py](backend/tests/test_mr_diff_scope_shell_lib.py)。
+
+**1 は拒否ではなく警告である。** テストの追補だけを行う正当な MR でも 1 になる。意図した追補ならそのまま進めてよい。止めたいのは「実装が diff に入らないまま Issue が close される」ことであり、そのために人が一度目を通す機会を作るのが目的。
+
+条件を「テストのみ」ではなく「実装が無い」にしてある。#109 の MR は RED のテストだけだったが、テストと ADR だけ・テストとドキュメントだけ、という形でも同じ事故になる。実装の有無で見れば、この種を一様に捕まえられる。逆に、テストの変更を含まない MR (ドキュメントのみ、実装のみ) は対象外にした。「実装にテストが無い」ことも問題ではあるが、それはこの検査が扱う失敗とは別のものなので混ぜない。
+
+実装として数えるのは `run.sh`、`backend/src/`、`backend/scripts/`、`backend/migrations/`、`backend/tests/`、`backend/config/`、`frontend/src/`、`frontend/eslint-rules/`、`frontend/` 直下の `*.ts`/`*.mts`/`*.mjs`、`scripts/`、`infra/`。`backend/config/` (収集とスコアリングの挙動を実行時に左右する設定データ) はコードと同様に振る舞いを決めるため実装として数える。**実装ファイルの置き場が増えたときは、判定側の一覧も足す** (足し忘れるとテストが落ちる — `git ls-files` の全件を分類し「other」に落ちたパスが許可リストの範囲に収まっているかを確かめる回帰テストが [backend/tests/test_mr_diff_scope_shell_lib.py](backend/tests/test_mr_diff_scope_shell_lib.py) にあり、実際に `run.sh` の一覧漏れを検知できることを self review 対応で確認済み)。
+
+**テストか否かを先に見る。** テストの判定はファイル名の規約 (`*.test.*` / `*.spec.*` / `test_*.py` / `*_test.py`) とテスト専用ディレクトリ (`__tests__/`、`test-utils/`、`__mocks__/`) だけで行い、**`backend/tests/` というディレクトリ名では判定しない**。理由は両方向にある。
+
+- 実装のディレクトリにテストが同居する。`frontend/src/lib/api.test.ts` や `frontend/src/test-utils/timeouts.ts` を実装として数えると、「実装が入っている」と誤認して検査が素通りする
+- テストのディレクトリに実装が同居する。`backend/tests/db_process_isolation.py`、`backend/tests/fake_worktree_roots.py`、`backend/tests/schema_parity.py`、`backend/tests/conftest.py` は、いずれもこの文書が名指しする判定ロジックそのものである。ディレクトリ名だけで test に倒すと、この種の実装の変更が「実装0件」に埋もれ、実装が入っている MR まで警告してしまう
+
+`backend/tests/test_foo.py` のような通常のテストは、ディレクトリより先に効くファイル名の規約で拾われるため引き続き test になる。
+
+`glab` の応答が想定外だったとき (認証切れ、404、非JSON、`.changes` の要素が想定外の形、差分が大きすぎて GitLab 側で切り詰められる `overflow: true`) は、警告なしで素通りせず rc=2 で止まる。安全網が黙って壊れるのを防ぐため、`.changes` が配列であることを確認してから読み、抽出そのものの失敗も一時ファイル経由で捕まえる。
+
+#### check.sh には組み込まない
+
+この検査を `check.sh` のジョブへ入れると、TDD で RED の commit を打った時点から恒常的に警告が出る。常時出る警告は読まれなくなり、本来止めたい場面でも無視される — 派生元の鮮度検査 (下記) を見送ったのと同じ理由である。呼ぶのは MR を出す前と、マージする前の2箇所でよい。**後から「親切のつもりで」自動化しないこと。**
+
+#### 派生元の鮮度は検査しない
+
+「ブランチの派生元が main の先端かどうか」を検査する案は見送った。main が進むたびに偽になるため、複数の作業を並行させれば正当な MR でも日常的に「古い派生元」と言われる。常時出る警告は読まれなくなり、上の警告まで一緒に無視される。#109 の派生元のずれは原因ではあるが、結果として現れた「実装が diff に無い」を上の検査が捕まえるので、これ無しでも同じ失敗は止まる。
 
 ### セッション間で着手が衝突する (Issue #68, #69)
 
