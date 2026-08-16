@@ -17,23 +17,29 @@ review は diff を読むが「diff に**無い**もの」は見ない。RED の
 `check-mr-scope.sh` 側に置き、ここでは文字列だけを受け取る。外部コマンドが要ると
 テストが実際の MR やネットワークに依存してしまうため。
 
-固定するのは次の3つ。
+固定するのは次の4つ。
 
 - パスの分類（テスト / 実装 / その他）。実装ファイルの置き場が増えたときに、判定側の
   一覧が追随していなければここが落ちる
 - 「テストの変更があり、実装の変更が1つも無い」ときだけ警告になること。ドキュメント
   だけの MR や、実装を伴う MR では警告しない
 - Issue #109 と #111 の実際のファイル一覧で、前者が警告・後者が非警告になること
+- `git ls-files` の全件を分類し、「other」に落ちたパスが許可リストの範囲に収まって
+  いること（`TestAllTrackedFilesClassifyAsExpected`）。self review 指摘（Issue #112
+  の MR !139 の2巡目）で判明したとおり、上の固定のフィクスチャだけでは
+  `run.sh` のような実装ファイルの欠落を検知できなかった
 
 `TestCheckMrScopeWrapper` はラッパー本体（`check-mr-scope.sh`）の統合テスト。
-self review（Issue #112 の MR !139）で、ラッパー側の glab/jq 呼び出しに2件の不具合
-が見つかった（`.changes` を持たない応答でのフェイルオープン、`--stdin` の末尾改行
-欠落）。どちらもライブラリ関数の単体テストだけでは検出できなかったため、ここで
-ラッパーを直接起動して固定する。
+self review（Issue #112 の MR !139、1巡目と2巡目）で、ラッパー側の glab/jq 呼び出し
+に複数の不具合が見つかった（`.changes` を持たない応答・想定外の形の要素・
+`overflow` でのフェイルオープン、`--stdin` の末尾改行欠落・CRLF での誤分類）。
+いずれもライブラリ関数の単体テストだけでは検出できなかったため、ここでラッパーを
+直接起動して固定する。
 """
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import shlex
 import shutil
@@ -164,6 +170,15 @@ class TestClassifyChangedPath:
             "scripts/ai-harness/check.sh",
             "scripts/cleanup-test-databases.sh",
             "infra/docker-compose.yml",
+            # self review 指摘（Issue #112 の MR !139 の2巡目）で判明した欠落。
+            # `git ls-files` の全件を分類する網羅 sweep でこれらが「other」に落ちていた。
+            "run.sh",
+            "frontend/eslint.config.mjs",
+            "frontend/postcss.config.mjs",
+            "backend/config/dedup.yaml",
+            "backend/config/feeds.yaml",
+            "backend/config/scoring.yaml",
+            "backend/config/sources.yaml",
         ],
     )
     def test_classifies_implementation_files(self, path: str) -> None:
@@ -204,6 +219,25 @@ class TestClassifyChangedPath:
         """
         assert _classify("frontend/vitest.global-setup.ts") == "impl"
         assert _classify("frontend/vitest.global-setup.test.ts") == "test"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "frontend/deep/nested/file.ts",
+            "frontend/deep/nested/file.mts",
+            "frontend/deep/nested/file.mjs",
+        ],
+    )
+    def test_frontend_top_level_extension_rule_does_not_cross_directories(self, path: str) -> None:
+        """`frontend/*.ts` 系の拡張子ルールは `frontend/` 直下にしか効かない。
+
+        `case` の `*` は `/` を跨ぐため、以前は `frontend/*.ts` が
+        `frontend/deep/nested/file.ts` にも一致していた（self review 指摘、
+        Issue #112 の MR !139 の2巡目、実測確認済み）。意図は `frontend/` 直下の
+        トップレベルファイル（`next.config.ts` 等）だけを impl として拾うことなので、
+        ネストしたパスは「other」へ落ちる（他の impl パターンにも一致しないため）。
+        """
+        assert _classify(path) == "other"
 
 
 class TestDiffLacksImplementation:
@@ -281,12 +315,23 @@ class TestCheckMrScopeWrapper:
     """`check-mr-scope.sh` 本体の統合テスト（self review 指摘、Issue #112 の MR !139）。
 
     ライブラリ関数の単体テストは「分類」と「判定」しか見ておらず、ラッパー側で
-    `glab api` の応答を読む部分は素通りしていた。ここでラッパーを直接起動し、次の
-    2件を固定する。
+    `glab api` の応答を読む部分は素通りしていた。ここでラッパーを直接起動し、次を
+    固定する。
+
+    1巡目の指摘:
 
     - `.changes` を持たない応答（認証エラー等）が来たときに、フェイルオープンせず
       rc=2（判定できず）で止まること
     - `--stdin` の入力に末尾改行が無くても、最終行を読み落とさないこと
+
+    2巡目の指摘（両方のレビュー視点が一致して指摘）:
+
+    - `.changes` の要素が想定外の形（文字列が混在している等）でも、フェイルオープン
+      せず rc=2 で止まること。以前はプロセス置換の中で `jq` の失敗が握り潰されて
+      いた
+    - GitLab 側で差分が切り詰められた応答（`overflow: true`）を rc=2 で止めること。
+      テストファイルだけが切り詰められると tests=0 になり、無警告方向へ倒れる
+    - `--stdin` に CRLF が混ざっていても、末尾の CR で誤分類しないこと
     """
 
     def _run_wrapper(
@@ -401,3 +446,145 @@ class TestCheckMrScopeWrapper:
         )
         result = self._run_wrapper(["139"], bin_dir=bin_dir)
         assert "変更 1件" in result.stderr, result.stderr
+
+    def test_glab_changes_with_non_object_elements_fails_closed(self, tmp_path: Path) -> None:
+        """`.changes` の要素に文字列が混じっているケース（実測で再現）。
+
+        以前はプロセス置換の中で `.new_path` の参照に失敗しても親シェルへ伝わらず、
+        CHANGED_PATHS が空のまま rc=0（警告なし）で正常終了していた。
+        """
+        bin_dir = self._write_fake_glab(tmp_path, 'echo \'{"changes":["a","b"]}\'')
+        result = self._run_wrapper(["139"], bin_dir=bin_dir)
+        assert result.returncode == 2, result.stderr
+
+    def test_glab_changes_with_mixed_valid_and_invalid_elements_fails_closed(
+        self, tmp_path: Path
+    ) -> None:
+        """壊れた要素の後ろにある正当な要素が黙って欠落するケース（実測で再現）。
+
+        `[{"new_path":"backend/tests/test_a.py"},"bad",{"new_path":"backend/src/x.py"}]`
+        のような入力では、以前は `bad` より後ろの `backend/src/x.py`（実装ファイル）が
+        抽出から欠け、実装が入っているのに誤って rc=1 の警告が出ていた。
+        """
+        bin_dir = self._write_fake_glab(
+            tmp_path,
+            "cat <<'JSON'\n"
+            '{"changes":[{"new_path":"backend/tests/test_a.py"},"bad",'
+            '{"new_path":"backend/src/x.py"}]}\n'
+            "JSON",
+        )
+        result = self._run_wrapper(["139"], bin_dir=bin_dir)
+        assert result.returncode == 2, result.stderr
+
+    def test_glab_overflow_response_fails_closed(self, tmp_path: Path) -> None:
+        """GitLab の changes API は大きな MR で差分を切り詰めることがある。
+
+        `overflow: true` を見逃すと、テストファイルだけが切り詰められたときに
+        tests=0 となり、この検査自体が無警告方向でスキップされてしまう。
+        """
+        bin_dir = self._write_fake_glab(tmp_path, 'echo \'{"overflow":true,"changes":[]}\'')
+        result = self._run_wrapper(["139"], bin_dir=bin_dir)
+        assert result.returncode == 2, result.stderr
+
+    def test_glab_uses_old_path_when_new_path_is_absent(self, tmp_path: Path) -> None:
+        """削除された要素のように `new_path` が無い場合、`old_path` へ落ちる。
+
+        `.new_path // empty` のままだと、`new_path` を持たない要素が件数から
+        黙って消える。
+        """
+        bin_dir = self._write_fake_glab(
+            tmp_path,
+            "cat <<'JSON'\n"
+            '{"changes":[{"old_path":"backend/tests/test_removed.py","new_path":null}]}\n'
+            "JSON",
+        )
+        result = self._run_wrapper(["139"], bin_dir=bin_dir)
+        assert "変更 1件" in result.stderr, result.stderr
+        assert result.returncode == 1, result.stderr
+
+    def test_stdin_crlf_line_ending_is_stripped(self) -> None:
+        """末尾 CR を残したまま分類すると誤って実装扱いになる（実測で再現）。
+
+        CRLF のまま `classify_changed_path` へ渡すと `test_*.py` の命名規約に
+        一致しなくなり、`backend/tests/*` の実装パターンへ落ちてしまう。
+        """
+        result = self._run_wrapper(["--stdin"], input_text="backend/tests/test_only_red.py\r\n")
+        assert result.returncode == 1, result.stderr
+
+    def test_stdin_crlf_line_ending_does_not_change_the_count(self) -> None:
+        lf_result = self._run_wrapper(["--stdin"], input_text="backend/tests/test_only_red.py\n")
+        crlf_result = self._run_wrapper(
+            ["--stdin"], input_text="backend/tests/test_only_red.py\r\n"
+        )
+        assert "変更 1件" in lf_result.stderr
+        assert "変更 1件" in crlf_result.stderr
+
+
+# 「other」として許容するパスのパターン。個別のファイル名を延々と並べず、種別で持つ。
+# `fnmatch` の `*` は `/` を跨いでマッチする（bash の `case` と異なる）ため、
+# ネストした階層も1パターンで拾える（例: "docs/*" は "docs/adr/0001-x.md" にも一致）。
+#
+# ここに無いパターンへ「other」が落ちたら、実装ファイルの置き場が増えたのに
+# `classify_changed_path` の一覧が追随していない可能性がある。その場合はテスト側
+# ではなく `mr-diff-scope.sh` の impl 一覧を直す。逆に、正当な非実装ファイル
+# （新しい設定ファイルの種類等）であれば、ここへパターンを足す。
+_ALLOWED_OTHER_PATTERNS = (
+    "docs/*",  # ドキュメント（ADR 含む）
+    "*.md",  # リポジトリ直下・サブディレクトリの Markdown
+    "*.toml",  # 依存管理（pyproject.toml 等）
+    "*.json",  # 依存管理・生成物（package.json、tsconfig.json、openapi.json 等）
+    "*.lock",  # 依存管理（uv.lock、package-lock.json は *.json 側で拾う）
+    ".*",  # リポジトリ直下のドットファイル（.gitignore、.secrets.baseline 等）
+    "*/.*",  # サブディレクトリのドットファイル（backend/.python-version 等）
+    "backend/alembic.ini",  # Alembic の設定ファイル
+)
+
+
+class TestAllTrackedFilesClassifyAsExpected:
+    """`git ls-files` の全件を分類し、「other」に落ちたパスの妥当性を固定する。
+
+    CLAUDE.md は「実装ファイルの置き場が増えたときは、判定側の一覧も足す
+    （足し忘れるとテストが落ちる）」と書いていたが、self review 指摘（Issue #112 の
+    MR !139 の2巡目）で判明したとおり、それまでのテストは固定のフィクスチャだけを
+    見ており、実リポジトリを横断する網羅チェックが無かった。実際に `run.sh` の
+    実装漏れはどのテストも落とさなかった（other 4種の欠落も同様）。
+
+    ここでリポジトリの全追跡ファイルを分類し、「other」に落ちたパスが
+    `_ALLOWED_OTHER_PATTERNS` のいずれかに合致することを確かめる。合致しなければ、
+    そのパスが「新しい実装ファイルの置き場」なのか「許可リストへ足すべき設定/
+    ドキュメント」なのかを人が判断する必要がある、という失敗メッセージを出す。
+
+    `git ls-files` を呼ぶためリポジトリの外では動かない。`git` が使えない環境
+    （worktree の外や git 未導入の環境）では判定できないため skip する。
+    """
+
+    def _tracked_files(self) -> list[str]:
+        try:
+            result = subprocess.run(
+                ["git", "ls-files"],  # noqa: S607
+                cwd=_REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            pytest.skip(f"git ls-files を実行できませんでした: {exc}")
+        paths = [line for line in result.stdout.splitlines() if line]
+        if not paths:
+            pytest.skip("git ls-files が空を返しました（リポジトリの外の可能性があります）")
+        return paths
+
+    def test_other_classifications_match_the_allow_list(self) -> None:
+        unexpected = [
+            path
+            for path in self._tracked_files()
+            if _classify(path) == "other"
+            and not any(fnmatch.fnmatch(path, pattern) for pattern in _ALLOWED_OTHER_PATTERNS)
+        ]
+        assert unexpected == [], (
+            "次のパスが「other」に分類されましたが、_ALLOWED_OTHER_PATTERNS の"
+            "どのパターンにも合致しません。実装ファイルの置き場が増えたなら"
+            "classify_changed_path の impl 一覧へ、正当な非実装ファイルなら"
+            f"_ALLOWED_OTHER_PATTERNS へ足してください: {unexpected}"
+        )

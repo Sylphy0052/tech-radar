@@ -56,14 +56,39 @@ classify_changed_path() {
   # テストの命名規約に合わないファイル。**上のテスト判定が先に効くことに依存する。**
   # `frontend/*.ts` は `frontend/vitest.global-setup.test.ts` のようなテストも含む
   # パターンだが、テスト判定が先に走るため誤って impl へ落ちることはない。
+  #
+  # `run.sh`（CLAUDE.md が名指しする主要開発コマンド）、`backend/config/*`（収集と
+  # スコアリングの挙動を実行時に左右する設定データであり、コードと同様に振る舞いを
+  # 決める）を足す。self review 指摘（Issue #112 の MR !139）で、`git ls-files` の
+  # 全件を分類する網羅 sweep によりこれらの欠落が判明した。
   case "$path" in
-    backend/src/* | backend/scripts/* | backend/migrations/* | backend/tests/* | \
-      frontend/src/* | frontend/eslint-rules/* | frontend/*.ts | frontend/*.mts | \
+    run.sh | \
+      backend/src/* | backend/scripts/* | backend/migrations/* | backend/tests/* | \
+      backend/config/* | \
+      frontend/src/* | frontend/eslint-rules/* | \
       scripts/* | infra/*)
       printf 'impl'
       return 0
       ;;
   esac
+
+  # frontend/ 直下のトップレベルファイル（`next.config.ts`、`eslint.config.mjs`、
+  # `postcss.config.mjs` など）。
+  #
+  # 以前は上の `case` に `frontend/*.ts | frontend/*.mts` を含めていたが、`case` の
+  # `*` は `/` を跨ぐため `frontend/*.ts` は `frontend/deep/nested/file.ts` にも一致
+  # してしまう（self review 指摘、Issue #112 の MR !139 の2巡目、実測確認済み）。
+  # 現状は `frontend/src/*` と `frontend/eslint-rules/*` が先に同じ impl を返すため
+  # 実害は無いが、将来 `frontend/e2e/` のようなディレクトリができたときに意図せず
+  # impl へ倒れる。`case` では「スラッシュが1つだけ」を書けないため、`[[ ]]` で
+  # 「frontend/ 直下に一致し、かつさらに深い階層には一致しない」ことを明示する。
+  # `.mjs` も同様の理由で `case` から外し、ここへ合流させた。
+  if { [[ "$path" == frontend/*.ts && "$path" != frontend/*/* ]] || \
+       [[ "$path" == frontend/*.mts && "$path" != frontend/*/* ]] || \
+       [[ "$path" == frontend/*.mjs && "$path" != frontend/*/* ]]; }; then
+    printf 'impl'
+    return 0
+  fi
 
   # それ以外（docs/、リポジトリ直下の Markdown、各種の設定ファイル）。
   printf 'other'
@@ -96,7 +121,14 @@ diff_lacks_implementation() {
   counts="$(_count_diff_scope "$@")"
   IFS=' ' read -r tests impls others <<< "$counts"
 
-  [[ "$tests" -gt 0 && "$impls" -eq 0 ]]
+  # 先例（`scripts/ai-harness/lib/machine-load.sh` の `machine_is_congested`）に
+  # 合わせて `return 0` / `return 1` を明示する。`[[ ... ]]` を関数の最後の文にして
+  # その終了コードへ暗黙に委ねる形は、呼び出し側から見て「この関数は真偽を返す」と
+  # 読み取りにくい（self review 指摘、Issue #112 の MR !139 の2巡目）。
+  if [[ "$tests" -gt 0 && "$impls" -eq 0 ]]; then
+    return 0
+  fi
+  return 1
 }
 
 # 警告の根拠として内訳を出す。何件がテストで何件が実装かを人が読めるようにする。
