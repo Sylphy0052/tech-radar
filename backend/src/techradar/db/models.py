@@ -553,6 +553,16 @@ class DiscoveredFeed(Base):
     consecutive_empty_fetches: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )
+    # エントリは配信したが、絞り込み後に新着が1件も残らなかった連続回数（Issue #109）。
+    # `consecutive_empty_fetches` が数えるのは絞り込み前のエントリ数なので、「毎回同じ
+    # 既出記事だけを返すフィード」はあちらでは捕まらない。1件でも新着が残ったら 0 へ
+    # リセットする。取得・パースに失敗した回と、エントリ自体が 0 件だった回
+    # （`consecutive_empty_fetches` の担当）はこの列に触れない。
+    # `MAX_CONSECUTIVE_STALE_FETCHES` に達すると status=DISABLED / enabled=False にする。
+    # `feeds.yaml` 由来の手動フィードは対象外（`collectors.discovery` docstring 参照）。
+    consecutive_stale_fetches: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
