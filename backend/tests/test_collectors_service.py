@@ -861,6 +861,311 @@ class TestFeedHealthRecording:
         assert called == []
 
 
+class TestFeedNoveltyRecording:
+    """`collect_candidates` からの「新着が出ないフィード」の反映（Issue #109）を検証する。
+
+    第1段階（`record_feed_health`）が見るのは除外より前の件数なので、毎回同じ既出
+    記事だけを返すフィードは捕まらない（ADR 0008）。第2段階はフィード単位で、
+    重複・既存記事・重複ジョブの除外を通り抜けた候補の件数を数える。実 HTTP は
+    出さず、`TestFeedHealthRecording` と同じく `techradar.collectors.rss` の
+    `fetch_resource` をスタブへ差し替える。
+    """
+
+    FEED_URL = "https://discovered.example.com/feed.xml"
+
+    def _feed_xml(self, *article_urls: str) -> str:
+        """指定 URL の記事を配信する RSS を組み立てる（公開日は鮮度フィルタを通る値）。"""
+        published = NOW.strftime("%a, %d %b %Y %H:%M:%S +0000")
+        items = "".join(
+            f"<item><title>記事{index}</title><link>{url}</link>"
+            f"<pubDate>{published}</pubDate></item>"
+            for index, url in enumerate(article_urls)
+        )
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>'
+            "<title>Discovered Feed</title><link>https://discovered.example.com/</link>"
+            f"{items}</channel></rss>"
+        )
+
+    def _make_collector(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        settings: Settings,
+        *,
+        article_urls: Sequence[str] = (),
+        fails: bool = False,
+    ):  # type: ignore[no-untyped-def]
+        from techradar.collectors import rss as rss_module
+        from techradar.collectors.config import FeedEntryConfig
+        from techradar.collectors.discovery import DiscoveredFeedCollector
+        from techradar.fetcher.errors import FetchError
+        from techradar.fetcher.http import FetchedResource
+
+        fake = _FakeFetchResourceForRss()
+        monkeypatch.setattr(rss_module, "fetch_resource", fake)
+        if fails:
+            fake.set_error(self.FEED_URL, FetchError("取得に失敗しました"))
+        else:
+            xml = self._feed_xml(*article_urls)
+            fake.set_response(
+                self.FEED_URL,
+                FetchedResource(
+                    final_url=self.FEED_URL,
+                    body=xml.encode("utf-8"),
+                    text=xml,
+                    content_type="application/rss+xml",
+                    status_code=200,
+                ),
+            )
+        feed = FeedEntryConfig(name="discovered.example.com", url=self.FEED_URL)
+        return DiscoveredFeedCollector([feed], settings)
+
+    def _make_row(self, session: Session, **overrides: object):  # type: ignore[no-untyped-def]
+        from techradar.db.enums import DiscoveredFeedStatus
+        from techradar.db.models import DiscoveredFeed
+
+        row = DiscoveredFeed(
+            domain="discovered.example.com",
+            feed_url=self.FEED_URL,
+            status=DiscoveredFeedStatus.FOUND.value,
+            article_count=1,
+            last_attempted_at=NOW,
+            enabled=True,
+            **overrides,
+        )
+        session.add(row)
+        session.flush()
+        return row
+
+    def test_counts_a_feed_returning_only_known_articles_as_having_no_new_entries(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 毎回同じ既出記事だけを返すフィードが検出される（Issue #109 本体）。
+
+        第1段階のカウンタ（`consecutive_empty_fetches`）は記事を配信している以上
+        0 のままで、第2段階のカウンタだけが増える。
+        """
+        # Arrange — フィードが配信する記事は既に `articles` にある
+        known_url = "https://discovered.example.com/articles/known"
+        make_article(db_session, known_url)
+        row = self._make_row(db_session)
+        collector = self._make_collector(monkeypatch, settings, article_urls=[known_url])
+
+        # Act
+        result = collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[collector],
+        )
+
+        # Assert
+        assert result.enqueued_count == 0
+        db_session.refresh(row)
+        assert row.consecutive_no_new_entries == 1
+        assert row.consecutive_empty_fetches == 0
+        assert row.last_new_entry_at is None
+
+    def test_resets_the_counter_when_a_new_entry_survives_the_exclusions(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange — 既出記事1件と新着1件を配信する
+        known_url = "https://discovered.example.com/articles/known"
+        make_article(db_session, known_url)
+        row = self._make_row(db_session, consecutive_no_new_entries=5)
+        collector = self._make_collector(
+            monkeypatch,
+            settings,
+            article_urls=[known_url, "https://discovered.example.com/articles/new"],
+        )
+
+        # Act
+        result = collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[collector],
+        )
+
+        # Assert
+        assert result.enqueued_count == 1
+        db_session.refresh(row)
+        assert row.consecutive_no_new_entries == 0
+        assert row.last_new_entry_at is not None
+
+    def test_counts_candidates_dropped_by_the_run_limit_as_new_entries(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: `max_candidates_per_run` で押し出された候補も新着として数える。
+
+        上限で切られた分を「新着が無かった」と数えると、他フィードの新着が多い
+        巡回で、押し出されただけのフィードを無効化してしまう（ADR 0008 決定2）。
+        """
+        # Arrange — 上限 1 件を先頭のコレクターが埋め、発見済みフィードの新着は切られる
+        row = self._make_row(db_session, consecutive_no_new_entries=3)
+        collector = self._make_collector(
+            monkeypatch, settings, article_urls=["https://discovered.example.com/articles/new"]
+        )
+        working = _FakeCollector("working", [make_candidate("https://example.com/articles/ok")])
+
+        # Act
+        result = collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(max_candidates_per_run=1),
+            collectors=[working, collector],
+        )
+
+        # Assert — enqueue されたのは先頭の1件だけだが、新着扱いでカウンタは戻る
+        assert result.enqueued_count == 1
+        db_session.refresh(row)
+        assert row.consecutive_no_new_entries == 0
+
+    def test_does_not_count_a_feed_whose_fetch_failed(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 取得に失敗した回は「新着が無かった」と数えない
+        （候補が0件になるのは当然であり、失敗は `consecutive_failures` で数える）。
+        """
+        # Arrange
+        row = self._make_row(db_session, consecutive_no_new_entries=4)
+        collector = self._make_collector(monkeypatch, settings, fails=True)
+
+        # Act
+        collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[collector],
+        )
+
+        # Assert — 失敗のカウンタだけが増える
+        db_session.refresh(row)
+        assert row.consecutive_no_new_entries == 4
+        assert row.consecutive_failures == 1
+
+    def test_skips_recording_when_scoped_to_a_source_domain(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: `source_domain` 指定の再巡回では第2段階を丸ごと飛ばす。
+
+        `_filter_by_source_domain` が他ドメインの候補を全て落とすため、数えると
+        指定ドメイン以外の全フィードが新着0件に見える（ADR 0008 決定3）。
+        """
+        # Arrange
+        row = self._make_row(db_session, consecutive_no_new_entries=2)
+        collector = self._make_collector(
+            monkeypatch, settings, article_urls=["https://discovered.example.com/articles/new"]
+        )
+
+        # Act — 無関係なドメインへ絞って再巡回する
+        collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            source_domain="other.example.com",
+            collectors=[collector],
+        )
+
+        # Assert — 据え置き（増えも減りもしない）
+        db_session.refresh(row)
+        assert row.consecutive_no_new_entries == 2
+
+    def test_frees_a_discovery_slot_within_the_same_collect_run(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 新着が出ないフィードを無効化した枠は、同じ巡回で使える。
+
+        第2段階は `_exclude_already_queued` の直後、新規発見より前に置く
+        （ADR 0008 決定3）。個別の検証だけではこの順序が保証されないため、
+        1 回の呼び出しを通して確かめる（`TestFeedHealthRecording` の同名テストと
+        同じ理由）。
+        """
+        # Arrange — 次の1回で閾値に達する行と、既出記事だけを返すフィード
+        from techradar.collectors.discovery import (
+            MAX_CONSECUTIVE_NO_NEW_ENTRIES,
+            _available_slots,
+        )
+
+        known_url = "https://discovered.example.com/articles/known"
+        make_article(db_session, known_url)
+        self._make_row(db_session, consecutive_no_new_entries=MAX_CONSECUTIVE_NO_NEW_ENTRIES - 1)
+        slots_before = _available_slots(db_session)
+        collector = self._make_collector(monkeypatch, settings, article_urls=[known_url])
+
+        observed_slots: list[int] = []
+
+        def _spy_discover_feeds(session: Session, **kwargs: object) -> int:
+            observed_slots.append(_available_slots(session))
+            return 0
+
+        monkeypatch.setattr(service, "discover_feeds", _spy_discover_feeds)
+
+        # Act
+        collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[collector],
+        )
+
+        # Assert
+        assert observed_slots == [slots_before + 1]
+
+    def test_novelty_recording_failure_does_not_break_candidate_collection(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 反映処理が想定外の例外を送出しても巡回自体は成功する（savepoint の効果）。"""
+        # Arrange
+        self._make_row(db_session)
+        collector = self._make_collector(
+            monkeypatch, settings, article_urls=["https://discovered.example.com/articles/new"]
+        )
+        monkeypatch.setattr(
+            service,
+            "record_feed_novelty",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("novelty boom")),
+        )
+
+        # Act
+        result = collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[collector],
+        )
+
+        # Assert
+        assert result.enqueued_count == 1
+        db_session.flush()
+        assert len(db_session.scalars(select(Job)).all()) == 1
+
+    def test_does_not_record_novelty_for_a_manual_feeds_yaml_collector(
+        self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: `feeds.yaml` 由来の手動フィードは対象外（Issue #105 の設計判断を踏襲）。"""
+        # Arrange
+        from techradar.collectors.rss import RssCollector
+
+        called: list[object] = []
+        monkeypatch.setattr(
+            service, "record_feed_novelty", lambda *args, **kwargs: called.append(True)
+        )
+        manual_rss = RssCollector([], settings)
+        working = _FakeCollector("working", [make_candidate("https://example.com/articles/ok")])
+
+        # Act
+        collect_candidates(
+            db_session,
+            settings=settings,
+            feeds_config=make_feeds_config(),
+            collectors=[working, manual_rss],
+        )
+
+        # Assert
+        assert called == []
+
+
 class _FakeFetchResourceForRss:
     """`techradar.collectors.rss.fetch_resource` を差し替える小さなヘルパー。
 

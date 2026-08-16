@@ -19,6 +19,7 @@ from techradar.collectors import discovery as discovery_module
 from techradar.collectors.discovery import (
     MAX_CONSECUTIVE_EMPTY_FETCHES,
     MAX_CONSECUTIVE_FEED_FAILURES,
+    MAX_CONSECUTIVE_NO_NEW_ENTRIES,
     MAX_DISCOVERED_FEEDS_TOTAL,
     MAX_DISCOVERY_DOMAINS_PER_RUN,
     MAX_FEED_CANDIDATES_PER_DOMAIN,
@@ -29,6 +30,7 @@ from techradar.collectors.discovery import (
     discover_feeds,
     load_enabled_discovered_feeds,
     record_feed_health,
+    record_feed_novelty,
     select_discovery_targets,
 )
 from techradar.collectors.rss import FeedFetchResult
@@ -85,6 +87,8 @@ def make_discovered_feed(
     consecutive_failures: int = 0,
     last_succeeded_at: datetime | None = None,
     consecutive_empty_fetches: int = 0,
+    consecutive_no_new_entries: int = 0,
+    last_new_entry_at: datetime | None = None,
 ) -> DiscoveredFeed:
     row = DiscoveredFeed(
         domain=domain,
@@ -96,6 +100,8 @@ def make_discovered_feed(
         consecutive_failures=consecutive_failures,
         last_succeeded_at=last_succeeded_at,
         consecutive_empty_fetches=consecutive_empty_fetches,
+        consecutive_no_new_entries=consecutive_no_new_entries,
+        last_new_entry_at=last_new_entry_at,
     )
     session.add(row)
     session.flush()
@@ -753,6 +759,71 @@ class TestDiscoverFeeds:
         db_session.refresh(row)
         assert row.status == DiscoveredFeedStatus.FOUND.value
         assert row.consecutive_empty_fetches == 1
+
+    def test_resets_the_no_new_entry_counter_when_a_disabled_domain_is_rediscovered(
+        self, db_session: Session, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ) -> None:
+        """受入基準: 復活したフィードは連続新着0件回数も持ち越さない（Issue #109）。
+
+        `test_resets_the_empty_fetch_counter_when_a_disabled_domain_is_rediscovered` の
+        `consecutive_no_new_entries` 版。持ち越したままだと、復活直後の 1 回で閾値に
+        達して即座に無効化されてしまう。
+        """
+        # Arrange — 閾値まで新着0件が続いて無効化された行が、クールダウンを過ぎている
+        user_id = uuid.uuid4()
+        make_user_article(
+            db_session,
+            make_article(
+                db_session,
+                "https://revived-stale.example.com/1",
+                source_domain="revived-stale.example.com",
+            ),
+            user_id=user_id,
+            origin=ArticleOrigin.MANUAL,
+        )
+        make_discovered_feed(
+            db_session,
+            domain="revived-stale.example.com",
+            status=DiscoveredFeedStatus.DISABLED,
+            last_attempted_at=NOW - timedelta(days=31),
+            feed_url="https://revived-stale.example.com/feed.xml",
+            enabled=False,
+            consecutive_no_new_entries=MAX_CONSECUTIVE_NO_NEW_ENTRIES,
+        )
+        homepage_html = (
+            '<html><head><link rel="alternate" type="application/rss+xml" href="/feed.xml">'
+            "</head><body></body></html>"
+        )
+        fake_fetch_resource.set_response(
+            "https://revived-stale.example.com/",
+            _resource(homepage_html, final_url="https://revived-stale.example.com/"),
+        )
+        fake_fetch_resource.set_response(
+            "https://revived-stale.example.com/feed.xml",
+            _resource(
+                VALID_FEED_XML,
+                final_url="https://revived-stale.example.com/feed.xml",
+                content_type="application/rss+xml",
+            ),
+        )
+
+        # Act
+        discover_feeds(db_session, user_id=user_id, settings=settings, now=NOW)
+
+        # Assert — FOUND へ戻り、新着0件の回数は 0 から数え直す
+        row = db_session.scalars(
+            select(DiscoveredFeed).where(DiscoveredFeed.domain == "revived-stale.example.com")
+        ).one()
+        assert row.status == DiscoveredFeedStatus.FOUND.value
+        assert row.consecutive_no_new_entries == 0
+
+        # Act — 復活後に 1 回新着が無くても無効化されない
+        record_feed_novelty(db_session, {"https://revived-stale.example.com/feed.xml": 0}, now=NOW)
+
+        # Assert
+        db_session.refresh(row)
+        assert row.status == DiscoveredFeedStatus.FOUND.value
+        assert row.consecutive_no_new_entries == 1
 
     def test_does_not_start_discovery_when_no_slots_are_available(
         self, db_session: Session, settings: Settings, fake_fetch_resource: _FakeFetchResource
@@ -1779,3 +1850,291 @@ class TestRecordFeedHealthEmptyFetches:
         messages = [call[0] for call in info_calls]
         assert any("collectors.discovery.feed_disabled_empty " in message for message in messages)
         assert not any("collectors.discovery.feed_disabled " in message for message in messages)
+
+
+class TestRecordFeedNovelty:
+    """`record_feed_novelty` の「新着が出ない」無効化を検証する（Issue #109、ADR 0008）。
+
+    `record_feed_health`（第1段階）が扱うのは取得の成否とエントリ0件で、どちらも
+    重複・既存記事の除外より前の値を見る。ここで扱うのは除外を通り抜けた候補の
+    件数（第2段階）であり、「毎回同じ既出記事だけを返すフィード」を捕まえる。
+    入力は「フィード URL → 新着件数」で、取得に成功したフィードだけが入る想定
+    （呼び出し側の `collectors.service` が絞る）。
+    """
+
+    def test_is_more_patient_than_the_empty_fetch_threshold(self) -> None:
+        """受入基準: 既出記事を返し続けること自体は異常ではないため、閾値は
+        「記事を配信しない」（Issue #108）より粘る値にする。
+        """
+        assert MAX_CONSECUTIVE_NO_NEW_ENTRIES > MAX_CONSECUTIVE_EMPTY_FETCHES
+
+    def test_does_not_disable_after_a_single_run_without_new_entries(
+        self, db_session: Session
+    ) -> None:
+        # Arrange
+        feed_url = "https://once-stale.example.com/feed.xml"
+        row = make_discovered_feed(
+            db_session,
+            domain="once-stale.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+        )
+
+        # Act
+        record_feed_novelty(db_session, {feed_url: 0}, now=NOW)
+
+        # Assert
+        db_session.refresh(row)
+        assert row.consecutive_no_new_entries == 1
+        assert row.status == DiscoveredFeedStatus.FOUND.value
+        assert row.enabled is True
+        assert row.last_new_entry_at is None
+
+    def test_disables_after_reaching_the_no_new_entry_threshold(self, db_session: Session) -> None:
+        """受入基準: 新着が出ない状態が続いたフィードは無効化される。"""
+        # Arrange — 閾値未満まで積んでおく
+        feed_url = "https://stale.example.com/feed.xml"
+        row = make_discovered_feed(
+            db_session,
+            domain="stale.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+            consecutive_no_new_entries=MAX_CONSECUTIVE_NO_NEW_ENTRIES - 1,
+        )
+
+        # Act — 閾値目の巡回
+        record_feed_novelty(db_session, {feed_url: 0}, now=NOW)
+
+        # Assert
+        db_session.refresh(row)
+        assert row.consecutive_no_new_entries == MAX_CONSECUTIVE_NO_NEW_ENTRIES
+        assert row.status == DiscoveredFeedStatus.DISABLED.value
+        assert row.enabled is False
+
+    def test_resets_the_counter_and_records_last_new_entry_at_on_a_new_entry(
+        self, db_session: Session
+    ) -> None:
+        # Arrange — 閾値の手前まで積んだ状態から新着が1件出る
+        feed_url = "https://revived.example.com/feed.xml"
+        row = make_discovered_feed(
+            db_session,
+            domain="revived.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+            consecutive_no_new_entries=MAX_CONSECUTIVE_NO_NEW_ENTRIES - 1,
+        )
+
+        # Act
+        record_feed_novelty(db_session, {feed_url: 1}, now=NOW)
+
+        # Assert
+        db_session.refresh(row)
+        assert row.consecutive_no_new_entries == 0
+        assert row.status == DiscoveredFeedStatus.FOUND.value
+        assert row.last_new_entry_at == NOW
+
+    def test_does_not_touch_the_failure_and_empty_fetch_counters(self, db_session: Session) -> None:
+        """受入基準: 無効化の理由（取得できない / 空を配信する / 新着が出ない）を
+        列で区別できる。第2段階は自分のカウンタ以外を書き換えない。
+        """
+        # Arrange
+        feed_url = "https://independent.example.com/feed.xml"
+        row = make_discovered_feed(
+            db_session,
+            domain="independent.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+            consecutive_failures=1,
+            consecutive_empty_fetches=2,
+        )
+
+        # Act — 新着ありと新着なしの両方を通す
+        record_feed_novelty(db_session, {feed_url: 3}, now=NOW)
+        record_feed_novelty(db_session, {feed_url: 0}, now=NOW)
+
+        # Assert
+        db_session.refresh(row)
+        assert row.consecutive_failures == 1
+        assert row.consecutive_empty_fetches == 2
+        assert row.consecutive_no_new_entries == 1
+
+    def test_frees_a_slot_after_disabling_a_stale_feed(self, db_session: Session) -> None:
+        """受入基準: 新着が出ないフィードを無効化した分だけ枠が空く。"""
+        # Arrange
+        feed_url = "https://toremove-stale.example.com/feed.xml"
+        row = make_discovered_feed(
+            db_session,
+            domain="toremove-stale.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+            consecutive_no_new_entries=MAX_CONSECUTIVE_NO_NEW_ENTRIES - 1,
+        )
+        slots_before = _available_slots(db_session)
+
+        # Act
+        record_feed_novelty(db_session, {feed_url: 0}, now=NOW)
+
+        # Assert
+        db_session.refresh(row)
+        assert row.status == DiscoveredFeedStatus.DISABLED.value
+        assert _available_slots(db_session) == slots_before + 1
+
+    def test_disables_every_row_sharing_the_same_feed_url(self, db_session: Session) -> None:
+        """受入基準: 同じ `feed_url` を持つ行が複数あれば、そのすべてを更新する
+        （`record_feed_health` と同じ理由。1行だけ更新すると残りの結果が黙って捨てられる）。
+        """
+        # Arrange
+        feed_url = "https://shared-stale.example.com/feed.xml"
+        rows = [
+            make_discovered_feed(
+                db_session,
+                domain=domain,
+                status=DiscoveredFeedStatus.FOUND,
+                last_attempted_at=NOW,
+                feed_url=feed_url,
+                enabled=True,
+                consecutive_no_new_entries=MAX_CONSECUTIVE_NO_NEW_ENTRIES - 1,
+            )
+            for domain in ("shared-stale.example.com", "blog.shared-stale.example.com")
+        ]
+
+        # Act
+        record_feed_novelty(db_session, {feed_url: 0}, now=NOW)
+
+        # Assert
+        for row in rows:
+            db_session.refresh(row)
+            assert row.status == DiscoveredFeedStatus.DISABLED.value
+            assert row.enabled is False
+            assert row.consecutive_no_new_entries == MAX_CONSECUTIVE_NO_NEW_ENTRIES
+
+    def test_does_not_touch_an_already_disabled_row_sharing_the_feed_url(
+        self, db_session: Session
+    ) -> None:
+        """受入基準: 無効化済みの行は、同じ `feed_url` の生きた行の巡回結果を巻き込まない
+        （`record_feed_health` の同名テストと同じ理由。commit cdf60fc）。
+        """
+        # Arrange
+        feed_url = "https://mixed-stale.example.com/feed.xml"
+        disabled = make_discovered_feed(
+            db_session,
+            domain="mixed-stale.example.com",
+            status=DiscoveredFeedStatus.DISABLED,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=False,
+            consecutive_no_new_entries=MAX_CONSECUTIVE_NO_NEW_ENTRIES,
+        )
+        alive = make_discovered_feed(
+            db_session,
+            domain="blog.mixed-stale.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+        )
+
+        # Act
+        record_feed_novelty(db_session, {feed_url: 0}, now=NOW)
+
+        # Assert — 無効化済みの行は据え置き、生きた行だけが数えられる
+        db_session.refresh(disabled)
+        assert disabled.consecutive_no_new_entries == MAX_CONSECUTIVE_NO_NEW_ENTRIES
+        db_session.refresh(alive)
+        assert alive.consecutive_no_new_entries == 1
+
+    def test_does_not_revive_an_already_disabled_row_with_a_new_entry(
+        self, db_session: Session
+    ) -> None:
+        """受入基準: 無効化済みの行は、新着ありの結果が相乗りしても復活しない。
+
+        新着なしを相乗りさせない検証（直前のテスト）と対になる。同じ `feed_url` を
+        持つ別ドメインの行が生きていると、その巡回結果は新着ありのときも届く。
+        ここでカウンタを 0 へ戻したり `status` を戻したりすると、取得すらしていない
+        行が枠を持ち続けることになる。復活は再発見（`_apply_discovery_result`）
+        だけが担う（`_iter_live_rows` の docstring）。
+        """
+        # Arrange — 閾値に達して無効化済みの行と、同じ feed_url を指す生きた行
+        feed_url = "https://revive-stale.example.com/feed.xml"
+        disabled = make_discovered_feed(
+            db_session,
+            domain="revive-stale.example.com",
+            status=DiscoveredFeedStatus.DISABLED,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=False,
+            consecutive_no_new_entries=MAX_CONSECUTIVE_NO_NEW_ENTRIES,
+        )
+        alive = make_discovered_feed(
+            db_session,
+            domain="blog.revive-stale.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+        )
+
+        # Act — 新着ありの結果を通す
+        record_feed_novelty(db_session, {feed_url: 3}, now=NOW)
+
+        # Assert — 無効化済みの行は status も enabled もカウンタも据え置き
+        db_session.refresh(disabled)
+        assert disabled.status == DiscoveredFeedStatus.DISABLED.value
+        assert disabled.enabled is False
+        assert disabled.consecutive_no_new_entries == MAX_CONSECUTIVE_NO_NEW_ENTRIES
+        assert disabled.last_new_entry_at is None
+        # 生きた行にだけ新着が記録される
+        db_session.refresh(alive)
+        assert alive.consecutive_no_new_entries == 0
+        assert alive.last_new_entry_at == NOW
+
+    def test_ignores_a_feed_url_with_no_matching_row(self, db_session: Session) -> None:
+        """受入基準: 対象の行が無い URL は黙って無視する（例外にしない）。"""
+        # Act & Assert — 例外が出ないこと自体が期待
+        record_feed_novelty(db_session, {"https://gone.example.com/feed.xml": 0}, now=NOW)
+
+    def test_logs_a_distinct_event_from_the_other_disablements(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受入基準: 「取得に失敗した」「記事を配信しない」「新着が出ない」の
+        どれで無効化したのかがログから区別できる。
+
+        `caplog` ではなく `discovery_module.logger.info` を直接差し替える理由は
+        `TestRecordFeedHealthEmptyFetches` の同種テストと同じ。
+        """
+        # Arrange
+        info_calls: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(
+            discovery_module.logger, "info", lambda *args, **_kwargs: info_calls.append(args)
+        )
+        feed_url = "https://noisy-stale.example.com/feed.xml"
+        make_discovered_feed(
+            db_session,
+            domain="noisy-stale.example.com",
+            status=DiscoveredFeedStatus.FOUND,
+            last_attempted_at=NOW,
+            feed_url=feed_url,
+            enabled=True,
+            consecutive_no_new_entries=MAX_CONSECUTIVE_NO_NEW_ENTRIES - 1,
+        )
+
+        # Act
+        record_feed_novelty(db_session, {feed_url: 0}, now=NOW)
+
+        # Assert — 新着なし専用のイベント名だけが出る
+        messages = [call[0] for call in info_calls]
+        assert any("collectors.discovery.feed_disabled_stale " in message for message in messages)
+        assert not any("collectors.discovery.feed_disabled " in message for message in messages)
+        assert not any(
+            "collectors.discovery.feed_disabled_empty " in message for message in messages
+        )

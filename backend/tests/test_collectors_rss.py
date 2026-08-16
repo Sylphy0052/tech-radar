@@ -389,3 +389,45 @@ class TestFeedResults:
         assert collector.feed_results() == {
             feed.url: FeedFetchResult(succeeded=True, entry_count=2)
         }
+
+
+class TestCandidateFeedUrl:
+    """候補記事から巡回元のフィード URL を逆引きできること（Issue #109）。
+
+    「新着が出ないフィード」の判定は、除外を通り抜けた候補をフィード単位で
+    数える（ADR 0008）。集計のキーには `record_feed_health` と同じ `feed_url`
+    を使うため、候補側にも同じ値を持たせる。
+    """
+
+    def test_candidates_carry_the_feed_url_they_came_from(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert — 名前（`source_hint`）ではなく URL が入る
+        assert [candidate.feed_url for candidate in candidates] == [feed.url, feed.url]
+
+    def test_keeps_each_candidate_pointing_at_its_own_feed(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        """受入基準: 複数フィードを巡回しても、候補は自分の出どころを指す。"""
+        # Arrange
+        rss_feed = _feed_entry(name="RSS Feed", url="https://example.com/feed.xml")
+        atom_feed = _feed_entry(name="Atom Feed", url="https://example.com/atom.xml")
+        fake_fetch_resource.set_response(rss_feed.url, _resource(RSS2_FEED))
+        fake_fetch_resource.set_response(atom_feed.url, _resource(ATOM_FEED))
+        collector = RssCollector([rss_feed, atom_feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert
+        feed_urls_by_article_url = {candidate.url: candidate.feed_url for candidate in candidates}
+        assert feed_urls_by_article_url["https://example.com/articles/1"] == rss_feed.url
+        assert feed_urls_by_article_url["https://example.com/articles/2"] == atom_feed.url

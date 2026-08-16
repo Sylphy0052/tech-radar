@@ -36,6 +36,13 @@ class CandidateArticle:
     collector_name: str
     # フィード側が持つ情報源名など。無ければ None のままでよい。
     source_hint: str | None = None
+    # 巡回元のフィード URL（Issue #109）。「新着が出ないフィード」の判定で、除外を
+    # 通り抜けた候補をフィード単位で数えるためのキー。`discovered_feeds` の行を
+    # 引く `discovery.record_feed_novelty` と同じキーにする（`source_hint` は
+    # 手動フィードの名前と同じ空間に混ざるため使えない）。フィードを持たない
+    # コレクター（HN / GitHub Releases / arXiv / Brave）は None のままでよく、
+    # その場合は集計の対象外になる。
+    feed_url: str | None = None
 
 
 @runtime_checkable

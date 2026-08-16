@@ -553,16 +553,19 @@ class DiscoveredFeed(Base):
     consecutive_empty_fetches: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )
-    # エントリは配信したが、絞り込み後に新着が1件も残らなかった連続回数（Issue #109）。
-    # `consecutive_empty_fetches` が数えるのは絞り込み前のエントリ数なので、「毎回同じ
-    # 既出記事だけを返すフィード」はあちらでは捕まらない。1件でも新着が残ったら 0 へ
-    # リセットする。取得・パースに失敗した回と、エントリ自体が 0 件だった回
-    # （`consecutive_empty_fetches` の担当）はこの列に触れない。
-    # `MAX_CONSECUTIVE_STALE_FETCHES` に達すると status=DISABLED / enabled=False にする。
-    # `feeds.yaml` 由来の手動フィードは対象外（`collectors.discovery` docstring 参照）。
-    consecutive_stale_fetches: Mapped[int] = mapped_column(
+    # 記事は配信しているが、重複・既存記事の除外を通り抜けた候補が1件も無かった
+    # 連続回数（Issue #109）。1件でも新着があれば 0 へリセットする。取得・パースに
+    # 失敗した回と、`source_domain` を指定した再巡回では数えない（候補が0件になるのが
+    # 当然のため）。`MAX_CONSECUTIVE_NO_NEW_ENTRIES` に達すると status=DISABLED /
+    # enabled=False にする。`consecutive_empty_fetches`（配信そのものが無い）とは
+    # 別の問いを数えるため列を分ける（ADR 0008）。
+    consecutive_no_new_entries: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )
+    # 直近で新着を出した時刻（Issue #109）。判定には使わず、診断用の記録に留める。
+    # 巡回は UI の実行ボタンからの手動起動で実時間の間隔が読めないため、経過時間は
+    # 「新着が無い」のか「巡回していない」のかを区別できない（ADR 0008）。
+    last_new_entry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
