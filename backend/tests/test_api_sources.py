@@ -11,6 +11,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_session
+from techradar.api.query_filters import MAX_OFFSET
+from techradar.api.sources import SOURCE_DOMAIN_MAX_LENGTH, SOURCE_ENTITY_NAME_MAX_LENGTH
 from techradar.config import Settings
 from techradar.db import SourceRegistry
 from techradar.db.enums import SourceType
@@ -86,11 +88,133 @@ class TestList:
         # Assert
         assert [item["entity_name"] for item in response.json()] == ["Anthropic"]
 
+    def test_escapes_a_percent_in_the_domain_filter(self, client: TestClient, db_session: Session):
+        # Arrange — 受入基準: `%` はワイルドカードではなくリテラルとして扱う（Issue #94）
+        make_source(db_session, domain="100%.example.com")
+        make_source(db_session, domain="100x.example.com")
+
+        # Act
+        response = client.get("/api/sources", params={"domain": "100%.example"})
+
+        # Assert
+        domains = [item["domain"] for item in response.json()]
+        assert domains == ["100%.example.com"]
+
+    def test_escapes_an_underscore_in_the_domain_filter(
+        self, client: TestClient, db_session: Session
+    ):
+        # Arrange — 受入基準: `_` は任意の1文字ではなくリテラルとして扱う（Issue #94）
+        make_source(db_session, domain="foo_bar.example.com")
+        make_source(db_session, domain="fooXbar.example.com")
+
+        # Act
+        response = client.get("/api/sources", params={"domain": "foo_bar"})
+
+        # Assert
+        domains = [item["domain"] for item in response.json()]
+        assert domains == ["foo_bar.example.com"]
+
+    def test_matches_a_domain_filter_containing_a_backslash_without_error(
+        self, client: TestClient, db_session: Session
+    ):
+        # Arrange — 受入基準: バックスラッシュを含む検索語で例外にならず情報源にだけ当たる
+        make_source(db_session, domain="a.example.com", entity_name="C:\\Example")
+        make_source(db_session, domain="b.example.com", entity_name="C:/Example")
+
+        # Act
+        response = client.get("/api/sources", params={"entity_name": "C:\\Example"})
+
+        # Assert
+        assert response.status_code == 200
+        entity_names = [item["entity_name"] for item in response.json()]
+        assert entity_names == ["C:\\Example"]
+
+    def test_escapes_a_percent_in_the_entity_name_filter(
+        self, client: TestClient, db_session: Session
+    ):
+        # Arrange — 受入基準: `%` はワイルドカードではなくリテラルとして扱う（Issue #94）
+        make_source(db_session, entity_name="100% Example")
+        make_source(db_session, entity_name="100x Example")
+
+        # Act
+        response = client.get("/api/sources", params={"entity_name": "100%"})
+
+        # Assert
+        entity_names = [item["entity_name"] for item in response.json()]
+        assert entity_names == ["100% Example"]
+
+    def test_accepts_a_domain_filter_at_the_length_limit(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: 上限ちょうどの検索語は従来どおり通る（Issue #98）。"""
+        # Arrange
+        make_source(db_session, domain="docs.example.com")
+
+        # Act
+        response = client.get("/api/sources", params={"domain": "a" * SOURCE_DOMAIN_MAX_LENGTH})
+
+        # Assert — 一致するものは無いが、検証で弾かれずに検索そのものは通る
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_rejects_a_domain_filter_above_the_length_limit(self, client: TestClient) -> None:
+        """受入基準: 上限を超える検索語は 422（Issue #98）。"""
+        # Act / Assert
+        response = client.get(
+            "/api/sources", params={"domain": "a" * (SOURCE_DOMAIN_MAX_LENGTH + 1)}
+        )
+        assert response.status_code == 422
+
+    def test_accepts_an_entity_name_filter_at_the_length_limit(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """受入基準: 上限ちょうどの検索語は従来どおり通る（Issue #98）。"""
+        # Arrange
+        make_source(db_session, entity_name="Anthropic")
+
+        # Act
+        response = client.get(
+            "/api/sources", params={"entity_name": "a" * SOURCE_ENTITY_NAME_MAX_LENGTH}
+        )
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_rejects_an_entity_name_filter_above_the_length_limit(self, client: TestClient) -> None:
+        """受入基準: 上限を超える検索語は 422（Issue #98）。"""
+        # Act / Assert
+        response = client.get(
+            "/api/sources", params={"entity_name": "a" * (SOURCE_ENTITY_NAME_MAX_LENGTH + 1)}
+        )
+        assert response.status_code == 422
+
     def test_rejects_an_oversized_page(self, client: TestClient):
         # Arrange / Act — 全件返しでメモリを食い潰させない
         response = client.get("/api/sources", params={"limit": 10_000})
 
         # Assert
+        assert response.status_code == 422
+
+    def test_accepts_an_offset_at_the_upper_bound(self, client: TestClient) -> None:
+        """受入基準: offset の上限ちょうどは 200 + 空のリスト（Issue #99）。"""
+        # Act
+        response = client.get("/api/sources", params={"offset": MAX_OFFSET})
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_rejects_an_offset_above_the_upper_bound(self, client: TestClient) -> None:
+        """受入基準: offset の上限を超えると 422（Issue #99）。"""
+        # Act / Assert
+        response = client.get("/api/sources", params={"offset": MAX_OFFSET + 1})
+        assert response.status_code == 422
+
+    def test_rejects_an_offset_that_would_overflow_bigint(self, client: TestClient) -> None:
+        """受入基準: bigint を超える offset は 500 ではなく 422（Issue #99）。"""
+        # Act / Assert
+        response = client.get("/api/sources", params={"offset": 10**19})
         assert response.status_code == 422
 
 

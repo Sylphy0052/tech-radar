@@ -25,6 +25,20 @@ function emptyToNull(value: FormDataEntryValue | null): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
+/**
+ * カンマ区切りの自由入力を配列へ変換する。空要素（連続カンマ・前後の空白のみ）は捨てる
+ * （`FeedFilterPanel` と同じ）。
+ */
+function parseCommaSeparatedList(value: FormDataEntryValue | null): string[] {
+  if (typeof value !== "string") {
+    return [];
+  }
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
+}
+
 function isPrimarySourceToSelectValue(value: boolean | null): string {
   if (value === null) {
     return "";
@@ -51,6 +65,10 @@ function parseIsPrimarySourceSelection(value: FormDataEntryValue | null): boolea
  * 外部要因（ブラウザの戻る/進む・`InterestArticleList` 側からの遷移等）で
  * 変わったときだけフォームが作り直されて最新の URL の値を表示する。
  *
+ * 検索語・トピック・技術タグは Issue #91 で追加した。トピックと技術タグは
+ * `FeedFilterPanel` と同じくカンマ区切りの自由入力で複数指定を受け付ける
+ * （backend では「指定した全てを含む」AND 条件になる）。
+ *
  * ジャンル（domain/category）・情報源・言語は固定の選択肢を持たない自由入力に
  * している。これらは LLM が記事ごとに分類した自由文字列（`analysis/prompt.py`）
  * であり、backend にも列挙された一覧は存在しない。実在する値を選択式にするには
@@ -73,6 +91,9 @@ export function ArticleFilterPanel() {
 
     const nextFilters: ArticleFilters = {
       origin: formData.getAll("origin").map(String) as ArticleFilters["origin"],
+      q: emptyToNull(formData.get("q")),
+      topics: parseCommaSeparatedList(formData.get("topics")),
+      technologies: parseCommaSeparatedList(formData.get("technologies")),
       domain: emptyToNull(formData.get("domain")),
       category: emptyToNull(formData.get("category")),
       sourceDomain: emptyToNull(formData.get("source_domain")),
@@ -122,6 +143,39 @@ export function ArticleFilterPanel() {
           </label>
         ))}
       </fieldset>
+
+      <label className={FIELD_CLASS}>
+        <span className="mono-label">検索語</span>
+        <input type="text" name="q" defaultValue={filters.q ?? ""} className="field-input" />
+      </label>
+
+      <label className={FIELD_CLASS}>
+        <span className="mono-label">トピック（カンマ区切りで複数指定可）</span>
+        <input
+          type="text"
+          name="topics"
+          defaultValue={filters.topics.join(", ")}
+          className="field-input"
+        />
+      </label>
+
+      <div className={FIELD_CLASS}>
+        <label className={FIELD_CLASS}>
+          {/* 補足はラベルの外に置く。ラベル内に入れるとアクセシブル名が説明文まで
+              含んだ長い文字列になり、支援技術での読み上げも冗長になる
+              （`FeedFilterPanel` の対象期間と同じ扱い）。 */}
+          <span className="mono-label">技術タグ（カンマ区切りで複数指定可）</span>
+          <input
+            type="text"
+            name="technologies"
+            defaultValue={filters.technologies.join(", ")}
+            className="field-input"
+          />
+        </label>
+        <span className="text-xs text-ink-subtle">
+          技術タグは一覧のカードには出ないが、絞り込みには使える
+        </span>
+      </div>
 
       <label className={FIELD_CLASS}>
         <span className="mono-label">ジャンル（大分類）</span>

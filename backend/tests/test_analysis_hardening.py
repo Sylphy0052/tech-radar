@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from techradar.analysis import analyze_article
 from techradar.analysis.language import normalize_language_tag, resolve_language
-from techradar.analysis.schema import MAX_LABEL_LENGTH, ArticleAnalysis
+from techradar.analysis.prompt import ANALYSIS_INSTRUCTION
+from techradar.analysis.schema import MAX_LABEL_LENGTH, MAX_SUMMARY_LENGTH, ArticleAnalysis
 from techradar.db import Article, OperationLog
 from techradar.db.enums import JobStatus, JobType
 from techradar.llm import FakeLLMProvider
@@ -222,6 +223,32 @@ class TestSchemaLimits:
         assert "\x1f" not in analysis.summary_ja
         assert analysis.topics == ["MCP"]
 
+    def test_truncates_an_overlong_summary(self):
+        # Arrange / Act — 発表内容の列挙が多い記事では LLM が上限を超える要約を返す
+        # (Issue #86)。落として記事を未解析のまま残すより、切って通すほうが被害が小さい
+        analysis = ArticleAnalysis.model_validate(
+            {**VALID_ANALYSIS, "summary_ja": "あ" * (MAX_SUMMARY_LENGTH + 1)}
+        )
+
+        # Assert
+        assert len(analysis.summary_ja) == MAX_SUMMARY_LENGTH
+
+    def test_keeps_a_summary_at_the_limit(self):
+        # Arrange / Act — 上限ちょうどは切り詰めの対象にしない (境界)
+        summary = "あ" * MAX_SUMMARY_LENGTH
+        analysis = ArticleAnalysis.model_validate({**VALID_ANALYSIS, "summary_ja": summary})
+
+        # Assert
+        assert analysis.summary_ja == summary
+
+    def test_truncates_after_removing_control_characters(self):
+        # Arrange / Act — 制御文字を除く前に切ると、除去後の長さが上限を下回る
+        summary = "あ" * MAX_SUMMARY_LENGTH + "\x00" * 10
+        analysis = ArticleAnalysis.model_validate({**VALID_ANALYSIS, "summary_ja": summary})
+
+        # Assert
+        assert len(analysis.summary_ja) == MAX_SUMMARY_LENGTH
+
     def test_rejects_an_overlong_translated_title(self):
         # Arrange / Act / Assert
         with pytest.raises(ValueError, match="at most"):
@@ -233,3 +260,30 @@ class TestSchemaLimits:
 
         # Assert
         assert analysis.translated_title is None
+
+
+class TestOverlongSummaryReachesTheArticle:
+    def test_saves_a_truncated_summary_instead_of_failing(self, db_session: Session):
+        # Arrange — 受入基準は「上限を超える要約でも記事が解析済みになる」(Issue #86)。
+        # スキーマ単体で切り詰めが効いても、パイプラインの別の層で長さを見ていれば
+        # 記事は failed のまま残る。`analyze_article` を通して確かめる
+        article = make_article(db_session)
+        provider = FakeLLMProvider(
+            [{**VALID_ANALYSIS, "summary_ja": "あ" * (MAX_SUMMARY_LENGTH + 47)}]
+        )
+
+        # Act
+        result = analyze_article(db_session, provider, article, sleep=no_sleep)
+
+        # Assert
+        assert result.analyzed is True
+        assert article.analysis_status == JobStatus.COMPLETED
+        assert article.summary_ja is not None
+        assert len(article.summary_ja) == MAX_SUMMARY_LENGTH
+
+
+class TestAnalysisInstruction:
+    def test_states_the_summary_length_limit(self):
+        # Arrange / Act / Assert — スキーマ側の切り詰めは安全網であって、
+        # 常用させたいわけではない。プロンプトから上限が消えたらここで落とす (Issue #86)
+        assert str(MAX_SUMMARY_LENGTH) in ANALYSIS_INSTRUCTION

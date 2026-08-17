@@ -203,7 +203,7 @@ class TestOperationLogging:
 
 class TestProviderSubstitution:
     def test_fake_provider_satisfies_the_protocol(self):
-        # Arrange — 将来 社内チャット API 等を追加できる抽象になっていること
+        # Arrange — 将来 ASK API 等を追加できる抽象になっていること
         from techradar.llm.base import LLMProvider
 
         # Act / Assert

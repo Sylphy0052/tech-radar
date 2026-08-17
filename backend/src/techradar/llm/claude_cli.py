@@ -11,17 +11,31 @@
 
 主防御は `--tools ""` で、CLI のヘルプに「Use "" to disable all tools」と
 明記されたフラグ。組み込みツールを列挙ではなく構造的に空にするため、
-新しいツールが増えても漏れない。
+新しいツールが増えても漏れない。管理者ポリシー（admin-managed policy）は
+コマンドライン引数より上位のスコープだが、このフラグに相当する設定キーが
+ポリシー側に無いため上書きされない（CLI 2.1.227 で実測。
+`docs/adr/0002-llm-tool-isolation.md` を参照）。
+
+ただし**ポリシーが配布されたホストでは、以下の防御はほとんど意味を持たない**
+（唯一 3. の MCP 無効化だけはポリシー配下でも効いている）。ポリシーの `env` で
+`ANTHROPIC_BASE_URL` を差し替えられるため、ツールが1つも動かなくても記事本文の
+送信先を変えられる。実測では差し替え先へ `authorization` ヘッダも届いており、
+認証情報も一緒に渡る。`apiKeyHelper` と hooks からは任意コマンドが走り、
+`claudeMd` からはシステムプロンプト相当の指示が注入される。いずれもコマンド
+ライン引数では塞げない（実測）。実行を止められる手はコンテナ隔離だけで、
+ADR の残存リスクとして扱っている。
 
 これに次を重ねる。
 
 1. `--setting-sources ""` で設定ファイル（user / project / local）を読み込ませない。
    hooks はここに定義され、ツール許可とは別経路で任意コマンドを実行しうるため、
-   ツール無効化だけでは塞げない。ただし管理者ポリシー（admin-managed policy）は
-   この3つに含まれず、コマンドライン引数より優先されるため塞げない
-   （`docs/adr/0002-llm-tool-isolation.md` の残存リスクを参照）
+   ツール無効化だけでは塞げない。ただし管理者ポリシーはこの3つに含まれず、
+   ポリシーに定義された hooks はイベントを問わず実行される。`--settings` から
+   `disableAllHooks: true` を渡しても止まらない（実測）
 2. `--settings` の `permissions.deny` と `--disallowedTools` にツール名を列挙（保険）
-3. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない
+3. `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` で MCP を読み込ませない。
+   サーバは空のままにする。ポリシーの `disableSideloadFlags` は `--mcp-config` を
+   拒否するが、空の指定だけは受理される（`command` 型のサーバを足すと起動できなくなる）
 4. `--disable-slash-commands` で Skills（`/skill-name`）を無効化する。Skills は
    ツール無効化の管轄外にある独立した実行経路で、`--tools ""` でも `--bare` でも残る
 5. 環境変数を許可リストで絞り、DB 接続文字列などを子プロセスへ渡さない
@@ -65,6 +79,7 @@ from techradar.llm.errors import (
     LLMTimeoutError,
     LLMToolUseDetectedError,
 )
+from techradar.llm.managed_policy import assert_no_managed_policy
 from techradar.llm.prompt import SYSTEM_PROMPT, build_user_prompt
 
 # `--tools` に渡す値。CLI のヘルプに「Use "" to disable all tools」と明記されており、
@@ -97,11 +112,16 @@ DENIED_TOOLS: tuple[str, ...] = (
     "ReadMcpResource",
 )
 
-# MCP サーバーを 1 つも読み込ませない設定。
+# MCP サーバーを 1 つも読み込ませない設定。空のままにしておくこと。
+# 管理者ポリシーの `disableSideloadFlags` は `--mcp-config` を起動時に拒否するが、
+# サーバを含まない指定は受理される。`command` 型のサーバを足すと、ポリシーが
+# 配布されたホストで起動できなくなる。
 EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
 
 # 子プロセスへ渡す環境変数。既定では親の環境がすべて継承され、DB 接続文字列などが
 # CLI プロセスから見えてしまう。認証と実行に必要なものだけを通す。
+# これが絞るのは親プロセスからの継承だけで、管理者ポリシーの `env` が注入する
+# 変数には効かない（ポリシー配下では `ANTHROPIC_BASE_URL` を差し替えられる）。
 ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH",
     "HOME",
@@ -259,6 +279,8 @@ class ClaudeCliProvider:
 
     def _invoke(self, prompt: str) -> dict[str, Any]:
         """CLI を実行して JSON 封筒を返す。"""
+        # ポリシー配下では以下の隔離がほとんど機能しないため、起動前に止める。
+        assert_no_managed_policy(self._settings)
         command = _build_command(self._settings, prompt)
         started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="techradar-llm-") as working_directory:

@@ -314,7 +314,7 @@
         "type": "object"
       },
       "FeedResponse": {
-        "description": "Discover フィード（`GET /api/feed`）のレスポンス。",
+        "description": "Discover フィード（`GET /api/feed`）のレスポンス（Issue #90）。\n\nページングは番号付きページ（`page` / `page_size`）に統一する。\n`total_count` は絞り込み後に run へ保存された件数（`count_recommendations`）で、\n`limits.feed_run_size`（`config/scoring.yaml`）を超える候補は元々対象外になる\n（決定済みの設計）。",
         "properties": {
           "items": {
             "items": {
@@ -323,21 +323,29 @@
             "title": "Items",
             "type": "array"
           },
-          "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Cursor"
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total_count": {
+            "title": "Total Count",
+            "type": "integer"
+          },
+          "total_pages": {
+            "title": "Total Pages",
+            "type": "integer"
           }
         },
         "required": [
           "items",
-          "next_cursor"
+          "total_count",
+          "page",
+          "page_size",
+          "total_pages"
         ],
         "title": "FeedResponse",
         "type": "object"
@@ -392,6 +400,16 @@
       "InterestArticleItem": {
         "description": "関心記事一覧（`GET /api/articles`）1 件のレスポンス（`PROJECT_SPEC.md` §6.3）。",
         "properties": {
+          "analysis_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "article_id": {
             "format": "uuid",
             "title": "Article Id",
@@ -477,6 +495,13 @@
             "title": "Source Domain",
             "type": "string"
           },
+          "technologies": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Technologies",
+            "type": "array"
+          },
           "title": {
             "title": "Title",
             "type": "string"
@@ -511,6 +536,8 @@
           "source_domain",
           "language",
           "topics",
+          "technologies",
+          "analysis_status",
           "domain",
           "category",
           "content_type",
@@ -521,7 +548,7 @@
         "type": "object"
       },
       "InterestArticleListResponse": {
-        "description": "関心記事一覧のレスポンス。",
+        "description": "関心記事一覧のレスポンス（ページングは Issue #91 で番号付きへ変更）。\n\n`GET /api/feed` の `FeedResponse` と同じ形にそろえ、画面側の\n`components/ui/Pagination` を両方から同じように使えるようにする。",
         "properties": {
           "items": {
             "items": {
@@ -530,21 +557,29 @@
             "title": "Items",
             "type": "array"
           },
-          "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Cursor"
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total_count": {
+            "title": "Total Count",
+            "type": "integer"
+          },
+          "total_pages": {
+            "title": "Total Pages",
+            "type": "integer"
           }
         },
         "required": [
           "items",
-          "next_cursor"
+          "total_count",
+          "page",
+          "page_size",
+          "total_pages"
         ],
         "title": "InterestArticleListResponse",
         "type": "object"
@@ -706,6 +741,40 @@
         "title": "InterestGenreItem",
         "type": "object"
       },
+      "InterestOriginCounts": {
+        "description": "関心プロファイル構築対象の記事の origin 別件数（Issue #92）。\n\n`interest/service.py` の `load_weighted_interest_articles`（Discover の\n関心プロファイル）と同じ母集団（`count_interest_articles_by_origin`）を\n使う。このレスポンスの他の項目（`article_feedback JOIN articles`、\n多くは good/save のみに絞る）とは集計元が異なる点に注意（このクラスの\ndocstring と `get_interest_summary` の docstring を参照）。origin は\n5値で固定のため、他の内容分布系（`InterestTechnologyItem` 等）のような\n可変長リストではなく `InterestFeedbackRatio` と同じ固定フィールドの形にする。",
+        "properties": {
+          "clicked_count": {
+            "title": "Clicked Count",
+            "type": "integer"
+          },
+          "good_count": {
+            "title": "Good Count",
+            "type": "integer"
+          },
+          "manual_count": {
+            "title": "Manual Count",
+            "type": "integer"
+          },
+          "read_full_count": {
+            "title": "Read Full Count",
+            "type": "integer"
+          },
+          "saved_count": {
+            "title": "Saved Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "manual_count",
+          "good_count",
+          "saved_count",
+          "read_full_count",
+          "clicked_count"
+        ],
+        "title": "InterestOriginCounts",
+        "type": "object"
+      },
       "InterestPrimarySourceRatio": {
         "description": "一次情報比率（`articles.is_primary_source`）。",
         "properties": {
@@ -752,6 +821,9 @@
             "title": "Genres",
             "type": "array"
           },
+          "origin_counts": {
+            "$ref": "#/components/schemas/InterestOriginCounts"
+          },
           "primary_source_ratio": {
             "$ref": "#/components/schemas/InterestPrimarySourceRatio"
           },
@@ -777,6 +849,7 @@
           "primary_source_ratio",
           "content_types",
           "difficulties",
+          "origin_counts",
           "suppressed_topics"
         ],
         "title": "InterestSummaryResponse",
@@ -989,6 +1062,19 @@
         ],
         "title": "JobResponse",
         "type": "object"
+      },
+      "JobStatus": {
+        "description": "ジョブおよび記事登録の処理状態（`PROJECT_SPEC.md` §6.2）。",
+        "enum": [
+          "pending",
+          "fetching",
+          "analyzing",
+          "searching",
+          "completed",
+          "failed"
+        ],
+        "title": "JobStatus",
+        "type": "string"
       },
       "RateLimitedResponse": {
         "description": "429 のレスポンスボディ（`HTTPException` の既定形）。",
@@ -1429,7 +1515,7 @@
   "paths": {
     "/api/articles": {
       "get": {
-        "description": "関心記事一覧を返す（`PROJECT_SPEC.md` §6.3）。\n\n手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）\n降順で返す。タイブレークに `user_articles.id` を使い、cursor はこの2つの組から作る。",
+        "description": "関心記事一覧を返す（`PROJECT_SPEC.md` §6.3、検索・絞り込み・ページングは Issue #91）。\n\n手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）\n降順で返す。タイブレークに `user_articles.id` を使う。\n\nページングは番号付き（`page` / `limit`）で、`GET /api/feed` と同じく offset として\n扱う。総ページ数を超える `page` はエラーにせず空の `items` を返すが、\n`MAX_PAGE_NUMBER` を超える `page` は 422 で弾く（Issue #96）。Issue #91 以前は\ncursor 方式だったが、目的のページへ直接移動できるようにするため置き換えた。",
         "operationId": "list_interest_articles_api_articles_get",
         "parameters": [
           {
@@ -1451,6 +1537,67 @@
               ],
               "description": "登録方法。複数指定可",
               "title": "Origin"
+            }
+          },
+          {
+            "description": "検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）",
+              "title": "Q"
+            }
+          },
+          {
+            "description": "トピック。複数指定時は指定した全てを含む記事に絞る（AND）",
+            "in": "query",
+            "name": "topics",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "トピック。複数指定時は指定した全てを含む記事に絞る（AND）",
+              "title": "Topics"
+            }
+          },
+          {
+            "description": "技術タグ。複数指定時は指定した全てを含む記事に絞る（AND）",
+            "in": "query",
+            "name": "technologies",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "技術タグ。複数指定時は指定した全てを含む記事に絞る（AND）",
+              "title": "Technologies"
             }
           },
           {
@@ -1586,21 +1733,17 @@
             }
           },
           {
-            "description": "前回レスポンスの next_cursor をそのまま渡す",
+            "description": "1始まりのページ番号",
             "in": "query",
-            "name": "cursor",
+            "name": "page",
             "required": false,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "前回レスポンスの next_cursor をそのまま渡す",
-              "title": "Cursor"
+              "default": 1,
+              "description": "1始まりのページ番号",
+              "maximum": 1000000,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
             }
           },
           {
@@ -2029,25 +2172,153 @@
     },
     "/api/feed": {
       "get": {
-        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。\n\n`cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ\n新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。\n`cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、\nページ間で重複が出ないようにする（受入基準）。\n\n`next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で\ncursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が\n非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで\n終端と判断せず、`next_cursor` が null になるまで辿ること。\n\n古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を\n削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。",
+        "description": "Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。\n\n`q` / `topics` / `technologies` / `published_from` / `published_to` /\n`source_domain` / `max_age_days` はいずれも省略可能な絞り込み条件で、全候補を\n対象に推薦を作り直す（決定済みの設計、`generate_recommendations` の\n`feed_filters`）。条件を反映したフィンガープリントが一致する直近の DISCOVER\nrun が再利用してよい時間内（`config/scoring.yaml` の\n`limits.feed_run_reuse_seconds`）ならその run を再利用し、そうでなければ\n新しい run を生成する（`_resolve_discover_run_id`）。\n\n`max_age_days` はフィードの対象期間そのもの（候補の絞り込み）を変える\nパラメータで、freshness スコアの減衰基準（`ranking.compute_freshness`）とは\n無関係（Issue #90 自己レビュー、`FeedFilters.max_age_days` のコメント参照）。\n従来は `config/scoring.yaml` の `freshness.max_age_days`（既定 7 日）を\n超える公開日で `published_from` / `published_to` を指定すると、この\nハード除外の内側でしか絞り込みが効かず黙って 0 件になっていた\n（Issue #90 自己レビューで判明した不具合そのもの）。\n\nページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset\nとして扱う。`total_count` は run に保存された件数（Bad 除外前）であり、\n総ページ数を超える `page` はエラーにせず空の `items` を返すが、\n`MAX_PAGE_NUMBER` を超える `page` は 422 で弾く（Issue #96）。\n\n古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を\n削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。",
         "operationId": "get_feed_api_feed_get",
         "parameters": [
           {
-            "description": "前回レスポンスの next_cursor をそのまま渡す",
+            "description": "検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）",
             "in": "query",
-            "name": "cursor",
+            "name": "q",
             "required": false,
             "schema": {
               "anyOf": [
                 {
+                  "maxLength": 256,
                   "type": "string"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "前回レスポンスの next_cursor をそのまま渡す",
-              "title": "Cursor"
+              "description": "検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）",
+              "title": "Q"
+            }
+          },
+          {
+            "description": "トピック。複数指定時は指定した全てを含む記事に絞る（AND）",
+            "in": "query",
+            "name": "topics",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "トピック。複数指定時は指定した全てを含む記事に絞る（AND）",
+              "title": "Topics"
+            }
+          },
+          {
+            "description": "技術タグ。複数指定時は指定した全てを含む記事に絞る（AND）",
+            "in": "query",
+            "name": "technologies",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "技術タグ。複数指定時は指定した全てを含む記事に絞る（AND）",
+              "title": "Technologies"
+            }
+          },
+          {
+            "description": "公開日の下限（published_at、NULLはfetched_atで代替）",
+            "in": "query",
+            "name": "published_from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "公開日の下限（published_at、NULLはfetched_atで代替）",
+              "title": "Published From"
+            }
+          },
+          {
+            "description": "公開日の上限",
+            "in": "query",
+            "name": "published_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "公開日の上限",
+              "title": "Published To"
+            }
+          },
+          {
+            "description": "情報源ドメインの完全一致",
+            "in": "query",
+            "name": "source_domain",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "情報源ドメインの完全一致",
+              "title": "Source Domain"
+            }
+          },
+          {
+            "description": "フィード対象期間（日数）。省略時はconfig/scoring.yamlのfreshness.max_age_daysを使う。freshnessスコアの減衰基準（新しさの点数）はこの値を変えても変わらない",
+            "in": "query",
+            "name": "max_age_days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "description": "フィード対象期間（日数）。省略時はconfig/scoring.yamlのfreshness.max_age_daysを使う。freshnessスコアの減衰基準（新しさの点数）はこの値を変えても変わらない",
+              "maximum": 180,
+              "minimum": 1,
+              "title": "Max Age Days",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "1始まりのページ番号",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "description": "1始まりのページ番号",
+              "maximum": 1000000,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
             }
           },
           {
@@ -2155,6 +2426,7 @@
             "schema": {
               "default": 0,
               "description": "スキップする件数",
+              "maximum": 100000000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
@@ -2213,7 +2485,7 @@
     },
     "/api/interests/summary": {
       "get": {
-        "description": "関心分析画面向けのサマリーを返す（`PROJECT_SPEC.md` §7, §8, Issue #16）。\n\n集計元は `article_feedback JOIN articles`（`user_articles` は使わない）。\nGood/Bad 比率は action 別の件数をそのまま返すが、内容分布系（技術・一次\n情報比率・content_type・難易度）は `af.action IN ('good', 'save')` に\n絞って集計する（Bad を付けた記事の属性まで「関心」として数えると実態と\nずれるため）。ジャンル別関心度だけは例外で、good/save の positive_count に\n加えて bad の negative_count も返す（`InterestGenreItem` docstring 参照）。\n\n抑制中のトピックは `user_topic_preferences.negative_weight > 0` の行を返す。\n抑制ロジック（`interest/topics.py`）が domain ではなく topic 粒度で動くため、\nここも topic 粒度で返す（`GET /api/interests` と同じ ORM クエリ）。\n\n集計は SQL 側で完結させ、Python へ全件ロードしない（`/timeline` と同じ方針）。\nデータが 1 件も無いときは各リストが空配列、`feedback_ratio` /\n`primary_source_ratio` は全項目 0 になる（GROUP BY 無しの集約クエリは\n行が無くても必ず 1 行返るため、例外にはならない）。",
+        "description": "関心分析画面向けのサマリーを返す（`PROJECT_SPEC.md` §7, §8, Issue #16）。\n\n集計元は `article_feedback JOIN articles`（`user_articles` は使わない）。\nGood/Bad 比率は action 別の件数をそのまま返すが、内容分布系（技術・一次\n情報比率・content_type・難易度）は `af.action IN ('good', 'save')` に\n絞って集計する（Bad を付けた記事の属性まで「関心」として数えると実態と\nずれるため）。ジャンル別関心度だけは例外で、good/save の positive_count に\n加えて bad の negative_count も返す（`InterestGenreItem` docstring 参照）。\n\n抑制中のトピックは `user_topic_preferences.negative_weight > 0` の行を返す。\n抑制ロジック（`interest/topics.py`）が domain ではなく topic 粒度で動くため、\nここも topic 粒度で返す（`GET /api/interests` と同じ ORM クエリ）。\n\n集計は SQL 側で完結させ、Python へ全件ロードしない（`/timeline` と同じ方針）。\nただし `origin_counts` だけは例外で、Python 側で数える（Issue #92）。この項目は\n集計元が他と違い（`article_feedback JOIN articles` ではなく関心プロファイルの\n構築対象）、母集団の決定に `user_articles` と `article_feedback` のマージが要る。\n`load_weighted_interest_articles` と同じ `_load_interest_article_population` を\n通さないと母集団がずれて画面の数字が嘘になるため、SQL 側での再実装は避けている。\nデータが 1 件も無いときは各リストが空配列、`feedback_ratio` /\n`primary_source_ratio` は全項目 0 になる（GROUP BY 無しの集約クエリは\n行が無くても必ず 1 行返るため、例外にはならない）。",
         "operationId": "get_interest_summary_api_interests_summary_get",
         "responses": {
           "200": {
@@ -2338,6 +2610,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "maxLength": 255,
                   "type": "string"
                 },
                 {
@@ -2356,6 +2629,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "maxLength": 200,
                   "type": "string"
                 },
                 {
@@ -2384,6 +2658,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 100000000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"

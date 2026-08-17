@@ -2,52 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { isRateLimitError } from "@/lib/api";
-import { getFeed } from "@/lib/feed";
-import type { FeedItem } from "@/lib/feed";
+import { buildSearchParamsFromFilters, getFeed } from "@/lib/feed";
+import type { FeedFilters, FeedItem } from "@/lib/feed";
 import { deleteFeedback, sendFeedback } from "@/lib/feedback";
 import type { ArticleFeedback, BadReason, FeedbackAction } from "@/lib/feedback";
 import { reportUnexpectedState } from "@/lib/report-unexpected";
-import { getRateLimitMessage, getRequestErrorMessage } from "@/lib/request-error-message";
+import { getRequestErrorMessage } from "@/lib/request-error-message";
 
 interface UseFeedResult {
   items: FeedItem[];
   isLoading: boolean;
-  isLoadingMore: boolean;
   error: string | null;
-  /** next_cursor が null になったら false。以降 loadMore は何もしない。 */
-  hasMore: boolean;
-  loadMore: () => void;
+  totalPages: number;
+  totalCount: number;
   applyFeedback: (articleId: string, action: FeedbackAction, reason?: BadReason) => void;
   removeFeedback: (articleId: string) => void;
-}
-
-/**
- * `Retry-After` が読めなかったときのクールダウン。backend のレート制限
- * ウィンドウ既定値（`recommendation_rate_limit_window_seconds` = 60 秒）に合わせる。
- */
-const DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 60;
-
-/**
- * 429 を受けたときだけ、追加ロードを止める期限（epoch ミリ秒）を更新する。
- *
- * 無限スクロールはセンチネルが可視になるたびに `loadMore` を呼ぶため、
- * 制限に掛かった直後にそのまま再試行すると残りの許容回数を食い潰し、
- * 待機時間だけが伸びていく。
- */
-function applyRateLimitCooldown(untilRef: { current: number }, error: unknown): void {
-  if (!isRateLimitError(error)) {
-    return;
-  }
-  const waitSeconds = error.retryAfterSeconds ?? DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS;
-  untilRef.current = Date.now() + waitSeconds * 1000;
-}
-
-/** 既存項目と新規項目を article_id で重複排除しながら連結する。 */
-function mergeItems(current: FeedItem[], incoming: FeedItem[]): FeedItem[] {
-  const seen = new Set(current.map((item) => item.article_id));
-  const deduped = incoming.filter((item) => !seen.has(item.article_id));
-  return [...current, ...deduped];
 }
 
 /** 指定 article_id の項目だけ feedback を書き換えた新しい配列を返す。 */
@@ -62,34 +31,42 @@ function withFeedback(
 /**
  * Discover フィードの状態管理 hook。
  *
- * 初回ロード・カーソルベースの追加ロード・フィードバックの楽観的更新を担う。
- * フィードバックは先にローカル state を書き換えてから API を呼び、失敗時は
- * 呼び出し前の状態へロールバックする（ボタン押下への即時反応を優先するため）。
+ * Issue #90 で無限スクロール（cursor）から番号付きページングへ書き換えた。
+ * ページは追記（append）せず丸ごと差し替える（backend の `page` は run 内の
+ * rank に対する offset で、cursor と違い同じページを何度でも取り直せる設計の
+ * ため、蓄積して重複排除する必要が無くなった）。
  *
- * 最新の items はレンダー時の `items` を直接参照する（以前は `itemsRef` という
- * `useEffect` 経由のミラーを使っていたが、DOM へのコミットと passive effect の
- * 実行の間には窓があり、その間にクリックされると古い（空の場合もある）配列を
- * 読んでフィードバックが黙って捨てられていた。Issue #37）。`setState` の関数形式
- * アップデータ内で API 呼び出しのような副作用を行うと、React が purity チェックの
- * ためアップデータを二重に呼ぶ場合に副作用も二重発火してしまうため、読み取りと
- * 更新を分離している（`usePolling` の `fetchFnRef` と同じ狙い）。
+ * ページ番号はこの hook では持たず、呼び出し側（`DiscoverFeed`）が URL から読んで
+ * 引数で渡す（Issue #95）。URL を唯一の情報源にすることで、リロード・共有・戻る操作で
+ * ページが再現する。フィルター条件が URL クエリだけを情報源にしているのと同じ扱いで、
+ * 状態の持ち方が非対称でなくなる。
+ *
+ * そのため「フィルターが変わったらページを1へ戻す」処理はここには無い。`page` を
+ * `buildSearchParamsFromFilters` の対象に含めていないため、`FeedFilterPanel` が
+ * フィルター変更時に URL を組み立て直すと `page` は自然に落ちる。**将来
+ * `buildSearchParamsFromFilters` へ `page` を足すとこの性質が壊れる**（フィルターを
+ * 変えてもページ番号が残り、範囲外のページを見せてしまう）。
+ *
+ * フィルターとページのどちらが変わったかは `useInterestArticles` と同じ「レンダー中に
+ * 前回値と比較して直す」パターンで検出し、読み込み中の表示へ切り替える
+ * （https://react.dev/learn/you-might-not-need-an-effect の
+ * "Adjusting state when a prop changes"）。どちらの変更も同じ effect が取得を担い、
+ * `cancelled` フラグで古いレスポンスの反映を防ぐ（`filters` か `page` が変わるたびに
+ * cleanup が走り、直前のフェッチの結果を無効化する。`useInterestArticles.loadMore` の
+ * `filterKeyRef` と同じ「古いレスポンスを破棄する」狙いを、こちらは effect の
+ * cleanup で満たす）。
+ *
+ * フィードバックの楽観的更新（Good/Bad/保存）は書き換え前の `useFeed` と同じ
+ * 設計を引き継ぐ：先にローカル state を書き換えてから API を呼び、失敗時は
+ * 呼び出し前の状態へロールバックする。最新の items はレンダー時の `items` を
+ * 直接参照する（Issue #37 の教訓、`itemsRef` 経由のミラーは使わない）。
  */
-export function useFeed(): UseFeedResult {
+export function useFeed(filters: FeedFilters, page: number): UseFeedResult {
   const [items, setItems] = useState<FeedItem[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [totalPages, setTotalPages] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // loadMore の参照を安定させるための最新値。state と二重管理になるが、
-  // setState と同じタイミングで同期的に更新することで、
-  // 「setState 直後の再呼び出しでは古い値が見える」問題（レンダー確定・
-  // passive effect 実行を待って初めて更新される値だけに頼ると起きうる）を避ける。
-  const nextCursorRef = useRef<string | null>(null);
-  const isLoadingMoreRef = useRef(false);
-
-  // レート制限（429）を受けたあと、追加ロードを再開してよい時刻（epoch ミリ秒）。
-  const rateLimitedUntilRef = useRef(0);
 
   // 送信中（pending）の article_id 集合。同じボタンを再レンダリングを挟まず
   // 連打すると、1回目の楽観的更新がまだレンダーに反映されていない古い feedback を
@@ -108,27 +85,51 @@ export function useFeed(): UseFeedResult {
     [],
   );
 
+  // フィルターが変わったかどうかを、クエリ文字列で比較して検出する。オブジェクト
+  // 参照ではなく文字列で比較するので、呼び出し側が毎レンダー新しい `filters`
+  // オブジェクトを渡しても（値が同じなら）無駄なリセットは起きない
+  // （`useInterestArticles` と同じ狙い）。
+  const filterKey = buildSearchParamsFromFilters(filters).toString();
+  const [previousFilterKey, setPreviousFilterKey] = useState(filterKey);
+  if (filterKey !== previousFilterKey) {
+    setPreviousFilterKey(filterKey);
+    setItems([]);
+    setError(null);
+    setIsLoading(true);
+  }
+
+  // ページ移動でも読み込み中にする。`useEffect` の本体で `setIsLoading(true)` を
+  // 同期的に呼ぶとカスケード再レンダーになる（react-hooks/set-state-in-effect が
+  // 検出する）ため、読み込み開始の合図はフィルター変更と同じくレンダー中の比較で
+  // 立て、effect 側は結果反映の setState だけにする。
+  //
+  // 前の items を残さないのは、範囲外のページを開いたときに前ページの記事が
+  // 見えたままにならないようにするため（`DiscoverFeed` は items が空のときに
+  // 「このページには記事がありません」を出す）。
+  const [previousPage, setPreviousPage] = useState(page);
+  if (page !== previousPage) {
+    setPreviousPage(page);
+    setItems([]);
+    setError(null);
+    setIsLoading(true);
+  }
+
   useEffect(() => {
-    // isLoading は useState(true) の初期値をそのまま使う。この effect は
-    // 空の依存配列で初回マウント時にしか走らないため、ここで改めて true に
-    // し直す必要はない（するとレンダー中の setState として lint に弾かれる）。
     let cancelled = false;
-    getFeed()
+    getFeed(filters, { page })
       .then((response) => {
         if (cancelled) {
           return;
         }
         setItems(response.items);
-        setNextCursor(response.next_cursor);
-        nextCursorRef.current = response.next_cursor;
+        setTotalPages(response.total_pages);
+        setTotalCount(response.total_count);
         setError(null);
       })
       .catch((err: unknown) => {
         if (cancelled) {
           return;
         }
-        // 初回ロードの失敗ではクールダウンを張らない。next_cursor が未取得のため
-        // loadMore はもともと何もせず、抑止する対象が存在しない。
         setError(getRequestErrorMessage(err));
       })
       .finally(() => {
@@ -141,52 +142,10 @@ export function useFeed(): UseFeedResult {
     return () => {
       cancelled = true;
     };
-  }, []);
-
-  // 依存配列を空にして参照を安定させる（nextCursor / isLoadingMore の値は
-  // ref から読む）。これらの state を依存に含めると、フェッチの開始・終了の
-  // たびに loadMore の参照が変わり、これを依存配列に持つ呼び出し側の
-  // useEffect（IntersectionObserver のセットアップ）がページを読むたびに
-  // observer を disconnect して作り直してしまう。
-  const loadMore = useCallback(() => {
-    if (nextCursorRef.current === null || isLoadingMoreRef.current) {
-      return;
-    }
-    const remainingMs = rateLimitedUntilRef.current - Date.now();
-    if (remainingMs > 0) {
-      // レート制限中は追加ロードを行わない。他の操作の成功でエラー表示が消えていても
-      // 「押しても何も起きない」状態にならないよう、残り時間を計算し直して出す。
-      setError(getRateLimitMessage(Math.ceil(remainingMs / 1000)));
-      return;
-    }
-    const cursor = nextCursorRef.current;
-    isLoadingMoreRef.current = true;
-    setIsLoadingMore(true);
-    getFeed({ cursor })
-      .then((response) => {
-        if (!isMountedRef.current) {
-          return;
-        }
-        setItems((current) => mergeItems(current, response.items));
-        setNextCursor(response.next_cursor);
-        nextCursorRef.current = response.next_cursor;
-        setError(null);
-      })
-      .catch((err: unknown) => {
-        if (!isMountedRef.current) {
-          return;
-        }
-        applyRateLimitCooldown(rateLimitedUntilRef, err);
-        setError(getRequestErrorMessage(err));
-      })
-      .finally(() => {
-        isLoadingMoreRef.current = false;
-        if (!isMountedRef.current) {
-          return;
-        }
-        setIsLoadingMore(false);
-      });
-  }, []);
+    // `filters` を直接依存に含める。呼び出し側（`DiscoverFeed`）が `useMemo` で
+    // 参照を安定させる想定だが、安定していなくても（`filterKey` の値が同じなら
+    // 上のリセットが起きないため）正しく動く（`useInterestArticles` と同じ狙い）。
+  }, [filters, page]);
 
   const applyFeedback = useCallback(
     (articleId: string, action: FeedbackAction, reason?: BadReason) => {
@@ -291,10 +250,9 @@ export function useFeed(): UseFeedResult {
   return {
     items,
     isLoading,
-    isLoadingMore,
     error,
-    hasMore: nextCursor !== null,
-    loadMore,
+    totalPages,
+    totalCount,
     applyFeedback,
     removeFeedback,
   };

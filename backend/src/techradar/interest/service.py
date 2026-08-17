@@ -27,7 +27,7 @@ from techradar.db.models import (
     UserTopicPreference,
 )
 from techradar.interest import sources
-from techradar.interest.clusters import ClusteringSettings, ClusterSource, build_interest_clusters
+from techradar.interest.clusters import ClusterSource, build_interest_clusters
 from techradar.interest.preferences import PreferenceDecaySettings, compute_negative_weight
 from techradar.interest.sources import SourceWeights
 from techradar.interest.topics import (
@@ -44,7 +44,11 @@ from techradar.interest.weights import (
     compute_recency_decay,
     explicit_weight_for_origin,
 )
-from techradar.recommendation.config import ScoringConfig, get_scoring_config
+from techradar.recommendation.config import (
+    ScoringConfig,
+    clustering_settings_from_config,
+    get_scoring_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +122,88 @@ class WeightedInterestArticle:
     weight: float
 
 
+def _load_interest_article_population(
+    session: Session, user_id: uuid.UUID, max_articles: int
+) -> tuple[tuple[uuid.UUID, ...], dict[uuid.UUID, ArticleOrigin], dict[uuid.UUID, datetime]]:
+    """関心プロファイル構築対象の記事集合を組み立てる（origin 統合 + 新しい順の打ち切り）。
+
+    `load_weighted_interest_articles`（Discover の関心プロファイル）と
+    `count_interest_articles_by_origin`（`GET /api/interests/summary` の
+    origin 別内訳、Issue #92）の両方から呼ばれる共通処理。両者が別々に
+    `user_articles` / `article_feedback` を読んで組み立て直すと、片方だけ
+    条件がずれて画面の内訳が実際のプロファイルと食い違いかねない（母集団が
+    ずれると数字が嘘になる）ため、母集団の決定ロジックをここへ一本化する。
+
+    origin の統合規則は `load_weighted_interest_articles` の docstring を参照
+    （`user_articles` 側の記録が優先、`article_feedback` の action='good' は
+    取りこぼし補完としてのみ使う）。
+    """
+    user_article_rows = session.execute(
+        select(UserArticle.article_id, UserArticle.origin, UserArticle.created_at).where(
+            UserArticle.user_id == user_id,
+            UserArticle.origin.in_(_INTEREST_ORIGIN_VALUES),
+        )
+    ).all()
+    good_feedback_rows = session.execute(
+        select(ArticleFeedback.article_id, ArticleFeedback.created_at).where(
+            ArticleFeedback.user_id == user_id,
+            ArticleFeedback.action == FeedbackAction.GOOD.value,
+        )
+    ).all()
+
+    # article_feedback の action='good' は §7.1 手順 1 で user_articles にも
+    # 追加されるため、通常は両方に同じ記事が現れる。user_articles 側の記録が
+    # 優先されるよう後から上書きし、article_feedback にしか記録が無い場合の
+    # 取りこぼしだけを補う（origin は Good 相当として扱う）。
+    origin_by_article_id: dict[uuid.UUID, ArticleOrigin] = {}
+    created_at_by_article_id: dict[uuid.UUID, datetime] = {}
+    for article_id, created_at in good_feedback_rows:
+        origin_by_article_id[article_id] = ArticleOrigin.GOOD
+        created_at_by_article_id[article_id] = created_at
+    for article_id, origin, created_at in user_article_rows:
+        origin_by_article_id[article_id] = ArticleOrigin(origin)
+        created_at_by_article_id[article_id] = created_at
+
+    target_article_ids = order_by_recency_and_truncate(
+        created_at_by_article_id, max_articles, "関心プロファイル構築対象"
+    )
+    return target_article_ids, origin_by_article_id, created_at_by_article_id
+
+
+def count_interest_articles_by_origin(
+    session: Session, user_id: uuid.UUID
+) -> dict[ArticleOrigin, int]:
+    """関心プロファイル構築対象の記事を origin 別に数える（Issue #92）。
+
+    `GET /api/interests/summary` が使う。`load_weighted_interest_articles` と
+    同じ母集団（`_load_interest_article_population`）
+    を使うため、画面に出る内訳は実際にプロファイルへ寄与する記事の内訳と一致する。
+    関心記事一覧（`GET /api/articles`）の3経路（manual/good/saved）とは異なり、
+    read_full/clicked も含む5経路すべてを返す（プロファイルの寄与元をそのまま
+    見せるため）。1件も無い origin も 0 件として返す（呼び出し側で欠損分岐を
+    せずに済むように）。
+    """
+    config = get_scoring_config()
+    max_articles = config.interest.max_profile_articles
+    target_article_ids, origin_by_article_id, _ = _load_interest_article_population(
+        session, user_id, max_articles
+    )
+
+    counts: dict[ArticleOrigin, int] = dict.fromkeys(
+        (
+            ArticleOrigin.MANUAL,
+            ArticleOrigin.GOOD,
+            ArticleOrigin.SAVED,
+            ArticleOrigin.READ_FULL,
+            ArticleOrigin.CLICKED,
+        ),
+        0,
+    )
+    for article_id in target_article_ids:
+        counts[origin_by_article_id[article_id]] += 1
+    return counts
+
+
 def load_weighted_interest_articles(
     session: Session, user_id: uuid.UUID, now: datetime
 ) -> tuple[WeightedInterestArticle, ...]:
@@ -176,34 +262,8 @@ def load_weighted_interest_articles(
         min_confidence=config.confidence.min_confidence,
     )
 
-    user_article_rows = session.execute(
-        select(UserArticle.article_id, UserArticle.origin, UserArticle.created_at).where(
-            UserArticle.user_id == user_id,
-            UserArticle.origin.in_(_INTEREST_ORIGIN_VALUES),
-        )
-    ).all()
-    good_feedback_rows = session.execute(
-        select(ArticleFeedback.article_id, ArticleFeedback.created_at).where(
-            ArticleFeedback.user_id == user_id,
-            ArticleFeedback.action == FeedbackAction.GOOD.value,
-        )
-    ).all()
-
-    # article_feedback の action='good' は §7.1 手順 1 で user_articles にも
-    # 追加されるため、通常は両方に同じ記事が現れる。user_articles 側の記録が
-    # 優先されるよう後から上書きし、article_feedback にしか記録が無い場合の
-    # 取りこぼしだけを補う（origin は Good 相当として扱う）。
-    origin_by_article_id: dict[uuid.UUID, ArticleOrigin] = {}
-    created_at_by_article_id: dict[uuid.UUID, datetime] = {}
-    for article_id, created_at in good_feedback_rows:
-        origin_by_article_id[article_id] = ArticleOrigin.GOOD
-        created_at_by_article_id[article_id] = created_at
-    for article_id, origin, created_at in user_article_rows:
-        origin_by_article_id[article_id] = ArticleOrigin(origin)
-        created_at_by_article_id[article_id] = created_at
-
-    target_article_ids = order_by_recency_and_truncate(
-        created_at_by_article_id, max_articles, "関心プロファイル構築対象"
+    target_article_ids, origin_by_article_id, created_at_by_article_id = (
+        _load_interest_article_population(session, user_id, max_articles)
     )
     articles = (
         session.scalars(select(Article).where(Article.id.in_(target_article_ids))).all()
@@ -699,7 +759,7 @@ def recompute_source_preferences_after_removal(
     _upsert_source_preference(session, user_id, source_domain, updated, now)
 
 
-def _load_cluster_sources(
+def load_cluster_sources(
     session: Session, user_id: uuid.UUID, now: datetime
 ) -> tuple[ClusterSource, ...]:
     """関心クラスタ構築対象の記事を `ClusterSource` に変換する。
@@ -708,6 +768,9 @@ def _load_cluster_sources(
     （DRY）。embedding が無い記事は KMeans の入力にできないため除外する
     （`recommendation.service.build_interest_profile` が `weighted_embeddings` を
     組み立てる際の除外と同じ扱い）。
+
+    `techradar.measure.collect` からも呼ぶため public にしてある。計測側で同じ抽出を
+    書き直すと、ここの条件が変わったときに計測結果が本番のクラスタと静かに食い違う。
     """
     weighted_articles = load_weighted_interest_articles(session, user_id, now)
     return tuple(
@@ -728,15 +791,9 @@ def rebuild_interest_clusters(session: Session, user_id: uuid.UUID, now: datetim
     Returns:
         生成したクラスタ数。対象記事（embedding 付きの関心記事）が無ければ 0。
     """
-    sources = _load_cluster_sources(session, user_id, now)
+    sources = load_cluster_sources(session, user_id, now)
     config = get_scoring_config()
-    clustering_settings = ClusteringSettings(
-        min_clusters=config.clustering.min_clusters,
-        max_clusters=config.clustering.max_clusters,
-        min_articles_per_cluster=config.clustering.min_articles_per_cluster,
-        label_topic_count=config.clustering.label_topic_count,
-        random_state=config.clustering.random_state,
-    )
+    clustering_settings = clustering_settings_from_config(config)
     clusters = build_interest_clusters(sources, clustering_settings)
 
     session.execute(delete(UserInterestCluster).where(UserInterestCluster.user_id == user_id))

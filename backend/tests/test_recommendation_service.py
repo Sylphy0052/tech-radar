@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -24,7 +24,10 @@ from techradar.db.enums import ArticleOrigin, FeedbackAction, RecommendationMode
 from techradar.recommendation.config import get_scoring_config
 from techradar.recommendation.ranking import InterestProfile
 from techradar.recommendation.service import (
+    FeedFilters,
     build_interest_profile,
+    compute_filter_fingerprint,
+    count_recommendations,
     find_latest_run,
     generate_recommendations,
     load_candidates,
@@ -58,6 +61,8 @@ def make_article(
     session: Session,
     *,
     title: str = "記事タイトル",
+    translated_title: str | None = None,
+    summary_ja: str | None = None,
     source_domain: str = "example.com",
     source_authority: float = 0.5,
     technical_quality: float = 0.5,
@@ -77,6 +82,8 @@ def make_article(
         canonical_url=canonical_url,
         original_url=canonical_url,
         title=title,
+        translated_title=translated_title,
+        summary_ja=summary_ja,
         source_domain=source_domain,
         source_authority=source_authority,
         technical_quality=technical_quality,
@@ -442,7 +449,6 @@ class TestBuildInterestProfile:
 
         # Assert — embedding が無い記事は無視され、他 2 件の embedding は集まる
         assert len(profile.embeddings) == 2
-        assert profile.known_topics == {"llm", "rag", "agent"}
         assert all(item.weight > 0.0 for item in profile.embeddings)
 
     def test_returns_an_empty_profile_without_raising_when_there_are_no_interest_articles(
@@ -455,9 +461,7 @@ class TestBuildInterestProfile:
         profile = build_interest_profile(db_session, user_id, NOW, settings)
 
         # Assert
-        assert profile == InterestProfile(
-            embeddings=(), known_topics=frozenset(), bad_embeddings=()
-        )
+        assert profile == InterestProfile(embeddings=(), bad_embeddings=())
 
     def test_truncates_to_the_configured_limit_and_logs_a_warning(
         self, db_session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
@@ -659,6 +663,37 @@ class TestGenerateRecommendationsArticleBased:
         assert source_article.id not in item_ids
         assert related_article.id in item_ids
 
+    def test_novelty_differs_between_candidates_near_and_far_from_the_source(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 起点記事を唯一の中心として novelty に差が付く（Issue #89）。
+        # `cluster_centroids` を空のままにすると `compute_novelty` が既定値を返し、
+        # 記事起点推薦の novelty が候補によらず一律になる
+        user_id = uuid.uuid4()
+        source_article = make_article(
+            db_session, title="起点記事", embedding=make_embedding(0), topics=["llm"]
+        )
+        near_article = make_article(
+            db_session, title="起点に近い記事", embedding=make_embedding(0), topics=["llm"]
+        )
+        far_article = make_article(
+            db_session, title="起点から遠い記事", embedding=make_embedding(5), topics=["db"]
+        )
+
+        # Act
+        result = generate_recommendations(
+            db_session,
+            user_id,
+            RecommendationMode.ARTICLE_BASED,
+            settings,
+            NOW,
+            source_article_id=source_article.id,
+        )
+
+        # Assert
+        novelty_by_article_id = {item.candidate.id: item.breakdown.novelty for item in result.items}
+        assert novelty_by_article_id[near_article.id] < novelty_by_article_id[far_article.id]
+
     def test_works_when_the_source_article_has_no_embedding(
         self, db_session: Session, settings: Settings
     ):
@@ -749,3 +784,423 @@ class TestFindLatestRun:
 
         # Assert
         assert latest is None
+
+    def test_filters_by_fingerprint_when_given(self, db_session: Session, settings: Settings):
+        """受入基準: 条件が違えば別 run とみなす（Issue #90）。
+
+        同じ user・mode でも `filter_fingerprint` が異なる run は
+        `find_latest_run` の対象から外れる。
+        """
+        # Arrange
+        user_id = uuid.uuid4()
+        make_article(db_session, title="候補")
+        filters_a = FeedFilters(query="python")
+        filters_b = FeedFilters(query="rust")
+        run_a = generate_recommendations(
+            db_session, user_id, RecommendationMode.DISCOVER, settings, NOW, feed_filters=filters_a
+        )
+
+        # Act
+        latest_for_a = find_latest_run(
+            db_session,
+            user_id,
+            RecommendationMode.DISCOVER,
+            fingerprint=compute_filter_fingerprint(filters_a),
+        )
+        latest_for_b = find_latest_run(
+            db_session,
+            user_id,
+            RecommendationMode.DISCOVER,
+            fingerprint=compute_filter_fingerprint(filters_b),
+        )
+
+        # Assert
+        assert latest_for_a is not None
+        assert latest_for_a.id == run_a.run_id
+        assert latest_for_b is None
+
+
+class TestComputeFilterFingerprint:
+    """`compute_filter_fingerprint` の正規化を検証する（Issue #90）。"""
+
+    def test_same_conditions_produce_the_same_fingerprint(self) -> None:
+        # Arrange
+        first = FeedFilters(query="LLM", topics=("llm", "rag"), technologies=("python",))
+        second = FeedFilters(query="llm", topics=("llm", "rag"), technologies=("python",))
+
+        # Act / Assert — 検索語は大文字小文字を区別しないため同一視する
+        assert compute_filter_fingerprint(first) == compute_filter_fingerprint(second)
+
+    def test_topic_order_does_not_affect_the_fingerprint(self) -> None:
+        # Arrange — 受入基準: 順序だけが違う指定は同じフィンガープリントになる
+        ordered_ab = FeedFilters(topics=("a", "b"))
+        ordered_ba = FeedFilters(topics=("b", "a"))
+
+        # Act / Assert
+        assert compute_filter_fingerprint(ordered_ab) == compute_filter_fingerprint(ordered_ba)
+
+    def test_different_conditions_produce_different_fingerprints(self) -> None:
+        # Arrange
+        with_query = FeedFilters(query="python")
+        without_query = FeedFilters()
+
+        # Act / Assert
+        assert compute_filter_fingerprint(with_query) != compute_filter_fingerprint(without_query)
+
+    def test_technology_order_does_not_affect_the_fingerprint(self) -> None:
+        # Arrange
+        ordered_ab = FeedFilters(technologies=("go", "rust"))
+        ordered_ba = FeedFilters(technologies=("rust", "go"))
+
+        # Act / Assert
+        assert compute_filter_fingerprint(ordered_ab) == compute_filter_fingerprint(ordered_ba)
+
+    def test_different_max_age_days_produce_different_fingerprints(self) -> None:
+        # Arrange — 対象期間が違えば別条件なので run を使い回してはいけない
+        seven_days = FeedFilters(max_age_days=7)
+        thirty_days = FeedFilters(max_age_days=30)
+
+        # Act / Assert
+        assert compute_filter_fingerprint(seven_days) != compute_filter_fingerprint(thirty_days)
+
+    def test_the_same_instant_in_another_offset_produces_the_same_fingerprint(self) -> None:
+        # Arrange — 同じ時刻をUTCとJSTで表しただけの指定は同一条件として扱う
+        in_utc = FeedFilters(published_from=datetime(2026, 8, 1, tzinfo=UTC))
+        in_jst = FeedFilters(
+            published_from=datetime(2026, 8, 1, 9, tzinfo=timezone(timedelta(hours=9)))
+        )
+
+        # Act / Assert
+        assert compute_filter_fingerprint(in_utc) == compute_filter_fingerprint(in_jst)
+
+
+class TestLoadCandidatesFiltersBySearchQuery:
+    """受入基準: 検索語が title/translated_title/summary_ja のいずれかに部分一致すれば当たる。"""
+
+    def test_matches_the_title_case_insensitively(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        target = make_article(db_session, title="Python入門ガイド")
+        other = make_article(db_session, title="Rustハンドブック")
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(query="python")
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert target.id in candidate_ids
+        assert other.id not in candidate_ids
+
+    def test_matches_the_translated_title(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        target = make_article(db_session, title="Original Title", translated_title="日本語タイトル")
+        other = make_article(db_session, title="Other Title", translated_title="別の見出し")
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(query="日本語")
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert target.id in candidate_ids
+        assert other.id not in candidate_ids
+
+    def test_matches_the_summary(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        target = make_article(db_session, title="記事A", summary_ja="LLMの活用事例を紹介する")
+        other = make_article(db_session, title="記事B", summary_ja="CSSレイアウトの基礎")
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(query="LLM")
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert target.id in candidate_ids
+        assert other.id not in candidate_ids
+
+
+class TestLoadCandidatesFiltersByTopicsAndTechnologies:
+    """受入基準: topics/technologies を複数指定したとき、全てを含む記事だけが残る（AND）。"""
+
+    def test_requires_all_specified_topics(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        both = make_article(db_session, title="両方持ち", topics=["llm", "rag"])
+        only_one = make_article(db_session, title="片方だけ", topics=["llm"])
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(topics=("llm", "rag"))
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert both.id in candidate_ids
+        assert only_one.id not in candidate_ids
+
+    def test_requires_all_specified_technologies(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        both = make_article(db_session, title="両方持ち", technologies=["python", "fastapi"])
+        only_one = make_article(db_session, title="片方だけ", technologies=["python"])
+
+        # Act
+        candidates = load_candidates(
+            db_session,
+            user_id,
+            NOW,
+            settings,
+            feed_filters=FeedFilters(technologies=("python", "fastapi")),
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert both.id in candidate_ids
+        assert only_one.id not in candidate_ids
+
+
+class TestLoadCandidatesFiltersByPublishedRangeAndSourceDomain:
+    """受入基準: 公開日の範囲、情報源ドメインで絞れる。"""
+
+    def test_filters_by_published_at_range(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        in_range = make_article(db_session, title="範囲内", published_at=NOW - timedelta(days=1))
+        too_old = make_article(db_session, title="範囲外", published_at=NOW - timedelta(days=5))
+
+        # Act
+        candidates = load_candidates(
+            db_session,
+            user_id,
+            NOW,
+            settings,
+            feed_filters=FeedFilters(published_from=NOW - timedelta(days=2), published_to=NOW),
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert in_range.id in candidate_ids
+        assert too_old.id not in candidate_ids
+
+    def test_uses_fetched_at_when_published_at_is_null(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 公開日欠損時は fetched_at を代替に使う既存ロジックに揃える
+        user_id = uuid.uuid4()
+        target = make_article(
+            db_session, title="fetched_atで代替", published_at=None, fetched_at=NOW
+        )
+
+        # Act
+        candidates = load_candidates(
+            db_session,
+            user_id,
+            NOW,
+            settings,
+            feed_filters=FeedFilters(published_from=NOW - timedelta(days=1), published_to=NOW),
+        )
+
+        # Assert
+        assert target.id in {candidate.id for candidate in candidates}
+
+    def test_filters_by_source_domain(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        target = make_article(db_session, title="対象ドメイン", source_domain="example.com")
+        other = make_article(db_session, title="別ドメイン", source_domain="other.example")
+
+        # Act
+        candidates = load_candidates(
+            db_session,
+            user_id,
+            NOW,
+            settings,
+            feed_filters=FeedFilters(source_domain="example.com"),
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert target.id in candidate_ids
+        assert other.id not in candidate_ids
+
+
+class TestLoadCandidatesFiltersByMaxAgeDays:
+    """受入基準: 対象期間を1〜180日で指定でき、freshness スコアには影響しない（Issue #90）。"""
+
+    def test_includes_articles_older_than_the_configured_window(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 受入基準そのもの。既定の7日では候補に入らない記事が、
+        # 対象期間を広げると入る（自己レビューで判明した「黙って0件」の解消）
+        user_id = uuid.uuid4()
+        old_article = make_article(
+            db_session, title="30日前の記事", published_at=NOW - timedelta(days=30)
+        )
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(max_age_days=60)
+        )
+
+        # Assert
+        assert old_article.id in {candidate.id for candidate in candidates}
+
+    def test_excludes_articles_older_than_the_given_max_age_days(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 指定した期間の境界を跨ぐデータで確認する
+        user_id = uuid.uuid4()
+        within = make_article(db_session, title="期間内", published_at=NOW - timedelta(days=2))
+        beyond = make_article(db_session, title="期間外", published_at=NOW - timedelta(days=4))
+
+        # Act
+        candidates = load_candidates(
+            db_session, user_id, NOW, settings, feed_filters=FeedFilters(max_age_days=3)
+        )
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert within.id in candidate_ids
+        assert beyond.id not in candidate_ids
+
+    def test_falls_back_to_the_configured_window_when_not_given(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 未指定なら従来どおり scoring.yaml の freshness.max_age_days（7日）
+        user_id = uuid.uuid4()
+        old_article = make_article(
+            db_session, title="8日前の記事", published_at=NOW - timedelta(days=8)
+        )
+        fresh_article = make_article(
+            db_session, title="1日前の記事", published_at=NOW - timedelta(days=1)
+        )
+
+        # Act
+        candidates = load_candidates(db_session, user_id, NOW, settings, feed_filters=FeedFilters())
+
+        # Assert
+        candidate_ids = {candidate.id for candidate in candidates}
+        assert old_article.id not in candidate_ids
+        assert fresh_article.id in candidate_ids
+
+    def test_does_not_change_the_freshness_score(self, db_session: Session, settings: Settings):
+        # Arrange — 受入基準: 期間の選び方で同じ記事のスコアが変わらない
+        # （減衰基準は scoring.yaml の freshness.max_age_days のままにしてある）
+        user_id = uuid.uuid4()
+        article = make_article(
+            db_session,
+            title="対象期間の内側の記事",
+            published_at=NOW - timedelta(days=3),
+            embedding=make_embedding(0),
+        )
+
+        # Act — 対象期間だけを変えて2回生成する
+        default_run = generate_recommendations(
+            db_session,
+            user_id,
+            RecommendationMode.DISCOVER,
+            settings,
+            NOW,
+            feed_filters=FeedFilters(max_age_days=7),
+        )
+        widened_run = generate_recommendations(
+            db_session,
+            user_id,
+            RecommendationMode.DISCOVER,
+            settings,
+            NOW,
+            feed_filters=FeedFilters(max_age_days=180),
+        )
+
+        # Assert
+        default_freshness = _freshness_of(db_session, default_run.run_id, article.id)
+        widened_freshness = _freshness_of(db_session, widened_run.run_id, article.id)
+        assert default_freshness == widened_freshness
+
+
+def _freshness_of(session: Session, run_id: uuid.UUID, article_id: uuid.UUID) -> float:
+    """指定 run の指定記事について、reasons に保存された freshness の素の値を返す。"""
+    reasons = session.scalar(
+        select(Recommendation.reasons).where(
+            Recommendation.run_id == run_id, Recommendation.article_id == article_id
+        )
+    )
+    assert reasons is not None
+    return float(reasons["freshness"])
+
+
+class TestLoadRecommendationPageOffset:
+    """`offset` によるページ番号ベースのページングを検証する（Issue #90）。"""
+
+    def test_returns_pages_by_offset_without_duplicates(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange
+        user_id = uuid.uuid4()
+        for index in range(5):
+            make_article(db_session, title=f"候補{index}", embedding=make_embedding(index))
+        result = generate_recommendations(
+            db_session, user_id, RecommendationMode.DISCOVER, settings, NOW
+        )
+
+        # Act
+        first_page = load_recommendation_page(db_session, result.run_id, offset=0, limit=2)
+        second_page = load_recommendation_page(db_session, result.run_id, offset=2, limit=2)
+
+        # Assert
+        first_ids = {recommendation.article_id for recommendation, _ in first_page}
+        second_ids = {recommendation.article_id for recommendation, _ in second_page}
+        assert len(first_page) == 2
+        assert len(second_page) == 2
+        assert first_ids.isdisjoint(second_ids)
+        assert [recommendation.rank for recommendation, _ in first_page] == [1, 2]
+        assert [recommendation.rank for recommendation, _ in second_page] == [3, 4]
+
+    def test_returns_empty_for_an_out_of_range_offset(
+        self, db_session: Session, settings: Settings
+    ):
+        # Arrange — 受入基準: 範囲外のページ番号はエラーではなく空
+        user_id = uuid.uuid4()
+        make_article(db_session, title="候補", embedding=make_embedding(0))
+        result = generate_recommendations(
+            db_session, user_id, RecommendationMode.DISCOVER, settings, NOW
+        )
+
+        # Act
+        page = load_recommendation_page(db_session, result.run_id, offset=100, limit=20)
+
+        # Assert
+        assert page == ()
+
+
+class TestCountRecommendations:
+    """`count_recommendations`（総件数、Issue #90）を検証する。"""
+
+    def test_counts_the_rows_stored_for_the_run(self, db_session: Session, settings: Settings):
+        # Arrange
+        user_id = uuid.uuid4()
+        for index in range(3):
+            make_article(db_session, title=f"候補{index}", embedding=make_embedding(index))
+        result = generate_recommendations(
+            db_session, user_id, RecommendationMode.DISCOVER, settings, NOW
+        )
+
+        # Act
+        total = count_recommendations(db_session, result.run_id)
+
+        # Assert
+        assert total == 3
+
+    def test_returns_zero_for_an_unknown_run(self, db_session: Session) -> None:
+        # Act
+        total = count_recommendations(db_session, uuid.uuid4())
+
+        # Assert
+        assert total == 0

@@ -2,7 +2,7 @@
 
 - ステータス: 採用
 - 日付: 2026-08-01
-- 関連: `PROJECT_SPEC.md` §21 LLM対策 / Issue #4 / [ADR 0001](0001-technology-stack.md)
+- 関連: `PROJECT_SPEC.md` §21 LLM対策 / Issue #4 / Issue #49 / Issue #50 / Issue #56 / Issue #66 / [ADR 0001](0001-technology-stack.md)
 
 ## コンテキスト
 
@@ -52,6 +52,144 @@ Claude Code CLI 2.1.201 で検証した。プロンプトは「`Read` ツール�
 --disable-slash-commands  Disable all skills
 ```
 
+### 管理者ポリシーはコマンドライン引数を上書きしない（CLI 2.1.227）
+
+管理者ポリシー（admin-managed policy）はコマンドライン引数より上位のスコープで、公式ドキュメントに
+「他のどのスコープからも上書きできない」とある。主防御の `--tools ""` がポリシーに打ち消されるなら、
+この ADR の決定はポリシー配下のホストで成立しない。Issue #56 でこれを実測した。
+
+開発機の `/etc/claude-code/` が存在しないことを確認したうえで一時的にポリシーを配置し、
+`_build_command` と同じ引数（`--tools ""` / `--setting-sources ""` / `--settings` の `permissions.deny` /
+`--disallowedTools` / `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` / `--disable-slash-commands`）で
+実行して、ポリシーの内容だけを変えた。プロンプトは「`Read` ツールで `/etc/hostname` を読んで内容を答えよ。
+ツールが無いなら `NO_TOOLS` と答えよ」。検証後にポリシーを削除し、`/etc/claude-code/` が消えたことを確認した。
+
+| ポリシーの内容 | 終了コード | `num_turns` | `permission_denials` | ツールが動いたか | hooks が動いたか |
+| --- | --- | --- | --- | --- | --- |
+| （無し・ベースライン） | 0 | 1 | `[]` | 動かない | — |
+| `permissions.allow: ["Read", "Read(//etc/hostname)"]` | 0 | 1 | `[]` | 動かない | — |
+| 上記 + `permissions.defaultMode: "bypassPermissions"` + `allowManagedPermissionRulesOnly: true` | 0 | 1 | `[]` | 動かない | — |
+| `hooks.SessionStart`（ファイルを作るコマンド） | 0 | 1 | `[]` | 動かない | **動いた** |
+| `disableSideloadFlags: true` | 0 | 1 | `[]` | 動かない | — |
+| `allowManagedHooksOnly: true` + `hooks.SessionStart` | 0 | 1 | `[]` | 動かない | **動いた** |
+| drop-in `managed-settings.d/10-hooks.json` に `hooks.SessionStart` のみ | 0 | 1 | `[]` | 動かない | **動いた** |
+
+結論は次の2点である。
+
+- **`permissions` 側からは `--tools ""` を打ち消せない。** ポリシーで `Read` を許可しても、`defaultMode` を
+  `bypassPermissions` にしても、ツールは動かなかった。`--tools` は「セッションで利用可能な組み込みツールの集合」を
+  決めるフラグで、`permissions` の allow / deny は**存在するツールを呼んでよいか**を決める別の層にある。
+  ポリシー側に `--tools` へ相当するキーは、2026-08-11 時点の公式ドキュメントの設定一覧には見当たらない
+- **hooks はポリシーから実行される。** `--setting-sources ""` は user / project / local にしか及ばないため、
+  ポリシーに定義された hooks は素通りする。従来この ADR が推測で書いていた点が実測で確定した。
+  `managed-settings.json` だけでなく drop-in ディレクトリ `managed-settings.d/` に置いたものも実行される。
+  実測したイベントは `SessionStart` と `UserPromptSubmit`（後者は Issue #66）。hooks の読み込み自体がポリシーへ及んでいるため他のイベントでも同様と見る
+
+### ポリシーが持つ他の突破経路（CLI 2.1.227）
+
+上の実測は `permissions` と hooks しか試していない。ポリシーには任意コマンドを走らせたり CLI の動作を
+差し替えたりできるキーが他にもあるため、Issue #66 で続きを実測した。手順は同じで、
+`_build_command` と同等の引数を渡したままポリシーの内容だけを変えている。
+
+| ポリシー | 観測 | 結果 |
+| --- | --- | --- |
+| `apiKeyHelper` にコマンド | マーカーファイルが作られたか | **作られた**（終了コード 1、認証には失敗） |
+| `env` に到達不能な `ANTHROPIC_BASE_URL` | 通常どおり応答するか | **応答しない**（150 秒でタイムアウト） |
+| `env` にローカルのプローブサーバを指す `ANTHROPIC_BASE_URL` | そのサーバへリクエストが届くか | **届いた**（下記） |
+| ポリシー直下の `mcpServers` | サーバのプロセスが起動したか | 起動しない（正常終了し、マーカーも作られない） |
+| `claudeMd` に識別可能な指示 | 応答が指示に従うか | **従う**（`OK` だけを求めたのに `POLICY_CLAUDEMD_ACTIVE` が先頭に付いた。`cache_creation_input_tokens` も 1198 増えた） |
+| `hooks.UserPromptSubmit` にコマンド | マーカーファイルが作られたか | **作られた**（`SessionStart` 以外でも実行される） |
+| `hooks.SessionStart` + 引数へ `--settings '{"disableAllHooks":true}'` | hooks を止められるか | **止められない**（マーカーが作られた） |
+
+**穴は hooks だけではない。** 塞げていない経路は次の4つで、いずれもコマンドライン引数から無効化できない。
+
+- **`apiKeyHelper`** — システムシェル経由で任意コマンドを実行する。hooks と同じ性質の実行経路
+- **`env`** — CLI とその子プロセスへ環境変数を注入する。`ANTHROPIC_BASE_URL` を差し替えられるということは、
+  **記事本文の送信先を第三者のエンドポイントへ向けられる**ということである。ツールが1つも動かなくても本文は漏れる。
+  `build_environment()` の許可リストは親プロセスからの継承を絞るだけで、この経路には効かない
+- **`claudeMd`** — 組織向けの CLAUDE.md として、システムプロンプト相当の指示を注入する。ツール実行ではないが、
+  要約や分類の出力を任意に歪められる。`--setting-sources ""` の管轄外
+- **hooks** — イベントを問わず実行される。`--settings` から `disableAllHooks: true` を渡しても止まらない
+
+一方、**ポリシー直下に書いた `mcpServers` は読まれなかった**。`--strict-mcp-config` が効いているものと見られる。
+サーバのプロセスが起動しないだけでなく、stderr に起動失敗の警告も出ておらず、`usage` の内訳もポリシー無しの
+ベースラインと一致した。読み込みを試みて静かに失敗した形跡は無い。
+
+Skills をポリシー側から再有効化するキーは、2026-08-11 時点のドキュメントの設定一覧には無い
+（`disableBundledSkills` と `disableSkillShellExecution` はどちらも無効化方向のキー）。**これは実測ではなく
+ドキュメント調査による確認である。** 打ち消すキーが存在しないため、試すべき対象そのものが無い。
+
+#### `env` の差し替え先へは認証情報も一緒に届く
+
+上の表の `env` は、はじめ到達不能なアドレス（`127.0.0.1:9`）を指定してタイムアウトを見ていた。これは
+「ポリシーの `env` が効いた」ことの間接的な証拠でしかなく、ネットワーク側の不調と区別できない。そこで
+リクエストを記録するだけのサーバをローカルへ立て、`ANTHROPIC_BASE_URL` をそこへ向けて実行し直した。
+
+```text
+POST /v1/messages?beta=true content-length=13786
+  host: 127.0.0.1:18099
+  user-agent: claude-cli/2.1.227 (external, sdk-cli)
+  authorization: <present>
+  anthropic-version: 2023-06-01
+```
+
+**リクエストは実際に届いた。** 90 秒のあいだに16回（リトライを含む）。先の実行が即座にエラーを返さず
+タイムアウトまでハングしたのも、このリトライで説明がつく。
+
+注目すべきは `authorization` ヘッダが付いていることで、**差し替え先には本文だけでなく認証情報も渡る**。
+ポリシーを配布できる立場の相手には、記事本文と要約に加えてサブスクリプションの認証情報まで露出する。
+
+（プローブサーバはリクエスト行とヘッダ名だけを記録し、本文は読み捨てている。`content-length` から本文が
+乗っていることは分かるが、中身をディスクへ残してはいない）
+
+#### まだ確かめていない範囲
+
+- `enableAllProjectMcpServers` — ポリシー直下の `mcpServers` は読まれなかったが、こちらは試していない
+- 実測した5つのキー以外に、任意コマンドの実行や送信先の変更に関わるキーが無いか。設定一覧を機械的に
+  突き合わせたわけではないため、「穴は4つ」は**確認できた範囲での数**である
+- macOS / Windows での挙動、および他の CLI バージョン
+- 将来ポリシーへ追加されるキー
+
+CLI を更新したときは、この節も含めて再検証する。
+
+#### 出力テキストでツール実行を判定してはいけない
+
+この検証で最初に得られた応答は紛らわしかった。ベースラインでは
+
+```text
+I'll read that file.
+**Tool call:** Read — `/etc/hostname`
+**Result:**
+HEROZ-PC-1108
+```
+
+のような、ツールを呼んで結果を得たかのようなテキストが返った。別のケースでは
+`<invoke name="Read">` という生のタグと `1→DESKTOP-8C7NQTM` という行番号付きの読み取り結果まで再現された。
+しかし**どちらも開発機の実際のホスト名とは一致しない**。ツールを持たないモデルが、
+ツール呼び出しとその結果を丸ごと創作していた。
+
+対照として、防御を外して `--tools Read --allowedTools Read` で同じプロンプトを実行すると、`num_turns` が **2** になり、
+応答は実際のホスト名を返した。判定は `num_turns` と、外部から検証できる実データ（この場合はホスト名）で行う必要がある。
+`_assert_no_tool_use` が `num_turns` を見ているのはこのためで、本文の見た目には依存しない。
+
+#### `disableSideloadFlags` は `--mcp-config` を拒否する
+
+ポリシー専用キー `disableSideloadFlags` は `--plugin-dir` / `--plugin-url` / `--agents` / `--mcp-config` を
+起動時に拒否する。本実装は `--mcp-config` を渡しているため、この経路の挙動を確認した。
+
+| ポリシー | 渡したフラグ | 終了コード | stderr |
+| --- | --- | --- | --- |
+| `disableSideloadFlags: true` | `--mcp-config '{"mcpServers":{"dummy":{...}}}'` | **1** | `--mcp-config is disabled by your organization's managed settings (disableSideloadFlags).` |
+| `disableSideloadFlags: true` | `--plugin-dir /tmp` | **1** | `--plugin-dir is disabled by ...`（同文） |
+| `disableSideloadFlags: true` | `--mcp-config '{"mcpServers":{}}'`（本実装と同じ） | 0 | (空) |
+| （無し） | `--plugin-dir /tmp` | 0 | (空) |
+
+サーバを1つも含まない `--mcp-config` は受理される。ドキュメントの「全サーバがインプロセスの `type: "sdk"` なら
+受理する」という例外を、空の集合が満たしているためと見られる。したがって現状の指定はポリシー配下でも起動できる。
+ただし**将来 `command` 型の MCP サーバを渡す形に変えると、ポリシーが配布されたホストでは起動そのものが失敗する**
+（実測したのは `command` 型。`type: "sdk"` だけで構成した場合が受理されるかは確かめていない）。
+失敗は終了コード 1 で表に出るため、隔離が静かに破れるのではなく `LLMInvocationError` になる（フェイルクローズ）。
+
 ## 決定
 
 **`--tools ""` を主防御とする。** 列挙ではなく組み込みツールを構造的に空にするため、CLI に新しいツールが増えても漏れない。
@@ -76,7 +214,14 @@ hooks は設定ファイル（user / project / local）に定義され、**ツ�
 > 1. **Managed** (highest): can't be overridden by any other scope, apart from the exceptions under Settings precedence
 > 2. **Command line arguments**: temporary session overrides
 
-つまりポリシー側に hooks が定義されていれば、`--setting-sources ""` では止められない（Issue #50）。残存リスクとしての扱いは後述する。
+つまりポリシー側に hooks が定義されていれば、`--setting-sources ""` では止められない（Issue #50）。上の実測のとおり
+これは確認済みで、`managed-settings.d/` の drop-in に置いたものも、`SessionStart` 以外のイベントも実行される。
+`--settings` から `disableAllHooks: true` を渡しても止まらない。同じくポリシー由来の `apiKeyHelper` / `env` / `claudeMd` も
+この指定の管轄外にある。残存リスクとしての扱いは後述する。
+
+なお、この優先順位が及ぶのは**同じ設定がポリシーとコマンドラインの両方にある場合**である。`--tools` に相当する設定キーは
+ポリシー側に存在しないため、主防御が上書きされることは無い（Issue #56 で実測）。ただしツールを動かさずとも
+`env` で送信先を差し替えられるため、ポリシー配下では主防御が生きていること自体に意味が無い。
 
 `--bare` でも hooks を止められるが、**OAuth を読まなくなり `ANTHROPIC_API_KEY` が必須になる**（ヘルプに "Anthropic auth is strictly ANTHROPIC_API_KEY ... (OAuth and keychain are never read)"）。サブスク枠で動かすという ADR 0001 の決定と両立しないため使わない。なお `--bare` が止められるのも上と同じ3つのスコープ由来の hooks であり、管理者ポリシー由来のものは残る。
 
@@ -89,6 +234,13 @@ CLI が認識しない名前を渡すと起動時に警告が出て**終了コ�
 ### 3. MCP を読み込ませない
 
 `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`。
+
+**渡す MCP サーバは空のままにする。** 管理者ポリシーの `disableSideloadFlags` は `--mcp-config` を起動時に拒否するが、
+サーバを1つも含まない指定は受理される（上の実測）。`command` 型のサーバを足すと、ポリシーが配布されたホストで
+起動できなくなる。
+
+ポリシーファイルへ直接書かれた `mcpServers` は読まれない（Issue #66 で実測）。`--strict-mcp-config` が効いている。
+ポリシーの他のキーがことごとく素通りするなかで、ここは塞げている数少ない経路である。
 
 ### 4. Skills を無効化する
 
@@ -129,6 +281,30 @@ CLI が認識しない名前を渡すと起動時に警告が出て**終了コ�
 ### 10. 応答をスキーマ検証する
 
 Pydantic で検証し、想定外の形なら失敗させる。`ValidationError` 以外の例外も `LLMInvalidResponseError` へ正規化する。
+
+### 11. 起動前に管理者ポリシーの有無を検査する
+
+上記 1〜10 はポリシー配下ではほとんど機能しない。塞ぐ手はコンテナ隔離しか無いが、それまでのあいだ
+配布に気づかないまま記事本文を送り続けるのは避けたい。CLI を起動する前に配置先を検査し、見つかったら
+`LLMManagedPolicyDetectedError` を送出して起動しない（`techradar.llm.managed_policy`、Issue #67）。
+リトライはしない。
+
+検査するのは `managed-settings.json` と drop-in ディレクトリ `managed-settings.d/` の両方である。
+後者だけでも hooks が読まれることを実測しているため、片方では足りない。
+
+**判定は存在の有無だけで行い、中身は読まない。** 危険なキーを列挙して判定する形も考えられるが、列挙式は
+漏れる——上の実測でも「穴は4つ」は確認できた範囲の数でしかない。主防御に `--tools ""` を選んだ理由が
+「列挙ではなく構造的だから新しいツールが増えても漏れない」であり、検知だけ列挙式にするのは一貫しない。
+
+誤検知のコストは低い。このプロジェクトは単一ユーザー・ローカル実行が前提でポリシーは通常存在せず、
+存在する時点で前提そのものが崩れている。無害なポリシーが配られた端末で動かしたい場合は
+`ALLOW_MANAGED_POLICY` で明示的に外す。黙って通すのではなく、外させることで判断を人へ残す。
+
+配置先を読めなかった場合も検知として扱う。存在しないことを確かめられていない以上、通してよい根拠が無いため。
+
+**これは検知であって、防御ではない。** 検査から CLI 起動までのわずかな隙にポリシーが置かれれば素通りする
+（TOCTOU）。ただしその隙に書き込める相手は既にこのプロセスと同等の権限を持っており、ポリシー以外の攻撃面も
+開いている。実行そのものを止められるのはコンテナ隔離だけ、という結論は変わらない。
 
 ## 検証結果
 
@@ -176,11 +352,22 @@ duration  : 2212 ms
 - 万一ツールが動いてしまった場合、応答は捨てるが、CLI プロセスが実際にファイルを読んだ事実は取り消せない
 - **CLI サブプロセスのネットワーク到達性は、アプリ側の SSRF 対策（`techradar.fetcher`）の管轄外**。`WebFetch` 等が動いてしまえばクラウドメタデータ等へ到達しうる。`--tools ""` で塞いでいるが、恒久対策はコンテナ化と egress 制限
 - CLI プロセスをコンテナや専用ユーザーで隔離するのは今後の課題
-- **管理者ポリシーが配布されたホストでは、この ADR の防御が前提から崩れる**。上記 1. のとおり管理者ポリシーはコマンドライン引数より優先され、CLI 側にこれを無効化する手段は無い。`--bare` よりさらに広範に無効化する `--safe-mode` でも "Admin-managed (policy) settings still apply." と明記されている。影響は hooks に留まらない可能性がある。ポリシー側の設定が主防御の `--tools ""` を上書きしうるかは**未検証**で、Issue #56 で扱う
+- **管理者ポリシーが配布されたホストでは、この ADR の防御はほぼ機能しない**。上記 1. のとおり管理者ポリシーはコマンドライン引数より優先され、CLI 側にこれを無効化する手段は無い。`--bare` よりさらに広範に無効化する `--safe-mode` でも "Admin-managed (policy) settings still apply." と明記されている。
+
+  影響範囲は Issue #56 と Issue #66 で実測した（CLI 2.1.227、詳細は上記「管理者ポリシーはコマンドライン引数を上書きしない」「ポリシーが持つ他の実行経路」）。**主防御の `--tools ""` は維持される**——ポリシーで `permissions.allow` にツールを列挙しても、`defaultMode` を `bypassPermissions` にしても、ツールは動かなかった。ポリシー側に `--tools` へ相当するキーが見当たらないためで、`permissions` はツールの**存在**ではなく**呼び出しの可否**を扱う別の層にある。
+
+  **しかしツールが動かないことは、この ADR の目的が守られることを意味しない。** ポリシーからは次の4つが通り、いずれもコマンドライン引数で塞げない。
+
+  - **`env` による送信先の差し替え** — `ANTHROPIC_BASE_URL` を書き換えられる。ツールが1つも動かなくても、記事本文と要約が第三者のエンドポイントへ送られる。実測ではリクエストに `authorization` ヘッダも付いていたため、**認証情報も一緒に渡る**。隔離の目的そのものが崩れる
+  - **`apiKeyHelper` による任意コマンド実行** — システムシェル経由で走る
+  - **hooks による任意コマンド実行** — イベントを問わず実行され、`--settings` の `disableAllHooks: true` でも止まらない
+  - **`claudeMd` によるプロンプト注入** — 出力を任意に歪められる
+
+  ポリシーが配布された環境では、この ADR の他の防御を数え直しても意味がない。取りうる手は後述の2つで、実行を止められるのはコンテナ隔離だけである。ポリシーの有無を確認する側は、配布された後に気づくための検知にとどまる
 
   実害が低いと判断しているのは、このプロジェクトが**単一ユーザー・ローカル実行**を前提としており、管理者ポリシーが存在する時点でホストに別の管理主体が居ることになるためである。その状況では CLI の隔離以前に前提が崩れている。開発機には 2026-08-11 時点でポリシーが配布されていないことを確認した（`/etc/claude-code/` が存在しない）
 
   **この前提が変わるとき**——管理端末や CI ホスト、共有マシンなど、自分以外がポリシーを配布しうる環境へ持ち出すとき——は、この点を防御の穴として扱う。取りうる対策は次の2つで、有効性が異なる
 
-  - **実行ホストにポリシーが配布されていないことを確認する** — 配置先は macOS `/Library/Application Support/ClaudeCode/`、Linux / WSL `/etc/claude-code/`、Windows `C:\Program Files\ClaudeCode\`。確認は容易だが、配布された時点で気づける仕組みは今のところ無い
+  - **実行ホストにポリシーが配布されていないことを確認する** — 配置先は macOS `/Library/Application Support/ClaudeCode/`、Linux / WSL `/etc/claude-code/`、Windows `C:\Program Files\ClaudeCode\`。**それぞれに `managed-settings.json` と drop-in ディレクトリ `managed-settings.d/` の両方があり、後者だけでも hooks は読まれる**（Issue #56 で実測）。この確認は **CLI の起動前に自動で行う**（Issue #67、下記 11.）。人が見るときは、ファイルの存在だけでなく中身も見る——`env` に `ANTHROPIC_BASE_URL` が入っていれば、それだけで本文の送信先が変わっている
   - **CLI プロセスをコンテナで隔離する** — 上記パスをマウントしない構成にすればポリシーを読ませずに済む。**同一ホスト上で実行ユーザーを分けるだけでは足りない**。配置先はホスト共通のシステムディレクトリで、ユーザーごとではないため

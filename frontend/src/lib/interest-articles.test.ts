@@ -8,7 +8,9 @@ import {
   jstDateToRegisteredFromIso,
   jstDateToRegisteredToIso,
   listInterestArticles,
+  originLabel,
   parseArticleFiltersFromSearchParams,
+  technologyDisplayStatus,
 } from "@/lib/interest-articles";
 import type { ArticleFilters } from "@/lib/interest-articles";
 import { TEST_TIMEOUT_MS } from "@/test-utils/timeouts";
@@ -19,6 +21,11 @@ afterEach(() => {
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
+}
+
+/** 空の関心記事一覧レスポンス（番号付きページングの形、Issue #91）。 */
+function emptyListResponse() {
+  return { items: [], total_count: 0, page: 1, page_size: 20, total_pages: 0 };
 }
 
 describe("parseArticleFiltersFromSearchParams", () => {
@@ -87,6 +94,21 @@ describe("parseArticleFiltersFromSearchParams", () => {
     expect(filters.registeredTo).toBeNull();
   }, TEST_TIMEOUT_MS);
 
+  it("reads the search query and the tag filters", () => {
+    // Arrange — トピック・技術タグは複数指定できる（backend では AND、Issue #91）
+    const searchParams = new URLSearchParams(
+      "q=Rust&topics=LLM&topics=RAG&technologies=Python",
+    );
+
+    // Act
+    const filters = parseArticleFiltersFromSearchParams(searchParams);
+
+    // Assert
+    expect(filters.q).toBe("Rust");
+    expect(filters.topics).toEqual(["LLM", "RAG"]);
+    expect(filters.technologies).toEqual(["Python"]);
+  }, TEST_TIMEOUT_MS);
+
   it("reads the remaining text and date filters", () => {
     // Arrange
     const searchParams = new URLSearchParams(
@@ -99,6 +121,9 @@ describe("parseArticleFiltersFromSearchParams", () => {
     // Assert
     expect(filters).toEqual({
       origin: [],
+      q: null,
+      topics: [],
+      technologies: [],
       domain: "ai",
       category: "llm",
       sourceDomain: "blog.example.com",
@@ -134,6 +159,9 @@ describe("buildSearchParamsFromFilters", () => {
     // Arrange
     const filters: ArticleFilters = {
       origin: ["manual"],
+      q: "Rust",
+      topics: ["LLM", "RAG"],
+      technologies: ["Python"],
       domain: "ai",
       category: "llm",
       sourceDomain: "blog.example.com",
@@ -148,6 +176,7 @@ describe("buildSearchParamsFromFilters", () => {
 
     // Assert
     expect(Object.fromEntries(params.entries())).toMatchObject({
+      q: "Rust",
       domain: "ai",
       category: "llm",
       source_domain: "blog.example.com",
@@ -157,12 +186,17 @@ describe("buildSearchParamsFromFilters", () => {
       is_primary_source: "true",
     });
     expect(params.getAll("origin")).toEqual(["manual"]);
+    expect(params.getAll("topics")).toEqual(["LLM", "RAG"]);
+    expect(params.getAll("technologies")).toEqual(["Python"]);
   }, TEST_TIMEOUT_MS);
 
   it("round-trips through parseArticleFiltersFromSearchParams", () => {
     // Arrange
     const filters: ArticleFilters = {
       origin: ["good", "saved"],
+      q: "Rust",
+      topics: ["LLM"],
+      technologies: [],
       domain: "ai",
       category: null,
       sourceDomain: null,
@@ -204,7 +238,7 @@ describe("JST date conversion helpers", () => {
 describe("listInterestArticles", () => {
   it("requests /api/articles without a query string when filters are empty", async () => {
     // Arrange
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(emptyListResponse()));
     vi.stubGlobal("fetch", fetchMock);
 
     // Act
@@ -217,9 +251,30 @@ describe("listInterestArticles", () => {
     );
   }, TEST_TIMEOUT_MS);
 
+  it("forwards the search query and the tag filters as query parameters", async () => {
+    // Arrange
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(emptyListResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Act
+    await listInterestArticles({
+      ...EMPTY_ARTICLE_FILTERS,
+      q: "Rust",
+      topics: ["LLM", "RAG"],
+      technologies: ["Python"],
+    });
+
+    // Assert
+    const [url] = fetchMock.mock.calls[0] as [string];
+    const searchParams = new URL(url).searchParams;
+    expect(searchParams.get("q")).toBe("Rust");
+    expect(searchParams.getAll("topics")).toEqual(["LLM", "RAG"]);
+    expect(searchParams.getAll("technologies")).toEqual(["Python"]);
+  }, TEST_TIMEOUT_MS);
+
   it("forwards a single filter as a query parameter", async () => {
     // Arrange
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(emptyListResponse()));
     vi.stubGlobal("fetch", fetchMock);
 
     // Act
@@ -230,15 +285,15 @@ describe("listInterestArticles", () => {
     expect(new URL(url).searchParams.get("domain")).toBe("ai");
   }, TEST_TIMEOUT_MS);
 
-  it("forwards combined filters and cursor/limit as query parameters", async () => {
+  it("forwards combined filters and page/limit as query parameters", async () => {
     // Arrange
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(emptyListResponse()));
     vi.stubGlobal("fetch", fetchMock);
 
     // Act
     await listInterestArticles(
       { ...EMPTY_ARTICLE_FILTERS, origin: ["good", "saved"], language: "ja", isPrimarySource: true },
-      { cursor: "page-2", limit: 50 },
+      { page: 2, limit: 50 },
     );
 
     // Assert
@@ -247,7 +302,7 @@ describe("listInterestArticles", () => {
     expect(searchParams.getAll("origin")).toEqual(["good", "saved"]);
     expect(searchParams.get("language")).toBe("ja");
     expect(searchParams.get("is_primary_source")).toBe("true");
-    expect(searchParams.get("cursor")).toBe("page-2");
+    expect(searchParams.get("page")).toBe("2");
     expect(searchParams.get("limit")).toBe("50");
   }, TEST_TIMEOUT_MS);
 });
@@ -266,5 +321,45 @@ describe("deleteInterestArticle", () => {
       expect.stringContaining("/api/articles/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/interest"),
       expect.objectContaining({ method: "DELETE" }),
     );
+  }, TEST_TIMEOUT_MS);
+});
+
+describe("originLabel", () => {
+  it("returns the Japanese label for each of the five origins", () => {
+    // Arrange / Act / Assert
+    expect(originLabel("manual")).toBe("手動登録");
+    expect(originLabel("good")).toBe("Good");
+    expect(originLabel("saved")).toBe("保存");
+    expect(originLabel("read_full")).toBe("全文閲覧");
+    expect(originLabel("clicked")).toBe("クリック");
+  }, TEST_TIMEOUT_MS);
+});
+
+describe("technologyDisplayStatus", () => {
+  // 受入基準（Issue #92）: analysis_status と technologies から、技術タグ欄に
+  // 何を出すかが状態別に決まる。「未解析だから空」と「解析済みだが実際に0件」を
+  // 区別できることが目的のため、pending/analyzing/null は同じ扱いにまとめる。
+  it("returns pending when analysis_status is null", () => {
+    expect(technologyDisplayStatus(null, [])).toBe("pending");
+  }, TEST_TIMEOUT_MS);
+
+  it("returns pending when analysis_status is pending", () => {
+    expect(technologyDisplayStatus("pending", [])).toBe("pending");
+  }, TEST_TIMEOUT_MS);
+
+  it("returns pending when analysis_status is analyzing", () => {
+    expect(technologyDisplayStatus("analyzing", [])).toBe("pending");
+  }, TEST_TIMEOUT_MS);
+
+  it("returns failed when analysis_status is failed", () => {
+    expect(technologyDisplayStatus("failed", [])).toBe("failed");
+  }, TEST_TIMEOUT_MS);
+
+  it("returns empty when completed but technologies is empty", () => {
+    expect(technologyDisplayStatus("completed", [])).toBe("empty");
+  }, TEST_TIMEOUT_MS);
+
+  it("returns tags when completed and technologies has entries", () => {
+    expect(technologyDisplayStatus("completed", ["Python"])).toBe("tags");
   }, TEST_TIMEOUT_MS);
 });

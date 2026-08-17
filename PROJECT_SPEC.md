@@ -1,5 +1,27 @@
 # 技術記事レコメンドサービス 要件定義
 
+## この文書の読み方
+
+実装は文書より先へ進む。どの節が現役の要件で、どの節が初期設計時の記録なのかを下の表で示す（Issue #57で全節を実装と突き合わせた結果）。記録として残す節は実装へ追随させない。読むときは「現行の参照先」を見る。
+
+| 節 | 位置づけ | 現行の参照先 |
+| --- | --- | --- |
+| §1 プロジェクト概要 〜 §17 重複排除 | 現役の要件 | — |
+| §18 推奨技術スタック | 現役の要件（候補の並記は初期設計時のもの） | [docs/adr/0001-technology-stack.md](docs/adr/0001-technology-stack.md) |
+| §19 データモデル案 | 初期設計時の記録 | [backend/src/techradar/db/models.py](backend/src/techradar/db/models.py) |
+| §20 API案 | 初期設計時の記録 | [backend/openapi.json](backend/openapi.json) |
+| §21 セキュリティ要件 | 現役の要件 | SSRF対策は [backend/src/techradar/fetcher/](backend/src/techradar/fetcher/)、LLMへ渡す内容は [backend/src/techradar/llm/](backend/src/techradar/llm/)、外部検索へ送る内容は [backend/src/techradar/collectors/](backend/src/techradar/collectors/) |
+| §22 MVPスコープ | 「必須」は初期設計時の記録。**「MVPでは実装しない」は現役のスコープ境界** | 「必須」はロードマップIssue #17。「MVPでは実装しない」は本節そのもの |
+| §23 実装順序 | 初期設計時の記録 | ロードマップIssue #17 |
+| §24 非機能要件 | 現役の要件 | — |
+| §25 Claude Codeへの実装方針 | 現役の要件 | [CLAUDE.md](CLAUDE.md) |
+| §26 完了条件 | 初期設計時の記録 | ロードマップIssue #17、[docs/decisions.md](docs/decisions.md) |
+| §27 初回実装時に決定する必要がある事項 | 初期設計時の記録 | [docs/decisions.md](docs/decisions.md)、[docs/adr/](docs/adr/) |
+
+§22の「MVPでは実装しない」だけは扱いが違う。詳しくは同節の注記を読む。
+
+---
+
 ## 1. プロジェクト概要
 
 技術記事に特化した、Google ChromeのDiscoverに近いパーソナライズド・フィードを実装する。
@@ -100,7 +122,7 @@ Google Discoverに近いカード形式のフィードを表示する。
 
 フィード条件:
 
-* 原則として公開から7日以内
+* 原則として公開から7日以内（フィードの絞り込みで1〜180日の範囲に変更できる。Issue #90）
 * 言語制限なし
 * 同一ニュースの重複を抑制
 * 既にBadした記事は再表示しない
@@ -443,7 +465,7 @@ effective_interest =
 
 一次情報はWeb検索だけに依存せず、固定巡回する。
 
-取得頻度はMVPでは数時間ごと、または1日数回とする。
+巡回はUIの実行ボタンから起動する。定期スケジューラは置かない（サーバーを常駐させないため。[CLAUDE.md](CLAUDE.md)、[backend/src/techradar/api/crawl.py](backend/src/techradar/api/crawl.py)）。
 
 ---
 
@@ -552,6 +574,8 @@ Discoverフィードでは以下を目安に候補を混ぜる。
 ---
 
 ## 18. 推奨技術スタック
+
+> 各項目に候補を並べているのは初期設計時のもの。どれを採ったかは [docs/adr/0001-technology-stack.md](docs/adr/0001-technology-stack.md) が決めており、実装もその決定に従っている。ジョブ基盤にRedis / Celeryを使わずPostgreSQLのキューにした点、認証をMVPでは置かない点はADRを参照する。認証を置かないことはセキュリティ要件（§21）の適用除外ではない。無認証を前提に置いている対策（CORS許可オリジンの制限、推薦APIのレート制限）は§24にある。
 
 ### Frontend
 
@@ -841,6 +865,10 @@ IPv6 private network
 
 ## 22. MVPスコープ
 
+> 下の「必須」は初期設計時の記録であり、実装へ追随させていない。挙げた項目はロードマップIssue #17のPhase 1〜5としてすべて完了している。現在どこまで進んでいるかはロードマップIssueを参照する。
+>
+> ただし「MVPでは実装しない」は記録ではなく、**今も守っているスコープの境界**として読む。挙げた項目はいずれも実装していない。境界の典拠はロードマップIssueではなくこの節そのもので、ここへ手を出す判断をするときは、まずこの節を更新してから着手する。ロードマップIssueへ該当する項目を足すときも同じ。
+
 ### 必須
 
 * URL登録
@@ -878,6 +906,8 @@ IPv6 private network
 ---
 
 ## 23. 実装順序
+
+> 初期設計時の記録であり、実装へ追随させていない。実際の実装順序と進捗、Issue番号と依存関係はロードマップIssue #17が持つ。ここに書かれたPhase 1〜5は完了している。
 
 ### Phase 1: 基盤
 
@@ -951,6 +981,25 @@ IPv6 private network
 * ランキング
 * API入力検証
 
+### 認証を置かない前提で守る対策
+
+認証は置かない（§18、[docs/decisions.md](docs/decisions.md)）。APIとUIを守る境界はネットワーク側にある。backend・frontend・PostgreSQLのいずれも `BIND_HOST`（既定 127.0.0.1）へ明示的にbindする（Issue #64、#65）。`run.sh` がプロセスへ渡し、[infra/docker-compose.yml](infra/docker-compose.yml) がホスト側の公開アドレスとして使う。
+
+既定に任せると範囲が揃わない。uvicornは `--host` の既定が127.0.0.1だが、`next dev` は `--hostname` を渡さないと全インターフェースへbindし、同一LANの別端末からUIへ到達できてしまう。dockerもホスト側のアドレスを省略すると全インターフェースへ公開する。認証を置いていない以上、到達した時点で中身が見える。PostgreSQLの接続情報はローカル実行を前提にした弱い既定値のため、なおさら届く範囲を絞る。
+
+既に起動しているコンテナは、この設定を変えても作り直すまで公開範囲が変わらない。変更を反映するには `./run.sh --stop` で一度落としてから起動し直す。食い違っている間は起動確認の共通処理（[scripts/ai-harness/lib/postgres.sh](scripts/ai-harness/lib/postgres.sh)）が警告を出す。判定できるのはcomposeから見えるコンテナだけで、dockerへ到達できないシェルや、composeを通さず立てたPostgreSQLは対象外になる。その場合は確認できなかったこと自体を出す。
+
+PostgreSQLへ `BIND_HOST` が渡るのは `run.sh` から起動したときだけになる。`check.sh` は設定ファイルを読まないため、そちらが先にコンテナを作ると閉じた既定（127.0.0.1）で作られる。
+
+この上に、以下の歯止めを置く。いずれも部分的な対策であり、認証の代わりにはならない。
+
+* CORSの許可オリジンを設定で絞る（[backend/src/techradar/config.py](backend/src/techradar/config.py) の `CORS_ALLOW_ORIGINS`、[backend/src/techradar/main.py](backend/src/techradar/main.py)）。効くのはブラウザ経由の呼び出しだけで、curlのような直接アクセスは防げない
+* 推薦APIにレート制限を掛ける（[backend/src/techradar/api/rate_limit.py](backend/src/techradar/api/rate_limit.py)）。掛かっているのは推薦の2つのエンドポイントだけで、他のAPIには無い
+* 巡回ジョブの重複起動を防ぐ（[backend/src/techradar/api/crawl.py](backend/src/techradar/api/crawl.py)）
+* 一括登録にファイルサイズとURL件数の上限を置く（[backend/src/techradar/api/bulk_import.py](backend/src/techradar/api/bulk_import.py) の `MAX_BULK_IMPORT_FILE_BYTES` / `MAX_BULK_IMPORT_URL_COUNT`）
+
+記事の単体登録やソース登録には回数の上限が無い。`BIND_HOST` を変えて意図的に外部へ晒す構成にするなら、認証とあわせてこの節を見直す。なお `BIND_HOST` だけを広げても、画面上のJavaScriptは既定で自分自身の `localhost` へAPIを呼ぶため、UIを他の端末で使うには `NEXT_PUBLIC_API_BASE_URL` も変える必要がある。APIへの直接の到達は `BIND_HOST` だけで開く。
+
 ### 可観測性
 
 * 構造化ログ
@@ -968,8 +1017,7 @@ IPv6 private network
 * URLと本文ハッシュでキャッシュする
 * LLM処理結果を保存する
 * 既存記事のEmbeddingを再生成しない
-* 全候補をLLMで再ランキングしない
-* LLM再ランキングは上位候補だけに限定する
+* 推薦の順位付けにLLMを使わない（スコア内訳から機械的に決める。[backend/src/techradar/recommendation/ranking.py](backend/src/techradar/recommendation/ranking.py)）
 
 ---
 
@@ -997,6 +1045,10 @@ IPv6 private network
 
 ## 26. 完了条件
 
+> 初期設計時の記録であり、実装へ追随させていない。ここに挙げた条件はすべて満たしており、実装はその先へ進んでいる（情報源選好の学習・レート制限・保持期間など）。現行の到達点はロードマップIssue #17と [docs/decisions.md](docs/decisions.md)、APIの形は [backend/openapi.json](backend/openapi.json) を参照する。
+>
+> 記録扱いにするのは「MVPが完了したか」という判定であって、条件そのものではない。SSRF対策は§21、テストと可観測性は§24が現役の要件として持っており、退行があればそちら違反として扱う。
+
 MVP完了条件:
 
 1. URLを登録できる
@@ -1018,6 +1070,8 @@ MVP完了条件:
 ---
 
 ## 27. 初回実装時に決定する必要がある事項
+
+> 初期設計時の記録であり、実装へ追随させていない。ここに挙げた項目はすべて決定済みで、決定内容は [docs/decisions.md](docs/decisions.md)（インフラ・外部サービス・フィード・データ保持・運用・認証の各表）と [docs/adr/](docs/adr/)（技術選定の根拠）にある。末尾の「推奨初期値」もdecisions.mdの記述のほうが具体的で、そちらが現行の決定である。
 
 以下は未確定のため、実装着手前または初期段階で決定する。
 

@@ -9,20 +9,31 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Sequence
 
 import pytest
 
-from techradar.config import Settings
+from techradar.config import EmbeddingDevice, Settings
 from techradar.db import EMBEDDING_DIMENSIONS
 from techradar.embedding.base import assert_dimensions
 from techradar.embedding.errors import EmbeddingDimensionMismatchError
-from techradar.embedding.qwen import QwenEmbeddingProvider, resolve_device
+from techradar.embedding.qwen import QwenEmbeddingProvider, is_xpu_available, resolve_device
 
 requires_model = pytest.mark.skipif(
     os.environ.get("TECHRADAR_RUN_MODEL_TESTS") != "1",
     reason="実モデルを読み込むテスト。TECHRADAR_RUN_MODEL_TESTS=1 で実行する",
 )
+
+# CUDA (専用 VRAM) の上限。RTX 4050 の 6GB に対し 1GB の余裕を見ている。
+_CUDA_MEMORY_BUDGET_GIB = 5.0
+
+# XPU (統合GPU、メインメモリ共有) の上限。CUDA の専用 VRAM とは前提が異なり、
+# 固定の VRAM 容量に対する余裕ではなく「バッチサイズが暴走してホスト側の
+# メインメモリと食い合っていないか」を検知する目的の閾値（ADR 0005）。
+# 実測値は 4 件のバッチで 1.75GiB（Core Ultra 7 165H 統合GPU、2026-08-12）。
+# 桁で余裕を持たせつつ異常な増加は検知できる水準として 4.0 を置く。
+_XPU_MEMORY_BUDGET_GIB = 4.0
 
 
 def cosine(left: Sequence[float], right: Sequence[float]) -> float:
@@ -31,18 +42,78 @@ def cosine(left: Sequence[float], right: Sequence[float]) -> float:
 
 
 class TestResolveDevice:
-    @pytest.mark.parametrize("configured", ["cpu", "cuda"])
+    @pytest.mark.parametrize("configured", ["cpu", "cuda", "xpu"])
     def test_respects_an_explicit_device(self, configured: str):
-        # Arrange / Act / Assert — 明示指定はそのまま使う
+        # Arrange / Act / Assert — 明示指定はそのまま使う（xpu もそのまま通る）
         assert resolve_device(configured) == configured
 
-    def test_auto_falls_back_to_cpu_without_cuda(self):
+    def test_auto_falls_back_to_cpu_without_cuda_or_xpu(self):
         # Arrange / Act / Assert — 判定を注入し、torch を読み込まずに検証する
-        assert resolve_device("auto", cuda_available=lambda: False) == "cpu"
+        assert (
+            resolve_device("auto", cuda_available=lambda: False, xpu_available=lambda: False)
+            == "cpu"
+        )
+
+    def test_auto_selects_xpu_when_cuda_is_unavailable(self):
+        # Arrange — 開発機は NVIDIA GPU を持たず Intel Arc（XPU）のみを持つ想定
+        # Act / Assert
+        assert (
+            resolve_device("auto", cuda_available=lambda: False, xpu_available=lambda: True)
+            == "xpu"
+        )
+
+    def test_auto_prefers_cuda_over_xpu_when_both_are_available(self):
+        # Arrange — NVIDIA の dGPU がある環境では統合GPU（XPU）より高速なため
+        # CUDA を優先することを固定する
+        # Act / Assert
+        assert (
+            resolve_device("auto", cuda_available=lambda: True, xpu_available=lambda: True)
+            == "cuda"
+        )
 
     def test_auto_selects_cuda_when_available(self):
-        # Arrange / Act / Assert
-        assert resolve_device("auto", cuda_available=lambda: True) == "cuda"
+        # Arrange / Act / Assert — xpu 判定が呼ばれない（cuda が先に決着する）ことも兼ねて確認
+        assert (
+            resolve_device(
+                "auto",
+                cuda_available=lambda: True,
+                xpu_available=lambda: (_ for _ in ()).throw(AssertionError("呼ばれないはず")),
+            )
+            == "cuda"
+        )
+
+
+class TestIsXpuAvailable:
+    def test_returns_false_without_raising_when_torch_has_no_xpu_attribute(self, monkeypatch):
+        # Arrange — 古い torch や XPU ビルドでない torch には `torch.xpu` が無い。
+        # 属性が無いことを理由に例外を投げず False を返すことを固定する。
+        import types
+
+        fake_torch = types.SimpleNamespace()  # xpu 属性を持たないダミー
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        # Act / Assert
+        assert is_xpu_available() is False
+
+    def test_returns_true_when_torch_reports_xpu_available(self, monkeypatch):
+        # Arrange — torch.xpu が存在し is_available() が True を返す場合
+        import types
+
+        fake_torch = types.SimpleNamespace(xpu=types.SimpleNamespace(is_available=lambda: True))
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        # Act / Assert
+        assert is_xpu_available() is True
+
+    def test_returns_false_when_torch_reports_xpu_unavailable(self, monkeypatch):
+        # Arrange — torch.xpu は存在するが is_available() が False を返す場合
+        import types
+
+        fake_torch = types.SimpleNamespace(xpu=types.SimpleNamespace(is_available=lambda: False))
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+        # Act / Assert
+        assert is_xpu_available() is False
 
 
 class TestDimensionGuard:
@@ -69,12 +140,13 @@ class TestProviderConfiguration:
         # Assert
         assert provider.dimensions == EMBEDDING_DIMENSIONS
 
-    def test_uses_the_configured_device(self):
-        # Arrange / Act
-        provider = QwenEmbeddingProvider(Settings(_env_file=None, embedding_device="cpu"))
+    @pytest.mark.parametrize("configured", ["cpu", "cuda", "xpu"])
+    def test_uses_the_configured_device(self, configured: EmbeddingDevice):
+        # Arrange / Act — xpu の明示指定（本 Issue の主目的）も含めて固定する
+        provider = QwenEmbeddingProvider(Settings(_env_file=None, embedding_device=configured))
 
         # Assert
-        assert provider.device == "cpu"
+        assert provider.device == configured
 
     def test_does_not_load_the_model_for_empty_input(self):
         # Arrange — 空入力でモデルを読み込むと無駄に数秒かかる
@@ -82,6 +154,67 @@ class TestProviderConfiguration:
 
         # Act / Assert — 読み込みが起きればここで時間がかかるか例外になる
         assert provider.embed_documents([]) == []
+
+
+class TestLazyDeviceResolution:
+    """Issue #80: デバイス解決（`resolve_device` 経由の `import torch`）を、
+    構築時ではなく `device` プロパティの初回参照まで遅延させることを固定する。
+
+    `sys.modules` に `torch` が入るかどうかを直接見る方式は、同じテスト
+    セッション内で実モデルを読み込むテスト（`TECHRADAR_RUN_MODEL_TESTS=1`）が
+    先に走っていると汚染されて信頼できない。判定関数（`resolve_device`）を
+    スパイして呼び出し回数を数える方式に統一する
+    （`is_cuda_available` / `is_xpu_available` と同じ、DI で torch 依存を
+    切り離す流儀に倣う）。
+    """
+
+    def test_constructing_the_provider_does_not_resolve_the_device(self, monkeypatch):
+        # Arrange
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "techradar.embedding.qwen.resolve_device",
+            lambda configured, **_kwargs: calls.append(configured) or configured,
+        )
+
+        # Act
+        QwenEmbeddingProvider(Settings(_env_file=None, embedding_device="cpu"))
+
+        # Assert — __init__ の時点では resolve_device は呼ばれない
+        assert calls == []
+
+    def test_device_resolves_on_first_access(self, monkeypatch):
+        # Arrange
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "techradar.embedding.qwen.resolve_device",
+            lambda configured, **_kwargs: calls.append(configured) or configured,
+        )
+        provider = QwenEmbeddingProvider(Settings(_env_file=None, embedding_device="cpu"))
+        assert calls == []
+
+        # Act
+        result = provider.device
+
+        # Assert
+        assert result == "cpu"
+        assert calls == ["cpu"]
+
+    def test_device_is_resolved_only_once(self, monkeypatch):
+        # Arrange
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "techradar.embedding.qwen.resolve_device",
+            lambda configured, **_kwargs: calls.append(configured) or configured,
+        )
+        provider = QwenEmbeddingProvider(Settings(_env_file=None, embedding_device="cpu"))
+
+        # Act — 2 回参照する
+        first = provider.device
+        second = provider.device
+
+        # Assert — 解決は 1 回だけ、値も同じ
+        assert calls == ["cpu"]
+        assert first == second == "cpu"
 
 
 @requires_model
@@ -127,16 +260,24 @@ class TestRealModel:
         assert cosine(document, related) > cosine(document, unrelated)
 
     def test_fits_within_the_gpu_memory_budget(self, provider):
-        # Arrange
+        # Arrange — CUDA (専用 VRAM) と XPU (統合GPU、メインメモリ共有) の
+        # 両方でメモリ計測 API が使える（torch.xpu.max_memory_allocated 等は
+        # PyTorch 2.5 以降の XPU ビルドに存在する。ADR 0005）。
         import torch
 
-        if provider.device != "cuda":
-            pytest.skip("CUDA が使えない環境")
-        torch.cuda.reset_peak_memory_stats()
+        if provider.device == "cuda":
+            memory_api = torch.cuda
+            budget_gib = _CUDA_MEMORY_BUDGET_GIB
+        elif provider.device == "xpu":
+            memory_api = torch.xpu
+            budget_gib = _XPU_MEMORY_BUDGET_GIB
+        else:
+            pytest.skip("CUDA/XPU が使えない環境")
+        memory_api.reset_peak_memory_stats()
 
         # Act — 記事相当の長さを複数件まとめて処理する
         provider.embed_documents(["技術記事の本文です。" * 200] * 4)
 
-        # Assert — RTX 4050 の 6GB に収まること
-        peak_gib = torch.cuda.max_memory_allocated() / 1024**3
-        assert peak_gib < 5.0, f"VRAM 使用量が想定を超えました: {peak_gib:.2f} GiB"
+        # Assert
+        peak_gib = memory_api.max_memory_allocated() / 1024**3
+        assert peak_gib < budget_gib, f"GPU メモリ使用量が想定を超えました: {peak_gib:.2f} GiB"

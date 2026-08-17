@@ -42,6 +42,7 @@ from techradar.api.interests import (
     InterestDifficultyItem,
     InterestFeedbackRatio,
     InterestGenreItem,
+    InterestOriginCounts,
     InterestPrimarySourceRatio,
     InterestSummaryResponse,
     InterestTechnologyItem,
@@ -65,6 +66,7 @@ from techradar.db.models import (
     Article,
     ArticleFeedback,
     ArticleRegistration,
+    DiscoveredFeed,
     Job,
     OperationLog,
     Recommendation,
@@ -137,7 +139,13 @@ ARTICLE_SPEC = ModelParitySpec(
             ExposedField(InterestArticleItem, "topics"),
             ExposedField(RecommendationItem, "topics"),
         ),
-        "technologies": (ExposedField(RecommendationItem, "technologies"),),
+        "technologies": (
+            ExposedField(InterestArticleItem, "technologies"),
+            ExposedField(RecommendationItem, "technologies"),
+        ),
+        # Issue #92: 技術タグが空のとき「未解析だから空」と「解析済みだが実際に
+        # 0件」を画面側で区別するために公開する（関心記事一覧のみ、他のAPIは未公開）。
+        "analysis_status": (ExposedField(InterestArticleItem, "analysis_status"),),
         "content_type": (ExposedField(InterestArticleItem, "content_type"),),
         "is_primary_source": (
             ExposedField(InterestArticleItem, "is_primary_source"),
@@ -158,7 +166,6 @@ ARTICLE_SPEC = ModelParitySpec(
         "embedding": "埋め込みベクトルは類似検索の内部表現、API未公開",
         "embedding_body_hash": "embedding再生成要否判定用の内部キャッシュキー",
         "analyzed_body_hash": "LLM解析要否判定用の内部キャッシュキー",
-        "analysis_status": "記事解析パイプラインの内部進行状態",
         "duplicate_of_article_id": "重複記事クラスタリングの内部参照、API未公開",
         "duplicate_penalty": "重複記事の推薦スコア減点、内部スコアリング専用",
         "news_event_id": (
@@ -236,6 +243,10 @@ RECOMMENDATION_RUN_SPEC = ModelParitySpec(
         "user_id": "ユーザー識別子はAPI非公開（他のuser_id列と同じ方針）",
         "source_article_id": (
             "記事起点推薦の起点はリクエストのpathパラメータで既知のため、レスポンスには含めない"
+        ),
+        "filter_fingerprint": (
+            "検索・絞り込み条件のハッシュ値（Issue #90）。run再利用判定の内部状態であり、"
+            "APIレスポンスへは公開しない"
         ),
     },
 )
@@ -392,7 +403,13 @@ MODEL_SPECS: tuple[ModelParitySpec, ...] = (
 # API 公開スキーマを一切持たない内部専用モデル。
 # UserSourcePreference は推薦スコアの計算にのみ使い、API では公開しない（Issue #34）。
 # 関心分析画面（Issue #16）へ出すかどうかは後続 Issue で判断する。
-INTERNAL_ONLY_MODELS: tuple[type[DeclarativeBase], ...] = (OperationLog, UserSourcePreference)
+# DiscoveredFeed は自動発見した巡回対象の内部状態で、確認 UI はスコープ外
+# （Issue #93 ヒアリングでの決定）。
+INTERNAL_ONLY_MODELS: tuple[type[DeclarativeBase], ...] = (
+    DiscoveredFeed,
+    OperationLog,
+    UserSourcePreference,
+)
 
 # モデル列由来ではない、スキーマ側の派生フィールド。
 DERIVED_FIELDS: tuple[DerivedField, ...] = (
@@ -419,8 +436,23 @@ DERIVED_FIELDS: tuple[DerivedField, ...] = (
     ),
     DerivedField(
         FeedResponse,
-        "next_cursor",
-        "run_id+rankを符号化した不透明なページングcursor。モデル列の値そのものではない",
+        "total_count",
+        "runに保存された推薦の総件数（count_recommendations）。単一のモデル列由来ではない集計値",
+    ),
+    DerivedField(
+        FeedResponse,
+        "page",
+        "要求されたページ番号をそのまま返すエコーバック。モデル列由来ではない",
+    ),
+    DerivedField(
+        FeedResponse,
+        "page_size",
+        "要求されたlimitをそのまま返すエコーバック。モデル列由来ではない",
+    ),
+    DerivedField(
+        FeedResponse,
+        "total_pages",
+        "total_countとpage_sizeから計算する総ページ数。単一のモデル列由来ではない集計値",
     ),
     DerivedField(
         InterestArticleListResponse,
@@ -429,8 +461,23 @@ DERIVED_FIELDS: tuple[DerivedField, ...] = (
     ),
     DerivedField(
         InterestArticleListResponse,
-        "next_cursor",
-        "user_articles.created_at+idを符号化した不透明なページングcursor",
+        "total_count",
+        "絞り込み条件に一致する関心記事の総件数。単一のモデル列由来ではない集計値",
+    ),
+    DerivedField(
+        InterestArticleListResponse,
+        "page",
+        "要求されたページ番号をそのまま返すエコーバック。モデル列由来ではない",
+    ),
+    DerivedField(
+        InterestArticleListResponse,
+        "page_size",
+        "要求されたlimitをそのまま返すエコーバック。モデル列由来ではない",
+    ),
+    DerivedField(
+        InterestArticleListResponse,
+        "total_pages",
+        "total_countとpage_sizeから計算する総ページ数。単一のモデル列由来ではない集計値",
     ),
     DerivedField(
         CrawlRunCreate,
@@ -633,6 +680,38 @@ DERIVED_FIELDS: tuple[DerivedField, ...] = (
         "suppressed_topics",
         "SuppressedTopicItemのリスト。単一のモデル列由来ではない構造フィールド",
     ),
+    DerivedField(
+        InterestSummaryResponse,
+        "origin_counts",
+        "InterestOriginCountsのネスト表現。単一のモデル列由来ではない構造フィールド",
+    ),
+    DerivedField(
+        InterestOriginCounts,
+        "manual_count",
+        "count_interest_articles_by_origin（interest/service.py）が"
+        "user_articles/article_feedbackから組み立てた母集団をorigin別に数えた集計値。"
+        "モデル列の直接公開ではない（Issue #92）",
+    ),
+    DerivedField(
+        InterestOriginCounts,
+        "good_count",
+        "count_interest_articles_by_originのorigin別集計値。モデル列の直接公開ではない（#92）",
+    ),
+    DerivedField(
+        InterestOriginCounts,
+        "saved_count",
+        "count_interest_articles_by_originのorigin別集計値。モデル列の直接公開ではない（#92）",
+    ),
+    DerivedField(
+        InterestOriginCounts,
+        "read_full_count",
+        "count_interest_articles_by_originのorigin別集計値。モデル列の直接公開ではない（#92）",
+    ),
+    DerivedField(
+        InterestOriginCounts,
+        "clicked_count",
+        "count_interest_articles_by_originのorigin別集計値。モデル列の直接公開ではない（#92）",
+    ),
     # POST /api/articles/bulk（Issue #39）。件数・エラー一覧はファイル解析結果の
     # 集計であり、単一モデル列の直接公開ではない。createdはArticleRegistrationの
     # リストだが、1対1の単純な列公開ではなく複数行の処理結果をまとめた構造
@@ -713,6 +792,7 @@ TARGET_SCHEMAS: tuple[type[BaseModel], ...] = (
     InterestContentTypeItem,
     InterestDifficultyItem,
     SuppressedTopicItem,
+    InterestOriginCounts,
     InterestSummaryResponse,
     BulkArticleImportResponse,
     BulkImportErrorItem,

@@ -21,6 +21,7 @@ export type InterestClusterListResponse = components["schemas"]["InterestCluster
 export type InterestTimelineResponse = components["schemas"]["InterestTimelineResponse"];
 export type InterestTimelineBucket = components["schemas"]["InterestTimelineBucket"];
 export type InterestTimelineTopicStats = components["schemas"]["InterestTimelineTopicStats"];
+export type InterestOriginCounts = components["schemas"]["InterestOriginCounts"];
 
 /** `content_type` は `interest-articles.ts` の定義を再利用する（重複定義しない）。 */
 export { CONTENT_TYPE_LABELS };
@@ -41,6 +42,19 @@ const UNCLASSIFIED_LABEL = "未分類";
  * 画面側でも明示する。4箇所で同じ文言を重複させないよう1箇所にまとめる。
  */
 export const GOOD_OR_SAVED_ONLY_NOTE = "Good・保存した記事のみを対象にしています。";
+
+/**
+ * `origin_counts`（Issue #92）に付ける注記。
+ *
+ * 他の可視化は `article_feedback` の good/save に絞った集計（上記
+ * `GOOD_OR_SAVED_ONLY_NOTE`）だが、`origin_counts` は
+ * `interest/service.py` の関心プロファイル構築対象（`user_articles` の
+ * 手動登録・Good・保存・全文閲覧・クリックの5経路 + `article_feedback` の
+ * good のみの取りこぼし補完）を数えた別の母集団のため、混同しないよう
+ * 専用の注記にする。
+ */
+export const PROFILE_POPULATION_NOTE =
+  "関心プロファイルの構築対象（手動登録・Good・保存・全文閲覧・クリック）を集計しています。";
 
 /**
  * `domain` / `content_type` / `difficulty` の表示ラベルを1箇所で決める。

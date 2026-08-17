@@ -12,6 +12,12 @@ MVP は単一ユーザーだが、将来のマルチユーザー化を妨げな�
 持たない。`recommendations` も持たないが、こちらは `run_id` 経由で
 `recommendation_runs.user_id` へ辿れるため列を重ねていないだけで、所有者は定まる。
 
+`discovered_feeds` も `user_id` を持たない。自動発見の入力はユーザーの登録記事だが、
+出力は `feeds.yaml` と並ぶ巡回対象の一覧であり、`articles` と同じくユーザー横断で
+共有するため（Issue #93）。マルチユーザー化するときは、あるユーザーの登録記事から
+発見したフィードを全員が巡回してよいかを再検討し、必要なら `user_id` を足して
+ユニーク制約を `(user_id, domain)` へ変える。
+
 この内訳は `docs/decisions.md` の認証節から一次情報として参照される。テーブルを
 追加・削除するときはここを更新すること。
 
@@ -211,11 +217,21 @@ class RecommendationRun(Base):
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # 検索・絞り込み条件（`recommendation.service.FeedFilters`）を正規化して
+    # ハッシュ化した値（Issue #90）。DISCOVER モードは常に値を持ち（条件無しは
+    # 空条件のフィンガープリント）、run 再利用判定（`_resolve_discover_run_id`）が
+    # user_id + mode に加えてこの列でも絞り込む。ARTICLE_BASED モードは条件という
+    # 概念自体が無いため NULL のまま。
+    filter_fingerprint: Mapped[str | None] = mapped_column(Text)
 
     # 直近 run の再利用判定（`recommendation.service.build_latest_run_select`）は
-    # user_id + mode で絞って generated_at 降順の先頭を取るため、ソート順まで
-    # 含めた複合インデックスにする。user_id 単独のインデックスはこの前方一致で
-    # 代替できるため持たない（Issue #32）。
+    # user_id + mode（+ filter_fingerprint、Issue #90）で絞って generated_at 降順の
+    # 先頭を取るため、ソート順まで含めた複合インデックスにする。user_id 単独の
+    # インデックスはこの前方一致で代替できるため持たない（Issue #32）。
+    # filter_fingerprint は複合インデックスへ含めない。1 ユーザーのローカル実行を
+    # 前提とした run 件数では、user_id + mode の絞り込み後にこの列だけフィルタで
+    # 弾いても実害が無いため（インデックス変更は既存の実行計画検証テストへの
+    # 影響が大きく、得られる効果に見合わないと判断した）。
     # 保持期間ジョブ（`jobs.handlers.purge_recommendation_runs`）の DELETE は
     # user_id で絞らず generated_at だけで範囲を切るため、単独のインデックスを別に持つ。
     __table_args__ = (
@@ -490,4 +506,78 @@ class OperationLog(Base):
         # 保持期間 90 日の削除バッチで使う。
         Index("ix_operation_logs_created_at", "created_at"),
         Index("ix_operation_logs_operation_status", "operation", "status"),
+    )
+
+
+class DiscoveredFeed(Base):
+    """登録記事のドメイン集計から自動発見した巡回対象（Issue #93）。
+
+    `source_registry` は情報源の権威スコア判定用の規則であり巡回対象リストでは
+    ないため、ここを流用せず専用テーブルを持つ（Issue #93 ヒアリングでの決定）。
+
+    ドメイン集計は `interest.service._load_interest_article_population` とは
+    共用しない。あちらは関心スコア計算用の母集団（`article_feedback` の
+    action='good' による補完・重み計算を含む）で戻り値の型・責務が異なり、
+    無理に共用するとインターフェースが歪むため、
+    `techradar.collectors.discovery.aggregate_domain_counts` として単純な
+    GROUP BY 集計を別に持つ。
+    """
+
+    __tablename__ = "discovered_feeds"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    domain: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # 発見できた場合のみ値を持つ。`FeedEntryConfig` の制約に合わせ https 限定
+    # （発見処理側で https 以外の候補を採用しない）。
+    feed_url: Mapped[str | None] = mapped_column(Text)
+    # DiscoveredFeedStatus の値。
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    # 発見を試みた時点の、このドメインの登録記事件数（再試行のたびに更新する）。
+    article_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # status=FOUND のときのみ True にする（発見処理側が明示的に立てる。
+    # feed_url が無いのに enabled でも意味が無いため既定は False）。
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # 巡回の連続失敗回数（Issue #105）。1 回でも成功したら 0 へリセットする。
+    # `MAX_CONSECUTIVE_FEED_FAILURES` に達すると status=DISABLED / enabled=False にする。
+    # `feeds.yaml` 由来の手動フィードは対象外（`collectors.discovery` docstring 参照）。
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # 直近の巡回成功時刻（Issue #105）。一度も成功していなければ NULL のまま。
+    last_succeeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 取得・パースには成功したが記事を1件も配信しなかった連続回数（Issue #108）。
+    # 1件でも配信できたら 0 へリセットする。取得・パース自体に失敗した回は
+    # 「0件だった」と数えない（`consecutive_failures` の方でのみ数え、この列には
+    # 触れない）。`MAX_CONSECUTIVE_EMPTY_FETCHES` に達すると status=DISABLED /
+    # enabled=False にする。`feeds.yaml` 由来の手動フィードは対象外
+    # （`collectors.discovery` docstring 参照）。
+    consecutive_empty_fetches: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    # 記事は配信しているが、重複・既存記事の除外を通り抜けた候補が1件も無かった
+    # 連続回数（Issue #109）。1件でも新着があれば 0 へリセットする。取得・パースに
+    # 失敗した回と、`source_domain` を指定した再巡回では数えない（候補が0件になるのが
+    # 当然のため）。`MAX_CONSECUTIVE_NO_NEW_ENTRIES` に達すると status=DISABLED /
+    # enabled=False にする。`consecutive_empty_fetches`（配信そのものが無い）とは
+    # 別の問いを数えるため列を分ける（ADR 0008）。
+    consecutive_no_new_entries: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    # 直近で新着を出した時刻（Issue #109）。判定には使わず、診断用の記録に留める。
+    # 巡回は UI の実行ボタンからの手動起動で実時間の間隔が読めないため、経過時間は
+    # 「新着が無い」のか「巡回していない」のかを区別できない（ADR 0008）。
+    last_new_entry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.statement_timestamp(),
+    )
+
+    __table_args__ = (
+        # 巡回時に「発見済みで有効なフィードだけ」を抽出するのに使う
+        # （`collectors.discovery.load_enabled_discovered_feeds`）。
+        Index("ix_discovered_feeds_status_enabled", "status", "enabled"),
     )

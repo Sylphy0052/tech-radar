@@ -41,6 +41,62 @@ describe("ArticleFilterPanel", () => {
     expect(screen.getByLabelText("言語")).toHaveValue("ja");
   }, TEST_TIMEOUT_MS);
 
+  it("restores the search query and the tag filters from the current URL on mount", () => {
+    // Arrange & Act — トピック・技術タグは複数指定を受け付ける（Issue #91）
+    renderPanel("q=Rust&topics=LLM&topics=RAG&technologies=Python");
+
+    // Assert — 入力欄にはカンマ区切りで戻す
+    expect(screen.getByLabelText("検索語")).toHaveValue("Rust");
+    expect(screen.getByLabelText("トピック（カンマ区切りで複数指定可）")).toHaveValue("LLM, RAG");
+    expect(screen.getByLabelText("技術タグ（カンマ区切りで複数指定可）")).toHaveValue("Python");
+  }, TEST_TIMEOUT_MS);
+
+  it("reflects the search query and the tag filters in the URL query when submitted", () => {
+    // Arrange
+    render(
+      <NavigationTestProvider>
+        <ArticleFilterPanel />
+        <LocationProbe />
+      </NavigationTestProvider>,
+    );
+
+    // Act
+    fireEvent.change(screen.getByLabelText("検索語"), { target: { value: "Rust" } });
+    fireEvent.change(screen.getByLabelText("トピック（カンマ区切りで複数指定可）"), {
+      target: { value: "LLM, RAG" },
+    });
+    fireEvent.change(screen.getByLabelText("技術タグ（カンマ区切りで複数指定可）"), {
+      target: { value: "Python" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "絞り込む" }));
+
+    // Assert
+    const query = new URLSearchParams(screen.getByTestId("location-probe").textContent ?? "");
+    expect(query.get("q")).toBe("Rust");
+    expect(query.getAll("topics")).toEqual(["LLM", "RAG"]);
+    expect(query.getAll("technologies")).toEqual(["Python"]);
+  }, TEST_TIMEOUT_MS);
+
+  it("drops empty entries from the comma separated tag fields", () => {
+    // Arrange
+    render(
+      <NavigationTestProvider>
+        <ArticleFilterPanel />
+        <LocationProbe />
+      </NavigationTestProvider>,
+    );
+
+    // Act — 連続カンマ・末尾カンマ・空白のみの要素を混ぜる
+    fireEvent.change(screen.getByLabelText("トピック（カンマ区切りで複数指定可）"), {
+      target: { value: " LLM ,, ,RAG, " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "絞り込む" }));
+
+    // Assert
+    const query = new URLSearchParams(screen.getByTestId("location-probe").textContent ?? "");
+    expect(query.getAll("topics")).toEqual(["LLM", "RAG"]);
+  }, TEST_TIMEOUT_MS);
+
   it("reflects a single filter in the URL query when submitted alone", () => {
     // Arrange
     render(

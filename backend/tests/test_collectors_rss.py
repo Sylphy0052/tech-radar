@@ -8,7 +8,7 @@ import pytest
 
 from techradar.collectors import rss as rss_module
 from techradar.collectors.config import FeedEntryConfig
-from techradar.collectors.rss import RssCollector
+from techradar.collectors.rss import FeedFetchResult, RssCollector
 from techradar.config import Settings
 from techradar.fetcher.errors import FetchError
 from techradar.fetcher.http import FEED_CONTENT_TYPES, FetchedResource
@@ -54,6 +54,20 @@ ATOM_FEED = """<?xml version="1.0" encoding="UTF-8"?>
 </entry>
 </feed>
 """
+
+# パースは成功するがエントリが 0 件のフィード（フィードは生きているが記事が無いだけ）。
+EMPTY_RSS2_FEED = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+<title>Empty Feed</title>
+<link>https://example.com/</link>
+<description>desc</description>
+</channel>
+</rss>
+"""
+
+# パース自体が壊れているフィード（bozo かつエントリ 0 件）。
+BROKEN_FEED = "<not-a-feed>"
 
 
 def _feed_entry(
@@ -258,3 +272,162 @@ class TestFetchResourceUsage:
         call = fake_fetch_resource.calls[0]
         assert call["url"] == feed.url
         assert call["allowed_content_types"] == FEED_CONTENT_TYPES
+
+
+class TestFeedResults:
+    """フィード URL ごとの結果記録（Issue #105, #108）。`collect()` の戻り値は
+    変えないまま、別メソッドで `FeedFetchResult`（成否とエントリ件数）を
+    取り出せることを検証する。
+    """
+
+    def test_records_success_for_a_feed_that_was_fetched_and_parsed(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange — RSS2_FEED の 4 item のうち link/title が揃っているのは 2 件
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        collector.collect()
+
+        # Assert
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=True, entry_count=2)
+        }
+
+    def test_records_failure_when_fetch_raises_a_fetch_error(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_error(feed.url, FetchError("取得に失敗しました"))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        collector.collect()
+
+        # Assert
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=False, entry_count=0)
+        }
+
+    def test_records_failure_when_parsing_is_bozo_with_no_entries(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange — パース自体が壊れていてエントリが 1 件も取れない
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(BROKEN_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        collector.collect()
+
+        # Assert
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=False, entry_count=0)
+        }
+
+    def test_records_success_when_parsed_but_has_zero_entries(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        """受入基準: エントリ 0 件でもパース成功なら失敗にしない
+        （フィードが生きていて記事が無いだけのため）。`entry_count` も 0 になる
+        （Issue #108 の連続空配信判定はこの値を見る）。
+        """
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(EMPTY_RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        collector.collect()
+
+        # Assert
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=True, entry_count=0)
+        }
+
+    def test_entry_count_reflects_deliverable_candidates_not_raw_entries(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        """受入基準: `entry_count` は link/title を欠いて配信できなかった item を
+        含まない。パース上の生エントリ数（4）ではなく配信できた候補数（2）を返す
+        （Issue #108、`RssCollector._to_candidate` が弾く分は「配信していない」ため）。
+        """
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert
+        assert len(candidates) == 2
+        assert collector.feed_results()[feed.url].entry_count == len(candidates)
+
+    def test_resets_results_when_collect_is_called_a_second_time(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        """受入基準: 同じインスタンスを2回呼んでも前回の記録が混ざらない。"""
+        # Arrange — 1回目は失敗、2回目は同じフィードが成功する
+        feed = _feed_entry()
+        fake_fetch_resource.set_error(feed.url, FetchError("1回目は失敗"))
+        collector = RssCollector([feed], settings)
+        collector.collect()
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=False, entry_count=0)
+        }
+
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+
+        # Act
+        collector.collect()
+
+        # Assert — 1回目の失敗記録が残っていない
+        assert collector.feed_results() == {
+            feed.url: FeedFetchResult(succeeded=True, entry_count=2)
+        }
+
+
+class TestCandidateFeedUrl:
+    """候補記事から巡回元のフィード URL を逆引きできること（Issue #109）。
+
+    「新着が出ないフィード」の判定は、除外を通り抜けた候補をフィード単位で
+    数える（ADR 0008）。集計のキーには `record_feed_health` と同じ `feed_url`
+    を使うため、候補側にも同じ値を持たせる。
+    """
+
+    def test_candidates_carry_the_feed_url_they_came_from(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        # Arrange
+        feed = _feed_entry()
+        fake_fetch_resource.set_response(feed.url, _resource(RSS2_FEED))
+        collector = RssCollector([feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert — 名前（`source_hint`）ではなく URL が入る
+        assert [candidate.feed_url for candidate in candidates] == [feed.url, feed.url]
+
+    def test_keeps_each_candidate_pointing_at_its_own_feed(
+        self, settings: Settings, fake_fetch_resource: _FakeFetchResource
+    ):
+        """受入基準: 複数フィードを巡回しても、候補は自分の出どころを指す。"""
+        # Arrange
+        rss_feed = _feed_entry(name="RSS Feed", url="https://example.com/feed.xml")
+        atom_feed = _feed_entry(name="Atom Feed", url="https://example.com/atom.xml")
+        fake_fetch_resource.set_response(rss_feed.url, _resource(RSS2_FEED))
+        fake_fetch_resource.set_response(atom_feed.url, _resource(ATOM_FEED))
+        collector = RssCollector([rss_feed, atom_feed], settings)
+
+        # Act
+        candidates = collector.collect()
+
+        # Assert
+        feed_urls_by_article_url = {candidate.url: candidate.feed_url for candidate in candidates}
+        assert feed_urls_by_article_url["https://example.com/articles/1"] == rss_feed.url
+        assert feed_urls_by_article_url["https://example.com/articles/2"] == atom_feed.url

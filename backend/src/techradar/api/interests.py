@@ -17,7 +17,10 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_current_user_id, get_now, get_session
+from techradar.api.query_filters import MAX_OFFSET
+from techradar.db.enums import ArticleOrigin
 from techradar.db.models import UserInterestCluster, UserTopicPreference
+from techradar.interest.service import count_interest_articles_by_origin
 from techradar.recommendation.config import get_scoring_config
 
 router = APIRouter(prefix="/api/interests", tags=["interests"])
@@ -70,7 +73,7 @@ def list_interest_topics(
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE, description="取得件数")] = (
         DEFAULT_PAGE_SIZE
     ),
-    offset: Annotated[int, Query(ge=0, description="スキップする件数")] = 0,
+    offset: Annotated[int, Query(ge=0, le=MAX_OFFSET, description="スキップする件数")] = 0,
 ) -> InterestTopicListResponse:
     """トピック単位の関心一覧を返す（`PROJECT_SPEC.md` §7.1, §7.2）。
 
@@ -333,6 +336,25 @@ class SuppressedTopicItem(BaseModel):
     effective_weight: float
 
 
+class InterestOriginCounts(BaseModel):
+    """関心プロファイル構築対象の記事の origin 別件数（Issue #92）。
+
+    `interest/service.py` の `load_weighted_interest_articles`（Discover の
+    関心プロファイル）と同じ母集団（`count_interest_articles_by_origin`）を
+    使う。このレスポンスの他の項目（`article_feedback JOIN articles`、
+    多くは good/save のみに絞る）とは集計元が異なる点に注意（このクラスの
+    docstring と `get_interest_summary` の docstring を参照）。origin は
+    5値で固定のため、他の内容分布系（`InterestTechnologyItem` 等）のような
+    可変長リストではなく `InterestFeedbackRatio` と同じ固定フィールドの形にする。
+    """
+
+    manual_count: int
+    good_count: int
+    saved_count: int
+    read_full_count: int
+    clicked_count: int
+
+
 class InterestSummaryResponse(BaseModel):
     """`GET /api/interests/summary` のレスポンス（関心分析画面向け、Issue #16）。"""
 
@@ -342,6 +364,7 @@ class InterestSummaryResponse(BaseModel):
     primary_source_ratio: InterestPrimarySourceRatio
     content_types: list[InterestContentTypeItem]
     difficulties: list[InterestDifficultyItem]
+    origin_counts: InterestOriginCounts
     suppressed_topics: list[SuppressedTopicItem]
 
 
@@ -470,6 +493,11 @@ def get_interest_summary(
     ここも topic 粒度で返す（`GET /api/interests` と同じ ORM クエリ）。
 
     集計は SQL 側で完結させ、Python へ全件ロードしない（`/timeline` と同じ方針）。
+    ただし `origin_counts` だけは例外で、Python 側で数える（Issue #92）。この項目は
+    集計元が他と違い（`article_feedback JOIN articles` ではなく関心プロファイルの
+    構築対象）、母集団の決定に `user_articles` と `article_feedback` のマージが要る。
+    `load_weighted_interest_articles` と同じ `_load_interest_article_population` を
+    通さないと母集団がずれて画面の数字が嘘になるため、SQL 側での再実装は避けている。
     データが 1 件も無いときは各リストが空配列、`feedback_ratio` /
     `primary_source_ratio` は全項目 0 になる（GROUP BY 無しの集約クエリは
     行が無くても必ず 1 行返るため、例外にはならない）。
@@ -497,6 +525,9 @@ def get_interest_summary(
         .order_by(UserTopicPreference.negative_weight.desc(), UserTopicPreference.topic.asc())
         .limit(MAX_SUMMARY_SUPPRESSED_TOPICS)
     ).all()
+    # 集計元が他の項目と異なる（`article_feedback JOIN articles` ではなく
+    # `interest/service.py` の関心プロファイル構築対象、Issue #92）。
+    origin_counts = count_interest_articles_by_origin(session, user_id)
 
     return InterestSummaryResponse(
         genres=[
@@ -534,4 +565,11 @@ def get_interest_summary(
             )
             for row in suppressed_rows
         ],
+        origin_counts=InterestOriginCounts(
+            manual_count=origin_counts[ArticleOrigin.MANUAL],
+            good_count=origin_counts[ArticleOrigin.GOOD],
+            saved_count=origin_counts[ArticleOrigin.SAVED],
+            read_full_count=origin_counts[ArticleOrigin.READ_FULL],
+            clicked_count=origin_counts[ArticleOrigin.CLICKED],
+        ),
     )

@@ -14,25 +14,144 @@
 
 構成: `backend/` (Python + uv)、`frontend/` (Next.js)、`infra/` (docker-compose)、`scripts/ai-harness/`。
 
-判断の根拠を探すとき: 要件は [PROJECT_SPEC.md](PROJECT_SPEC.md)、確定事項は [docs/decisions.md](docs/decisions.md)、技術選定の根拠は [docs/adr/](docs/adr/)。ただしPROJECT_SPEC.mdのデータモデル案 (§19) とAPI案 (§20) は初期設計時の記録で実装へ追随させていない。現行のスキーマは [backend/src/techradar/db/models.py](backend/src/techradar/db/models.py)、現行のAPIは [backend/openapi.json](backend/openapi.json) を見る。
+判断の根拠を探すとき: 要件は [PROJECT_SPEC.md](PROJECT_SPEC.md)、確定事項は [docs/decisions.md](docs/decisions.md)、技術選定の根拠は [docs/adr/](docs/adr/)。ただしPROJECT_SPEC.mdには実装へ追随させていない節がある (データモデル案 §19、API案 §20、MVPスコープ §22の「必須」、実装順序 §23、完了条件 §26、初回決定事項 §27)。どの節が現役でどの節が記録かは同ファイル冒頭の「この文書の読み方」にまとめてある。§22の「MVPでは実装しない」だけは記録ではなく現役のスコープ境界なので、そこへ手を出す前にPROJECT_SPEC.mdを更新する。現行のスキーマは [backend/src/techradar/db/models.py](backend/src/techradar/db/models.py)、現行のAPIは [backend/openapi.json](backend/openapi.json) を見る。
 
 ## 開発コマンド
 
 - `./run.sh` — backend + frontend を起動する (PostgreSQL は自動起動、ジョブワーカーは backend プロセスに同居)
 - `./run.sh --stop` — PostgreSQL コンテナも含めて停止する
-- `scripts/ai-harness/check.sh` — lint / format / 型チェック / テストを一括実行する。PostgreSQL が未起動なら自動で立ち上げる。commit 前に `pre-bash-guard.sh` から強制実行される
+- `scripts/ai-harness/check.sh` — lint / format / 型チェック / テスト / 依存脆弱性監査 / secret検知を一括実行する。PostgreSQL が未起動なら自動で立ち上げる。**手動で実行する** (2026-08-12 に commit 前の自動実行を廃止した。下記「品質チェックは手動運用」を参照)
+  - 互いに独立したチェックは並列で走る (Issue #61)。出力は混ざらないよう、全ジョブの完了後にまとめて表示する
+  - 依存監査と secret検知は下記「secret検知と依存脆弱性監査」を参照。audit の2つはネットワークを使う
+  - pytest と vitest のワーカー数は `PYTEST_WORKERS` / `VITEST_WORKERS` で変えられる。既定はコア数の半分と 8 の小さい方 (22コア機なら 8、8コア機なら 4)。22コア機での実測では 8 + 8 が最速だった。`PYTEST_WORKERS=1` で pytest の並列化を切れる
+
+## 品質チェックは手動運用 (Issue #76)
+
+グローバル規約と本リポジトリの両方に効く。2026-08-12 に、commit 前の `check.sh` 自動実行を廃止した (グローバル hook `pre-bash-guard.sh` から削除。全プロジェクト対象)。commit のたびに 73〜100秒待つコストが、1名運用における検知の利得を上回るという判断による。
+
+**lint / format / 型チェック / テストを自動で回す仕組みは、どこにも無い。** commit 前の hook も (Issue #76)、MR の CI も (Issue #82) 廃止した。壊れたことに気付くのは、次に手で `check.sh` を回したときだけである。
+
+- 品質チェックは `scripts/ai-harness/check.sh` を**手動で実行する**
+- MR を作る前に一度は全緑を確認する (推奨。機械強制はしない)
+- 完了報告の Evidence には、手動実行した `check.sh` の PASS ログを使う
+- commit のたびに回すかは変更内容で判断してよい (ドキュメントのみの変更など、明らかに影響しない場合は省略可)
+
+## secret検知と依存脆弱性監査 (Issue #83)
+
+`check.sh` は lint / 型 / テストに加えて、次の3つを毎回走らせる。CI を止めた以上 (Issue #82)、これらが走る機会は `check.sh` を手で回したときしか無い。
+
+| ジョブ | 実体 | 単体の所要 |
+| --- | --- | --- |
+| `secret検知` | `detect-secrets-hook --baseline .secrets.baseline` | 約27秒 |
+| `backend: uv audit` | `uv audit` (OSV を参照) | 約2秒 |
+| `frontend: npm audit` | `npm audit --audit-level=high` | 約1秒 |
+
+いずれも並列ジョブなので、壁時計の支配項である pytest より短い限り `check.sh` 全体の所要時間は変わらない。3つを追加した状態での実測は 1分32秒 から 2分2秒 (依存を取得済みの状態) で、機械の混み具合で振れる。
+
+**audit の2つはネットワークを使う。** `uv audit` は OSV へ、`npm audit` は npm registry へ問い合わせる。オフラインでは失敗するため、機内などで作業するときは `check.sh` が通らないことがある。ネットワーク起因の失敗と、実際に脆弱性が見つかった失敗は、出力を読んで区別する。
+
+**secret検知はネットワークを使わない。** detect-secrets は既定で、検出した候補を発行元のAPIへ投げて生きている資格情報かどうかを確かめる (Slack / Stripe / Mailchimp / Telegram などのプラグインが `requests` で実際にリクエストを送る)。本物の secret を踏んだ瞬間にその値が外部サービスへ渡ることになるため、`-n` を付けてこの挙動を切ってある。**このオプションを外さないこと。** 副作用として、外部で無効と確認できたはずの候補も検出として残るが、その分は baseline で扱う。
+
+`check.sh` の呼び出しには他に `--no-run-if-empty` と `--` が付いている。前者は対象が0件のときに何も走査せず緑になるのを防ぎ、後者は `-h` のような名前のファイルが追跡下に入ったときにオプションとして解釈されて走査そのものが飛ぶのを防ぐ。いずれも外さない。
+
+**`uv audit` は uv 0.12 時点で experimental である。** `--preview-features audit-command` を付けて警告を抑えている。uv の更新でオプションや出力が変わる可能性がある。
+
+### secret が検出されたとき
+
+`detect-secrets` の走査対象は git の追跡下にあるファイルだけで、`.secrets.baseline` に載っている検出は既知として無視される。baseline に無い検出が出ると `check.sh` が落ちる。
+
+**まず、それが本物かどうかを見る。** 落ちた検出には「誤検知」と「本物の secret を commit してしまった」の両方があり得る。このリポジトリは commit 前のフックも CI も無く、`check.sh` は手動実行なので、気付いた時点で既に push 済みのことがある。
+
+本物だったときは baseline に入れない。次の順で対応する。
+
+1. 該当する資格情報を直ちに失効・再発行する (漏れた値は git から消しても無効化されない)
+2. 影響範囲を確認する (どこへ push したか、誰が読めたか)
+3. 必要なら履歴から除去する。ただし1を済ませてからでよい
+
+誤検知だと確認できたら、baseline を作り直して差分を commit する。
+
+```bash
+cd <リポジトリルート>
+uv run --project backend --no-sync detect-secrets scan -n --baseline .secrets.baseline
+git add .secrets.baseline
+```
+
+`git add` まで済ませること。`detect-secrets-hook` は baseline が unstaged だと `Your baseline file (.secrets.baseline) is unstaged.` と言って落ちる (baseline だけこっそり書き換えて検知を黙らせる操作を防ぐため)。更新した直後に `check.sh` を回すと、この理由で赤くなる。
+
+`--baseline` へ渡すと、そのファイルを直接書き換える形で更新される。**`scan > .secrets.baseline` のようにリダイレクトで作り直さないこと。** その形だと `.secrets.baseline` 自身が走査対象に入り、中の `hashed_secret` (40桁の hex) が高エントロピー文字列として検出されて、再生成のたびに自己参照のノイズが増える (実測で28件)。`--baseline` 経由なら detect-secrets が baseline 自身を除外する。`-n` を付ける理由は上記のとおり。
+
+作り直す前に、**検出された箇所を1件ずつ目で見て、本物の secret が混ざっていないことを確かめる**。baseline はハッシュしか持たないため、一度取り込むと中身の再確認ができない。
+
+現在 baseline に入っている17件は、いずれも実害が無いことを確認済みである。内訳は alembic のリビジョンID 9件 (高エントロピー文字列として誤検知)、テストのダミー資格情報 4件、テスト関数名の誤検知 2件 (長い識別子が GitHub Token パターンに当たる)、CI の使い捨て資格情報 1件、環境変数テンプレートの接続文字列 1件。
+
+### この監査が見ないもの
+
+- **git の履歴**。`check.sh` が見るのは現在のツリーだけで、過去のコミットで足して後から消した secret は検知できない。導入時 (2026-08-12) に一度だけ全履歴を点検してある。全 blob 1192件を展開して走査し、検出78件はすべて現在のツリーにあるものと同じ顔ぶれ (alembic のリビジョンID、テストのダミー、CI の `POSTGRES_PASSWORD: techradar`、`.env.example` のプレースホルダ) で、過去にだけ存在した secret は無かった。**この点検はこの一回きりである。**以降に混入したものは現ツリーに残っている限り検知できるが、足して消せば通り抜ける
+- **コンテナのベースイメージ**。`uv audit` と `npm audit` が見るのは Python と npm の依存だけで、`infra/docker-compose.yml` が使う `pgvector/pgvector:pg17` は対象外
+- **コードの脆弱性そのもの** (SAST)。導入していない
+- **`# pragma: allowlist secret` を書いた行**。detect-secrets は行単位の除外指示を解釈するため、この注釈を付けた行は baseline を経ずに検知をすり抜ける。誤検知を1行だけ黙らせたいときの逃げ道だが、本物へ付けても止まらない
+
+## 混んでいる機械では check.sh が落ちる (Issue #84)
+
+**`check.sh` の赤は「変更が壊れている」とは限らない。** 機械が混んでいると、変更が正しくてもジョブが落ちる。2026-08-12 に実測した例では、`check.sh` が 46分52秒かかり pytest / vitest / uv audit / npm audit の4つが落ちたが、原因は資源の奪い合いだった (別セッション6本 + ComfyUI + cron が同時稼働)。負荷が引いた後に同じ木で回すと 2分2秒で全緑になった。
+
+区別が付くよう、`check.sh` は機械の状態を出す。
+
+- **実行開始時** — 混んでいれば「この機械は今混んでいる」と出す。**止めはしない**。急ぐなら重いまま回してよいし、落ちてから切り分けてもよい。判断は人がする
+- **失敗時** — 実行後の状態を失敗報告に添える。混んでいれば「上の失敗は資源の奪い合いによるものかもしれない」と明示する
+
+出力の形はこうなる。
+
+```
+[check] 実行後の機械の状態: load 55.30 / 82.85 (16コア), swap 96%, 空きメモリ 5018MB
+[check] この機械は混んでいる。上の失敗は資源の奪い合いによるものかもしれない。
+```
+
+判定は [scripts/ai-harness/lib/machine-load.sh](scripts/ai-harness/lib/machine-load.sh) にあり、テストは [backend/tests/test_machine_load_shell_lib.py](backend/tests/test_machine_load_shell_lib.py)。
+
+### 判定に何を使い、何を使わないか
+
+**使うのは load average (1分と5分) だけである。** 1コアあたり 200% (実行可能なプロセスがコア数の2倍たまっている状態) を超えたら混雑とみなす。実測では、落ちたときの5分平均が 345%、空いているときが 5% で、その間に桁を離して置いてある。1分と5分の両方を見るのは、1分だけだと「直前まで重くて今まさに引けている」状態を拾えず (落ちた直後に測ると 1分平均は 87% まで下がっていた)、5分だけだと走り始めたばかりの重さを拾えないため。
+
+**swap 使用率と空きメモリは表示するだけで、判定には使わない。** swap は一度埋まると、使われなくなっても解放されない。実測でこの機械は、負荷が引いて load が 38% まで下がった後も swap は 96% のままだった。これを条件に入れると毎回警告が出て意味を失う。空きメモリも、落ちたときに 4.9GB 残っており指標にならなかった。どちらも「混んでいたときに何が起きていたか」を読むには役立つので、表示には出す。
+
+閾値が合わない機械では `MACHINE_LOAD_PER_CORE_LIMIT_PERCENT` で、コア数は `MACHINE_LOAD_CORES` で上書きできる。**どちらも10進の整数だけを受け付ける** (`200` は可、`200%` や `auto` は不可)。整数以外を渡すと判定を諦めて素通りするので、上書きしたのに警告が出なくなったら値の書式を疑う。`/proc` を読めない環境でも同様に素通りする (診断のためのコードで `check.sh` を止めない)。
+
+### タイムアウトを延ばしても直らない
+
+落ちた `uv audit` / `npm audit` は `timeout` の打ち切り (exit 124) ではなく、コマンド自身のエラー終了だった。`AUDIT_TIMEOUT_SECONDS` を延ばしても防げないため、既定の120秒は据え置いてある。
+
+## CI は使わない (Issue #82)
+
+CI は 2026-08-12 に停止した。同日に一度再開している (Issue #81) が、実測して割に合わないと分かったため止め直した。[.gitlab-ci.yml](.gitlab-ci.yml) の workflow rules に `- when: never` が入っており、プロジェクト設定の `builds_access_level` も `disabled` にしてある。**pipeline は merge request でも main への push でも作られない。**
+
+止めた理由は2つある。
+
+- **CI が走らせる検証は、MR 前に手で回す `check.sh` と同じものである。** むしろ `check.sh` の方が広く、`openapi.json` と `api-schema.d.ts` の鮮度チェックは CI 側に無い。1名運用では、事後にもう一度同じ検証を走らせる価値が薄い
+- **backend のジョブが1本あたり10分前後かかっていた。** 実測は ruff-check 632秒 / ruff-format 604秒 / ty-check 600秒 / pytest 295秒で、pipeline 全体では数十分規模になる (詳細はIssue #82)。支配的なのは `uv sync` による torch-xpu 一式 (数GB) のダウンロードで、runner 202 は共有 runner (`instance_type`) のため分散キャッシュが未設定であり `cache` は一度も効いていない (ジョブログに `WARNING: Cache file does not exist`)。CI 側だけ CPU 版 torch へ切り替える高速化は可能だが、`pyproject.toml` / `uv.lock` / `run.sh` / `check.sh` の変更を伴い、得られるのは上記の重複した検証でしかない
+
+**品質の担保は、手動の `check.sh` と MR の self review だけである。** 壊れたまま main へ入ってもそれを検知する自動の仕組みは無いので、MR を作る前に `check.sh` を全緑にする運用を守る。
+
+再開するときは [.gitlab-ci.yml](.gitlab-ci.yml) の `- when: never` を、停止理由を書いた直上のコメントごと削除し、あわせて `builds_access_level` を `enabled` へ戻す (`jobs_enabled` は deprecated で、実体はこちら)。ジョブ定義そのものは残してあるため、この2箇所で戻る。ただし上記の所要時間はそのまま再現するので、戻す前に高速化を済ませておく。CI を無効にしている間は pipeline 系の API も応答しなくなるため、過去の実測値を取り直すこともできない。
 
 ## 開発フロー (強制)
 
 Issue起票を経ずに実装へ着手しない。以下の順序で進める (skillの実体はグローバル規約を参照。一括実行は `/gitlab-dev-cycle`)。
 
 1. **Issue作成** — `gitlab-issue` で起票する。着手対象のIssueが存在しない状態でコードを書き始めない
-2. **着手時のIssue更新** — ラベルを `Todo` → `InProgress` へ付け替え、実装計画 (受入基準・変更対象・想定リスク) をIssueにコメント追記する。ブランチ作成前後のどちらでもよいが、実装開始前に完了させる
-3. **ブランチ作成** — `gitlab-branch` でIssueを元に `<type>/<IID>/<slug>` を作成する (worktree隔離が既定)
-4. **実装** — `implement` (TDD: RED→GREEN→REFACTOR) → `gitlab-commit`
-5. **MR** — `gitlab-mr-flow` で MR作成 (Draft) → self review (`gitlab-mr-review` self) → 指摘修正 (`gitlab-mr-address`) → merge。マージ条件は下記「自己マージ許可」に従う
-6. **終了時の更新** — `gitlab-cleanup` で Issue を `Done` + close、`docs/mr/` `docs/issue/` の移動、ブランチ/worktree掃除まで実行する。親ロードマップIssue (`label=roadmap`) のチェック項目も `gitlab-roadmap update` で更新する
-7. **セッション終了の明示** — cleanup 完了後、以下3点を必ず出力してから応答を終える。黙って次の作業へ進まない
+2. **着手前の衝突確認** — Issueのコメント履歴を見て、別セッションが動いていないか確かめる。実装計画のコメントが既にあれば着手しない。防げる範囲と防げない範囲は下記「セッション間で着手が衝突する」に書く
+
+   ```bash
+   glab api "projects/:id/issues/<IID>/notes" | jq '[.[] | select(.system == false) | {created_at, body: .body[:80]}]'
+   ```
+3. **着手時のIssue更新** — ラベルを `Todo` → `InProgress` へ付け替え、実装計画 (受入基準・変更対象・想定リスク) をIssueにコメント追記する。ブランチ作成前後のどちらでもよいが、実装開始前に完了させる
+4. **ブランチ作成** — `gitlab-branch` でIssueを元に `<type>/<IID>/<slug>` を作成する (worktree隔離が既定)
+5. **実装** — `implement` (TDD: RED→GREEN→REFACTOR) → `gitlab-commit`
+6. **MR** — `gitlab-mr-flow` で MR作成 (Draft) → self review (`gitlab-mr-review` self) → 指摘修正 (`gitlab-mr-address`) → **diff と受入基準の突合** → merge。マージ条件は下記「自己マージ許可」に従う
+
+   マージする前に、**MR の diff が Issue の受入基準を満たしているか**を目で確かめる。self review は diff の中身を読むが、diff に**無い**ものは見ない。TDD で RED と GREEN を別 commit にしたときは、両方が同じ MR の diff に入っていることを確認する (`git diff origin/main...HEAD --stat` で足りる)。機械的な補助として `scripts/ai-harness/check-mr-scope.sh <MR_IID>` を用意してある。取りこぼした実例と、この検査が何を見て何を見ないかは下記「MR の diff に実装が入っていないことがある」に書く
+7. **終了時の更新** — `gitlab-cleanup` で Issue を `Done` + close、`docs/mr/` `docs/issue/` の移動、ブランチ/worktree掃除まで実行する。親ロードマップIssue (`label=roadmap`) のチェック項目も `gitlab-roadmap update` で更新する
+8. **セッション終了の明示** — cleanup 完了後、以下3点を必ず出力してから応答を終える。黙って次の作業へ進まない
    - **セッション終了**であることを明示する (「1サイクル完了、セッション終了」と書く)
    - **次に着手するIssue**を提案する (`gitlab-roadmap next` の結果を根拠に、IID・タイトル・選定理由を1行ずつ)
    - 提案できるIssueが無い、または今回の作業で**新たな課題を検出した**場合は、`gitlab-issue` でIssueを新規作成してからその IID を次着手候補として提示する
@@ -43,7 +162,7 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 | --- | --- |
 | `gitlab-issue` | Issue の起票 / 本文整頓 / 別問題の切り出し |
 | `gitlab-branch` | Issue から `<type>/<IID>/<slug>` ブランチ + worktree 作成、`InProgress` 遷移 |
-| `gitlab-commit` | `scripts/ai-harness/check.sh` 実行 + Conventional Commits でcommit |
+| `gitlab-commit` | Conventional Commits でcommit (`check.sh` は手動実行。hook 強制は廃止済み) |
 | `gitlab-mr-flow` | MR作成 (Draft) → self review → 修正 → ready 化 |
 | `gitlab-mr-review` | MR diff の並列レビュー (self / other モード、先祖返り検出) |
 | `gitlab-cleanup` | マージ後の整理 (Issue close、docs移動、branch/worktree掃除、roadmap更新) |
@@ -64,13 +183,18 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 グローバル規約の「MR自己マージ禁止」は**本リポジトリでは適用しない**。以下を満たせば作成者自身が `glab mr merge <IID> --remove-source-branch` を実行してよい (理由: 1名運用でレビュアーが不在。承認待ちと冷却期間が無意味な遅延にしかならない)。
 
 - [ ] `gitlab-mr-review` skill の self モードを実行済みで、CRITICAL/HIGH の指摘がゼロ
+- [ ] MR の diff が Issue の受入基準を満たしている (`check-mr-scope.sh` が警告したときは、意図した追補かどうかを確認済み)
 
 上記を満たせば即マージする。以下のグローバル要件は本リポジトリでは**撤廃**する:
 
 - reviewer への承認依頼 (`gitlab-mr-flow` の「reviewer依頼note投稿」ステップは不要)
 - reviewer または権限保有者による merge 実行 (`~/.claude/skills/gitlab-mr-flow/SKILL.md` L112, L134)
 - self-merge 前の24時間待機・翌日見直し (`~/.claude/docs/gitlab/README.md` L98)
-- **CI pipeline の完了待ち** — commit 前に `scripts/ai-harness/check.sh` が全緑であることを hook が強制済みのため、同じ検証を CI で待ち直さない。pipeline が pending / running のままでもマージしてよい (`glab mr merge <IID> --remove-source-branch`)。ただし CI が **失敗** していると判明した場合は、原因を潰すまでマージしない
+- **CI pipeline の完了待ち** — CI を停止しているため待つ対象が無い (Issue #82、上記「CI は使わない」)。`glab mr merge <IID> --remove-source-branch` を即実行してよい
+
+  この根拠は3度変わっている。当初は「commit 前に check.sh が全緑であることを hook が強制済み」だったが、2026-08-12 にその強制を廃止し (Issue #76)、同日 CI を再開して (Issue #81)、同日その CI も止めた (Issue #82)。現在の担保は、マージ前の self review と手動の `check.sh` の2つだけである
+
+  **マージした後に壊れが判明した場合は fix-forward する。** `--remove-source-branch` で元のブランチは消えているため、revert ではなく main の先端から新しいブランチを作って直す。対象の Issue がまだ open ならそれを流用してよく、閉じていれば起票する
 
 ### 維持する項目 (緩和禁止)
 
@@ -79,21 +203,108 @@ override はマージ主体と承認要件のみ。以下は**引き続き強制
 - 1 Issue 1 Branch / ブランチ命名 `<type>/<IID>/<slug>`
 - MR本文への `Closes #<IID>` 必須
 - `glab mr create` / `glab mr merge` への `--remove-source-branch` 必須
-- commit前の check 全緑 (`git commit --no-verify` / `-n` 禁止)
+- `git commit --no-verify` / `-n` 禁止 (グローバル hook が機械拒否する。check.sh の自動実行は廃止したが、将来 pre-commit hook を置いたときの迂回を防ぐため禁止自体は維持する)
 - MR作成後の `gitlab-mr-review` 実行そのもの (self モードでよいが、スキップは不可)
 - `glab` CLI 使用 (`gh` 禁止)
 
 ## 注意点 (Gotcha)
 
+### MR の diff に実装が入っていないことがある (Issue #109, #111, #112)
+
+Issue #109 では、RED のテスト404行だけを含む MR が `Closes #109` 付きで main へマージされ、Issue が close された。GREEN の実装は書けていたが、MR を作ったブランチの派生元が RED commit の時点のままだったため diff に入らなかった。main は pytest の収集段階で落ちる状態になり、誰も気付かないまま残った (Issue #111 で直した)。
+
+**既存の仕組みは、どれもこれを見ていない。**
+
+- **commit 前の `check.sh` 自動実行は廃止済み** (Issue #76)。仮に走っていても、RED のテストだけを含むブランチでは落ちるため、緑にするには「実装を足す」か「テストを消す」しかない。実際にはブランチ上に実装があって緑だった。緑だったのはブランチであり、マージされたのは diff である
+- **CI も停止済み** (Issue #82)。マージ後の main で pytest を回す機会が無い
+- **`gitlab-mr-review` の self review は diff を読むが、diff に無いものは見ない。** RED のテストだけの diff は、テスト単体としては整合しているため指摘に上がらない
+- **`Closes #<IID>` は diff の中身を検査しない。** Issue は機械的に close される
+
+つまり「ブランチでは緑 → MR の diff からは実装が抜けている → 誰も見ない → Issue が close される」という経路が、どこにも引っかからずに通る。
+
+#### 機械的な検査 (Issue #112)
+
+`scripts/ai-harness/check-mr-scope.sh` が、MR の変更ファイル一覧から「テストの変更があり、実装の変更が1つも無い」状態を警告する。
+
+```bash
+scripts/ai-harness/check-mr-scope.sh <MR_IID>       # glab で変更ファイルを取る
+git diff origin/main...HEAD --name-only | scripts/ai-harness/check-mr-scope.sh --stdin   # MR を作る前でも使える
+```
+
+終了コードは 0 (対象外または実装あり) / 1 (警告) / 2 (判定できず)。判定の本体は [scripts/ai-harness/lib/mr-diff-scope.sh](scripts/ai-harness/lib/mr-diff-scope.sh) にあり、テストは [backend/tests/test_mr_diff_scope_shell_lib.py](backend/tests/test_mr_diff_scope_shell_lib.py)。
+
+**1 は拒否ではなく警告である。** テストの追補だけを行う正当な MR でも 1 になる。意図した追補ならそのまま進めてよい。止めたいのは「実装が diff に入らないまま Issue が close される」ことであり、そのために人が一度目を通す機会を作るのが目的。
+
+条件を「テストのみ」ではなく「実装が無い」にしてある。#109 の MR は RED のテストだけだったが、テストと ADR だけ・テストとドキュメントだけ、という形でも同じ事故になる。実装の有無で見れば、この種を一様に捕まえられる。逆に、テストの変更を含まない MR (ドキュメントのみ、実装のみ) は対象外にした。「実装にテストが無い」ことも問題ではあるが、それはこの検査が扱う失敗とは別のものなので混ぜない。
+
+実装として数えるのは `run.sh`、`backend/src/`、`backend/scripts/`、`backend/migrations/`、`backend/tests/`、`backend/config/`、`frontend/src/`、`frontend/eslint-rules/`、`frontend/` 直下の `*.ts`/`*.mts`/`*.mjs`、`scripts/`、`infra/`。`backend/config/` (収集とスコアリングの挙動を実行時に左右する設定データ) はコードと同様に振る舞いを決めるため実装として数える。**実装ファイルの置き場が増えたときは、判定側の一覧も足す** (足し忘れるとテストが落ちる — `git ls-files` の全件を分類し「other」に落ちたパスが許可リストの範囲に収まっているかを確かめる回帰テストが [backend/tests/test_mr_diff_scope_shell_lib.py](backend/tests/test_mr_diff_scope_shell_lib.py) にあり、実際に `run.sh` の一覧漏れを検知できることを self review 対応で確認済み)。
+
+**テストか否かを先に見る。** テストの判定はファイル名の規約 (`*.test.*` / `*.spec.*` / `test_*.py` / `*_test.py`) とテスト専用ディレクトリ (`__tests__/`、`test-utils/`、`__mocks__/`) だけで行い、**`backend/tests/` というディレクトリ名では判定しない**。理由は両方向にある。
+
+- 実装のディレクトリにテストが同居する。`frontend/src/lib/api.test.ts` や `frontend/src/test-utils/timeouts.ts` を実装として数えると、「実装が入っている」と誤認して検査が素通りする
+- テストのディレクトリに実装が同居する。`backend/tests/db_process_isolation.py`、`backend/tests/fake_worktree_roots.py`、`backend/tests/schema_parity.py`、`backend/tests/conftest.py` は、いずれもこの文書が名指しする判定ロジックそのものである。ディレクトリ名だけで test に倒すと、この種の実装の変更が「実装0件」に埋もれ、実装が入っている MR まで警告してしまう
+
+`backend/tests/test_foo.py` のような通常のテストは、ディレクトリより先に効くファイル名の規約で拾われるため引き続き test になる。
+
+`glab` の応答が想定外だったとき (認証切れ、404、非JSON、`.changes` の要素が想定外の形、差分が大きすぎて GitLab 側で切り詰められる `overflow: true`) は、警告なしで素通りせず rc=2 で止まる。安全網が黙って壊れるのを防ぐため、`.changes` が配列であることを確認してから読み、抽出そのものの失敗も一時ファイル経由で捕まえる。
+
+#### check.sh には組み込まない
+
+この検査を `check.sh` のジョブへ入れると、TDD で RED の commit を打った時点から恒常的に警告が出る。常時出る警告は読まれなくなり、本来止めたい場面でも無視される — 派生元の鮮度検査 (下記) を見送ったのと同じ理由である。呼ぶのは MR を出す前と、マージする前の2箇所でよい。**後から「親切のつもりで」自動化しないこと。**
+
+#### 派生元の鮮度は検査しない
+
+「ブランチの派生元が main の先端かどうか」を検査する案は見送った。main が進むたびに偽になるため、複数の作業を並行させれば正当な MR でも日常的に「古い派生元」と言われる。常時出る警告は読まれなくなり、上の警告まで一緒に無視される。#109 の派生元のずれは原因ではあるが、結果として現れた「実装が diff に無い」を上の検査が捕まえるので、これ無しでも同じ失敗は止まる。
+
+### セッション間で着手が衝突する (Issue #68, #69)
+
+複数のセッションを並行させていると、同じ Issue へ同時に着手することがある。実際に Issue #68 で起き、片方の実装 (テスト33件) を全部破棄した。
+
+**ラベルと worktree とオープンMRでは検出できない。** ラベルは自分で `Todo` → `InProgress` へ付け替えるため、向こうが付ける前に自分が付けると区別できない。`git worktree list` とオープンMRは、相手がまだ作っていない段階では空を返す。#68 のときも着手直前に両方を見て空だった。
+
+そのため開発フローの手順2でコメント履歴を見る。ただし**これで防げるのは、相手が先にコメントを投稿し終えている場合だけ**である。両者がほぼ同時に確認して、どちらにもまだコメントが無い状態なら素通りする。#68 の実際の間隔は30秒で、この手順があっても防げなかった可能性が高い。
+
+機械的なロック (Issue へのアサイン、ブランチ名の先行 push) は今のところ入れていない。1名運用で並行させる頻度に対して仕掛けが重いため、まず確認手順だけを置いて様子を見る。
+
+**衝突が判明したときは、MR を作っている側へ譲る。** 譲る側は commit 前に自分の変更を破棄する。共有された worktree で commit すると相手のブランチへ混入する。Issue には取り下げのコメントを残し、方式の比較と判断根拠を書いておく (計画コメント自体は消さない。経緯が追えなくなる)。
+
 ### テストの同時実行は worktree 単位・プロセス単位に分離済み (Issue #23, #33)
 
 backend の pytest はセッション開始時にテスト用DBを DROP/CREATE する ([backend/tests/conftest.py](backend/tests/conftest.py))。DB名は `techradar_test_<8桁hash>_<pid>` で、ハッシュ部分が作業ディレクトリ（worktree）、PID 部分がプロセスを表す。worktree を分けても分けなくても、別セッションが同時に pytest を回して互いのDBを破壊し合うことはない。
+
+check.sh は pytest を pytest-xdist で並列実行する (Issue #61)。xdist のワーカーは別プロセスなので、この PID 単位の分離がそのまま効く。ワーカー数ぶんのテスト用DBが同時に作られ、それぞれにマイグレーションが適用される。
 
 DBが増え続けないよう、セッション終了時に自分のDBを DROP し、異常終了で残った孤児DB（生存していない PID のもの）は次回のセッション開始時に掃除する。掃除は消さない側へ倒してあり、PID が生存している・PIDとして解釈できない・接続が残っている・自分自身、のいずれかに当たるDBには手を触れない。判定ロジックは [backend/tests/db_process_isolation.py](backend/tests/db_process_isolation.py) にある。
 
 frontend の vitest も同じ理由で `coverage.reportsDirectory` を `coverage/<pid>` に分けてある ([frontend/vitest.config.mts](frontend/vitest.config.mts))。共有していた頃は同時実行すると片方が `Something removed the coverage directory` で落ちた。孤児ディレクトリの掃除は [frontend/vitest.global-setup.ts](frontend/vitest.global-setup.ts) が行う。
 
-worktree を削除すると、そのハッシュを持つテスト用DBはどのworktreeからも掃除されなくなる（他worktreeのDBには触らない設計のため）。溜まってきたら `./scripts/cleanup-test-databases.sh` で確認し、`--apply` を付けて消す。生存しているworktreeのDBと、接続が残っているDBには触らない。
+worktree を削除すると、そのハッシュを持つテスト用DBはどのworktreeからも掃除されなくなる（他worktreeのDBには触らない設計のため）。この掃除は `gitlab-cleanup` skill の worktree 削除ステップから呼ばれる（Issue #60）。cleanup を通せば毎回 dry-run で候補が提示されるので、掃除の機会がその都度できる。ただし下記の理由で見送ることがあり、その場合は残る。
+
+cleanup を経由せず worktree を消したときは `./scripts/cleanup-test-databases.sh` で確認し、`--apply` を付けて消す。生存しているworktreeのDBと、接続が残っているDBには触らない。
+
+掃除は main workspace から、対象の worktree を削除し終えた後に実行する。worktree の中から実行すると、その worktree は生存扱いのままで掃除対象に入らない（実測で確認）。
+
+### 削除されずに残ることがある（Issue #63）
+
+実行中の他セッションのDBを巻き込んで消していたため、掃除に3つの保護を入れた。保護されたDBはレポートに理由付きで出る。
+
+- **DB名のPIDが生存している** — 別セッションの pytest が使っている可能性が高いもの。ただしPIDは循環するので、作成から24時間を超えたDBではPIDを信用しない
+- **作成から10分未満** — `--min-age-minutes` で変更、`0` で無効化。PIDを持たない旧形式や、実在しないPIDを使うテストのダミーはこれで守る
+- **接続が残っている** — 従来どおり
+
+そのため **worktree を消した直後の cleanup では、そのDBが猶予期間に入っていて掃除されないことがある**。溜めないことが目的なので、次回の cleanup で回収されればよい、と割り切っている。すぐに消したいときは `--min-age-minutes 0` を渡す（他セッションが動いていないことを確認してから）。
+
+`--apply` で一度に消せる件数には上限がある（既定10件）。超えると何も削除せず止まるので、dry-run で内容を確かめてから `--max-delete N` を指定して再実行する。想定外の大量削除を機械的に止めるための仕掛け。
+
+保護が入ったので以前ほど神経質になる必要はないが、**別セッションがテストを走らせている最中の `--apply` は避ける**のが確実（実測では2件を巻き込んで消し、別の回では実行中のDB 4件が候補に並んだ）。dry-run に心当たりのないDB名が出たら、他セッションの実行が終わってから改めて実行する。
+
+これは Issue #59 の対応後も残る。掃除スクリプトは「生存している worktree のどれにも属さないDB」を候補にするが、[backend/tests/fake_worktree_roots.py](backend/tests/fake_worktree_roots.py) が返すのは実在しないダミーパスであり、生存 worktree のいずれとも一致しないため。テスト実行中でも、その瞬間に接続が張られていなければ候補に入る。
+
+### テストに壁時計の絶対時間を書かない (Issue #61)
+
+check.sh は複数のチェックを並列で走らせ、pytest 自体も複数プロセスへ分散させる。そのため「1秒以内に終わること」のような余裕の無い時間アサーションは、対象の実装が速いままでも落ちる。実測では、線形走査の ReDoS 回帰テストがカバレッジ計測のオーバーヘッド（約3倍）と CPU 競合（さらに約3倍）が重なって 0.18秒 → 1.8秒まで伸びた。壁時計を CPU 時間 (`time.process_time`) へ替えても、キャッシュやメモリ帯域の奪い合いまでは避けられない。
+
+時間を測るなら、通す側と落とす側の実測値を両方持ったうえで、その間に桁で離して上限を引く（[backend/tests/test_bulk_import.py](backend/tests/test_bulk_import.py) の `_REDOS_CPU_SECONDS_LIMIT`）。「入力を倍にしたときの伸び率で見る」形も試したが、入力サイズでキャッシュの効き方が変わるため線形の実装でも 3.7倍を観測し、こちらは安定しなかった。時間そのものではなく回数を数えられるなら、そちらの方が確実（フロントエンドの同種の失敗は Issue #40, #41）。
 
 ### frontend の Next.js は訓練データと異なる
 

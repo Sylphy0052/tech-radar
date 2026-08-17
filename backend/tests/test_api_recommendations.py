@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import uuid
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
@@ -13,7 +12,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from techradar.api.deps import get_now, get_session
-from techradar.api.recommendations import _MAX_CURSOR_RANK_DIGITS, CURSOR_MAX_LENGTH
+from techradar.api.query_filters import MAX_PAGE_NUMBER
+from techradar.api.recommendations import (
+    FEED_LIST_FILTER_MAX_ITEM_LENGTH,
+    FEED_LIST_FILTER_MAX_ITEMS,
+    FEED_TEXT_FILTER_MAX_LENGTH,
+)
 from techradar.config import Settings
 from techradar.db import Article, ArticleFeedback, Recommendation, RecommendationRun, UserArticle
 from techradar.db.enums import ArticleOrigin, BadReason, FeedbackAction, RecommendationMode
@@ -40,9 +44,12 @@ def make_article(
     session: Session,
     *,
     title: str = "記事タイトル",
+    translated_title: str | None = None,
+    summary_ja: str | None = None,
     body: str | None = None,
     source_domain: str = "example.com",
     topics: Sequence[str] = (),
+    technologies: Sequence[str] = (),
     technical_quality: float = 0.5,
     published_at: datetime | None = NOW,
     embedding: list[float] | None = None,
@@ -53,9 +60,12 @@ def make_article(
         canonical_url=canonical_url,
         original_url=canonical_url,
         title=title,
+        translated_title=translated_title,
+        summary_ja=summary_ja,
         body=body,
         source_domain=source_domain,
         topics=list(topics),
+        technologies=list(technologies),
         technical_quality=technical_quality,
         published_at=published_at,
         fetched_at=NOW,
@@ -207,7 +217,7 @@ class TestGetFeed:
         body = response.json()
         assert len(body["items"]) == 5
 
-    def test_paginates_via_cursor_without_duplicates_and_with_consecutive_ranks(
+    def test_paginates_by_page_without_duplicates_and_with_consecutive_ranks(
         self, client: TestClient, db_session: Session
     ) -> None:
         # Arrange — 受入基準: ページ間で記事の重複が無く、rank が連続する
@@ -215,16 +225,14 @@ class TestGetFeed:
             make_article(db_session, title=f"候補{index}", embedding=make_embedding(index))
 
         # Act
-        first_response = client.get("/api/feed", params={"limit": 2})
-        first_body = first_response.json()
-        second_response = client.get(
-            "/api/feed", params={"limit": 2, "cursor": first_body["next_cursor"]}
-        )
-        second_body = second_response.json()
+        first_response = client.get("/api/feed", params={"limit": 2, "page": 1})
+        second_response = client.get("/api/feed", params={"limit": 2, "page": 2})
 
         # Assert
         assert first_response.status_code == 200
         assert second_response.status_code == 200
+        first_body = first_response.json()
+        second_body = second_response.json()
         first_ids = {item["article_id"] for item in first_body["items"]}
         second_ids = {item["article_id"] for item in second_body["items"]}
         assert len(first_ids) == 2
@@ -232,38 +240,87 @@ class TestGetFeed:
         assert first_ids.isdisjoint(second_ids)
         assert [item["rank"] for item in first_body["items"]] == [1, 2]
         assert [item["rank"] for item in second_body["items"]] == [3, 4]
-        assert first_body["next_cursor"] is not None
 
-    def test_returns_a_null_next_cursor_when_there_is_no_more_data(
+    def test_returns_the_total_count_page_and_total_pages(
         self, client: TestClient, db_session: Session
     ) -> None:
-        # Arrange — 受入基準: 次ページが無いとき next_cursor が null
+        # Arrange — 受入基準: 総件数・総ページ数が正しい
+        for index in range(5):
+            make_article(db_session, title=f"候補{index}", embedding=make_embedding(index))
+
+        # Act
+        response = client.get("/api/feed", params={"limit": 2, "page": 2})
+
+        # Assert
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total_count"] == 5
+        assert body["page"] == 2
+        assert body["page_size"] == 2
+        assert body["total_pages"] == 3
+
+    def test_returns_empty_items_but_correct_total_count_for_an_out_of_range_page(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: 範囲外のページ番号はエラーではなく空の items
         for index in range(2):
             make_article(db_session, title=f"候補{index}", embedding=make_embedding(index))
 
         # Act
-        response = client.get("/api/feed", params={"limit": 2})
+        response = client.get("/api/feed", params={"limit": 2, "page": 99})
 
         # Assert
         assert response.status_code == 200
-        assert response.json()["next_cursor"] is None
+        body = response.json()
+        assert body["items"] == []
+        assert body["total_count"] == 2
+        assert body["page"] == 99
+        assert body["total_pages"] == 1
 
-    def test_returns_400_for_a_malformed_cursor(self, client: TestClient) -> None:
+    def test_returns_200_with_empty_items_when_no_candidates_match(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: 条件に一致する候補が 0 件でも 500 にならない
+        make_article(db_session, title="候補", embedding=make_embedding(0))
+
         # Act
-        response = client.get("/api/feed", params={"cursor": "not-a-valid-cursor!!"})
+        response = client.get("/api/feed", params={"q": "一致しない検索語"})
 
         # Assert
-        assert response.status_code == 400
+        assert response.status_code == 200
+        body = response.json()
+        assert body["items"] == []
+        assert body["total_count"] == 0
+        assert body["total_pages"] == 0
 
-    def test_returns_400_for_a_cursor_pointing_to_an_unknown_run(self, client: TestClient) -> None:
-        # Arrange — 壊れていないが実在しない run_id を指す cursor
-        bogus_cursor = base64.urlsafe_b64encode(f"{uuid.uuid4()}:1".encode()).decode().rstrip("=")
-
+    @pytest.mark.parametrize("invalid_page", [0, -1])
+    def test_rejects_an_out_of_range_page(self, client: TestClient, invalid_page: int) -> None:
         # Act
-        response = client.get("/api/feed", params={"cursor": bogus_cursor})
+        response = client.get("/api/feed", params={"page": invalid_page})
 
         # Assert
-        assert response.status_code == 400
+        assert response.status_code == 422
+
+    def test_accepts_a_page_at_the_upper_bound(self, client: TestClient) -> None:
+        """受入基準: page の上限ちょうどは 200 + 空の items（Issue #96）。"""
+        # Act
+        response = client.get("/api/feed", params={"page": MAX_PAGE_NUMBER})
+
+        # Assert
+        assert response.status_code == 200
+        assert response.json()["items"] == []
+
+    def test_rejects_a_page_above_the_upper_bound(self, client: TestClient) -> None:
+        """受入基準: page の上限を超えると 422（Issue #96）。"""
+        # Act / Assert
+        response = client.get("/api/feed", params={"page": MAX_PAGE_NUMBER + 1})
+        assert response.status_code == 422
+
+    def test_rejects_a_page_that_would_overflow_bigint_offset(self, client: TestClient) -> None:
+        """受入基準: bigint を超える offset になる page は 500 ではなく 422（Issue #96）。"""
+        # Act / Assert
+        response = client.get("/api/feed", params={"page": 10**19})
+        assert response.status_code == 422
 
     def test_excludes_bad_articles(
         self, client: TestClient, db_session: Session, settings: Settings
@@ -333,41 +390,299 @@ class TestGetFeed:
         # Assert
         assert response.status_code == 422
 
-    def test_returns_400_for_a_cursor_exceeding_the_max_length(self, client: TestClient) -> None:
-        # Arrange — 受入基準: 上限を超える長さの cursor は 400
-        oversized_cursor = "A" * (CURSOR_MAX_LENGTH + 1)
+
+class TestGetFeedSearchAndFilters:
+    """検索・絞り込み条件（Issue #90）を検証する。
+
+    全候補を対象に推薦を作り直す方式のため、いずれのテストも 1 回目の
+    `GET /api/feed` 呼び出しだけで完結する（`TestGetFeedRunReuse` のように
+    ウィンドウ内で条件を変えずに読み直す手法とは異なる）。
+    """
+
+    def test_matches_the_search_term_in_the_title_case_insensitively(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: 検索語が title に大文字小文字を区別せず部分一致する
+        target = make_article(db_session, title="Python入門ガイド", embedding=make_embedding(0))
+        other = make_article(db_session, title="Rustハンドブック", embedding=make_embedding(1))
 
         # Act
-        response = client.get("/api/feed", params={"cursor": oversized_cursor})
+        response = client.get("/api/feed", params={"q": "python"})
 
         # Assert
-        assert response.status_code == 400
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(target.id) in item_ids
+        assert str(other.id) not in item_ids
 
-    def test_returns_400_for_a_cursor_with_an_oversized_rank(self, client: TestClient) -> None:
-        # Arrange — 受入基準: rank 部分の桁数が異常に大きい cursor は 400
-        # （int() へ渡す前に桁数で弾く）。桁数を増やすほど cursor 自体も長くなり、
-        # 手前の長さチェックで弾かれて桁数チェックへ到達しなくなるため、
-        # 上限をちょうど 1 桁だけ超える長さにする。
-        raw = f"{uuid.uuid4()}:{'9' * (_MAX_CURSOR_RANK_DIGITS + 1)}"
-        cursor = base64.urlsafe_b64encode(raw.encode()).decode("ascii").rstrip("=")
-        assert len(cursor) <= CURSOR_MAX_LENGTH
+    def test_matches_the_search_term_in_the_translated_title(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: 検索語が translated_title に部分一致する
+        target = make_article(
+            db_session,
+            title="Original",
+            translated_title="日本語タイトル",
+            embedding=make_embedding(0),
+        )
+        other = make_article(
+            db_session, title="Other", translated_title="別の見出し", embedding=make_embedding(1)
+        )
 
         # Act
-        response = client.get("/api/feed", params={"cursor": cursor})
+        response = client.get("/api/feed", params={"q": "日本語"})
 
         # Assert
-        assert response.status_code == 400
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(target.id) in item_ids
+        assert str(other.id) not in item_ids
 
-    def test_returns_400_for_a_cursor_whose_run_id_is_not_a_uuid(self, client: TestClient) -> None:
-        # Arrange — base64 としては復号できるが run_id が UUID ではない cursor
-        raw = "not-a-uuid:1"
-        cursor = base64.urlsafe_b64encode(raw.encode()).decode("ascii").rstrip("=")
+    def test_matches_the_search_term_in_the_summary(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: 検索語が summary_ja に部分一致する
+        target = make_article(
+            db_session,
+            title="記事A",
+            summary_ja="LLMの活用事例を紹介する",
+            embedding=make_embedding(0),
+        )
+        other = make_article(
+            db_session, title="記事B", summary_ja="CSSレイアウトの基礎", embedding=make_embedding(1)
+        )
 
         # Act
-        response = client.get("/api/feed", params={"cursor": cursor})
+        response = client.get("/api/feed", params={"q": "LLM"})
 
         # Assert
-        assert response.status_code == 400
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(target.id) in item_ids
+        assert str(other.id) not in item_ids
+
+    def test_escapes_a_percent_in_the_search_term(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: `%` はワイルドカードではなくリテラルとして扱う（Issue #94）
+        target = make_article(db_session, title="割引100%還元", embedding=make_embedding(0))
+        other = make_article(db_session, title="割引100円還元", embedding=make_embedding(1))
+
+        # Act
+        response = client.get("/api/feed", params={"q": "100%還元"})
+
+        # Assert
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(target.id) in item_ids
+        assert str(other.id) not in item_ids
+
+    def test_escapes_an_underscore_in_the_search_term(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: `_` は任意の1文字ではなくリテラルとして扱う（Issue #94）
+        target = make_article(db_session, title="foo_bar入門", embedding=make_embedding(0))
+        other = make_article(db_session, title="fooXbar入門", embedding=make_embedding(1))
+
+        # Act
+        response = client.get("/api/feed", params={"q": "foo_bar"})
+
+        # Assert
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(target.id) in item_ids
+        assert str(other.id) not in item_ids
+
+    def test_matches_a_search_term_containing_a_backslash_without_error(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: バックスラッシュを含む検索語で例外にならず記事にだけ当たる
+        target = make_article(db_session, title="C:\\Users\\example", embedding=make_embedding(0))
+        other = make_article(db_session, title="C:/Users/example", embedding=make_embedding(1))
+
+        # Act
+        response = client.get("/api/feed", params={"q": "C:\\Users"})
+
+        # Assert
+        assert response.status_code == 200
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(target.id) in item_ids
+        assert str(other.id) not in item_ids
+
+    def test_requires_all_specified_topics(self, client: TestClient, db_session: Session) -> None:
+        # Arrange — 受入基準: topics を複数指定したとき、全てを含む記事だけが残る
+        both = make_article(
+            db_session, title="両方持ち", topics=["llm", "rag"], embedding=make_embedding(0)
+        )
+        only_one = make_article(
+            db_session, title="片方だけ", topics=["llm"], embedding=make_embedding(1)
+        )
+
+        # Act
+        response = client.get("/api/feed", params={"topics": ["llm", "rag"]})
+
+        # Assert
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(both.id) in item_ids
+        assert str(only_one.id) not in item_ids
+
+    def test_requires_all_specified_technologies(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: technologies を複数指定したとき、全てを含む記事だけが残る
+        both = make_article(
+            db_session,
+            title="両方持ち",
+            technologies=["python", "fastapi"],
+            embedding=make_embedding(0),
+        )
+        only_one = make_article(
+            db_session, title="片方だけ", technologies=["python"], embedding=make_embedding(1)
+        )
+
+        # Act
+        response = client.get("/api/feed", params={"technologies": ["python", "fastapi"]})
+
+        # Assert
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(both.id) in item_ids
+        assert str(only_one.id) not in item_ids
+
+    def test_filters_by_published_at_range(self, client: TestClient, db_session: Session) -> None:
+        # Arrange — 受入基準: 公開日の範囲で絞れる
+        in_range = make_article(
+            db_session,
+            title="範囲内",
+            published_at=NOW - timedelta(days=1),
+            embedding=make_embedding(0),
+        )
+        too_old = make_article(
+            db_session,
+            title="範囲外",
+            published_at=NOW - timedelta(days=5),
+            embedding=make_embedding(1),
+        )
+
+        # Act
+        response = client.get(
+            "/api/feed",
+            params={
+                "published_from": (NOW - timedelta(days=2)).isoformat(),
+                "published_to": NOW.isoformat(),
+            },
+        )
+
+        # Assert
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(in_range.id) in item_ids
+        assert str(too_old.id) not in item_ids
+
+    def test_filters_by_source_domain(self, client: TestClient, db_session: Session) -> None:
+        # Arrange — 受入基準: 情報源ドメインで絞れる
+        target = make_article(
+            db_session,
+            title="対象ドメイン",
+            source_domain="example.com",
+            embedding=make_embedding(0),
+        )
+        other = make_article(
+            db_session,
+            title="別ドメイン",
+            source_domain="other.example",
+            embedding=make_embedding(1),
+        )
+
+        # Act
+        response = client.get("/api/feed", params={"source_domain": "example.com"})
+
+        # Assert
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(target.id) in item_ids
+        assert str(other.id) not in item_ids
+
+
+class TestGetFeedMaxAgeDays:
+    """受入基準: 対象期間を1〜180日で指定できる（Issue #90 自己レビュー）。"""
+
+    def test_returns_articles_older_than_the_default_window_when_widened(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 既定（scoring.yaml の freshness.max_age_days = 7日）では
+        # 候補に入らない記事が、対象期間を広げると出る
+        old = make_article(
+            db_session,
+            title="30日前の記事",
+            published_at=NOW - timedelta(days=30),
+            embedding=make_embedding(0),
+        )
+
+        # Act
+        response = client.get("/api/feed", params={"max_age_days": 60})
+
+        # Assert
+        assert response.status_code == 200
+        assert str(old.id) in [item["article_id"] for item in response.json()["items"]]
+
+    def test_excludes_articles_older_than_the_given_max_age_days(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange
+        within = make_article(
+            db_session,
+            title="期間内",
+            published_at=NOW - timedelta(days=2),
+            embedding=make_embedding(0),
+        )
+        beyond = make_article(
+            db_session,
+            title="期間外",
+            published_at=NOW - timedelta(days=4),
+            embedding=make_embedding(1),
+        )
+
+        # Act
+        response = client.get("/api/feed", params={"max_age_days": 3})
+
+        # Assert
+        item_ids = [item["article_id"] for item in response.json()["items"]]
+        assert str(within.id) in item_ids
+        assert str(beyond.id) not in item_ids
+
+    def test_rejects_a_max_age_days_below_the_minimum(self, client: TestClient) -> None:
+        # Act / Assert — 0 日は範囲外
+        assert client.get("/api/feed", params={"max_age_days": 0}).status_code == 422
+
+    def test_rejects_a_max_age_days_above_the_maximum(self, client: TestClient) -> None:
+        # Act / Assert — 181 日は範囲外
+        assert client.get("/api/feed", params={"max_age_days": 181}).status_code == 422
+
+
+class TestGetFeedInputLimits:
+    """受入基準: 自由入力の絞り込み条件に上限を課す（Issue #90 自己レビュー）。
+
+    上限値は `api/recommendations.py` の定数から取り、テスト側で数値を二重管理
+    しない（`api/articles.py` の入力長上限と同じ方針）。
+    """
+
+    def test_rejects_a_too_long_query(self, client: TestClient) -> None:
+        # Act / Assert
+        too_long = "a" * (FEED_TEXT_FILTER_MAX_LENGTH + 1)
+        assert client.get("/api/feed", params={"q": too_long}).status_code == 422
+
+    def test_rejects_a_too_long_source_domain(self, client: TestClient) -> None:
+        # Act / Assert
+        too_long = "a" * (FEED_TEXT_FILTER_MAX_LENGTH + 1)
+        assert client.get("/api/feed", params={"source_domain": too_long}).status_code == 422
+
+    def test_rejects_too_many_topics(self, client: TestClient) -> None:
+        # Act / Assert — 件数の上限は FastAPI の Query では表せないため関数内で検証している
+        too_many = [f"topic{index}" for index in range(FEED_LIST_FILTER_MAX_ITEMS + 1)]
+        assert client.get("/api/feed", params={"topics": too_many}).status_code == 422
+
+    def test_rejects_a_too_long_topic_item(self, client: TestClient) -> None:
+        # Act / Assert — 要素ごとの長さも Query では効かないため関数内で検証している
+        too_long = "a" * (FEED_LIST_FILTER_MAX_ITEM_LENGTH + 1)
+        assert client.get("/api/feed", params={"topics": [too_long]}).status_code == 422
+
+    def test_rejects_too_many_technologies(self, client: TestClient) -> None:
+        # Act / Assert
+        too_many = [f"tech{index}" for index in range(FEED_LIST_FILTER_MAX_ITEMS + 1)]
+        assert client.get("/api/feed", params={"technologies": too_many}).status_code == 422
 
 
 class TestGetFeedRunReuse:
@@ -430,23 +745,25 @@ class TestGetFeedRunReuse:
         assert run_count == 1
         assert second_response.json()["items"] == []
 
-    def test_returns_a_next_cursor_even_when_every_item_on_the_page_is_badded(
+    def test_total_count_is_unaffected_by_badding_within_the_reuse_window(
         self, client: TestClient, db_session: Session
     ) -> None:
-        """API 契約: ページ内が全件 Bad だと items は空でも next_cursor は返る。
+        """API 契約: 総件数は run に入った件数であり、Bad 除外の影響を受けない。
 
-        `next_cursor` は Bad 除外より前の行から計算する（除外の有無で cursor が
-        巻き戻らないようにするため）。クライアントは items の空だけで終端と判断
-        してはならない。
+        `total_count` は `recommendations` の保存件数から求める
+        （`count_recommendations`）。Bad は表示時にレスポンス組み立て側
+        （`_build_items`）が除外するだけで run の保存件数自体は変わらないため、
+        再利用ウィンドウ内で Bad を付けても `total_count` は変化しない。
+        クライアントは `items` の空だけでページングの終端と判断してはならない。
         """
-        # Arrange — limit=1 で 2 ページぶんの候補を用意し、1 ページ目だけ Bad にする
+        # Arrange
         for index in range(2):
             make_article(db_session, title=f"候補{index}", embedding=make_embedding(index))
         client.app.dependency_overrides[get_now] = lambda: NOW
         first_response = client.get("/api/feed", params={"limit": 1})
         first_items = first_response.json()["items"]
         assert len(first_items) == 1
-        assert first_response.json()["next_cursor"] is not None
+        assert first_response.json()["total_count"] == 2
 
         # Act — 1 ページ目の記事を Bad にしてから同じページを読み直す
         client.post(
@@ -454,10 +771,75 @@ class TestGetFeedRunReuse:
         )
         second_response = client.get("/api/feed", params={"limit": 1})
 
-        # Assert — items は空だが、次ページを辿るための cursor は残る
+        # Assert — items は空だが、総件数・総ページ数は変わらない
         body = second_response.json()
         assert body["items"] == []
-        assert body["next_cursor"] is not None
+        assert body["total_count"] == 2
+        assert body["total_pages"] == 2
+
+    def test_reuses_the_same_run_for_the_same_filters(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: 同じ条件で連続して呼ぶと同じ run が再利用される
+        make_article(db_session, title="Python記事", topics=["llm"], embedding=make_embedding(0))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+
+        # Act
+        first_response = client.get("/api/feed", params={"q": "python", "topics": ["llm"]})
+        second_response = client.get("/api/feed", params={"q": "python", "topics": ["llm"]})
+
+        # Assert
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        run_count = db_session.scalar(select(func.count()).select_from(RecommendationRun))
+        assert run_count == 1
+
+    def test_generates_a_new_run_when_filters_change(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: 条件を変えると別の run が作られる
+        make_article(db_session, title="候補", embedding=make_embedding(0))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+
+        # Act
+        client.get("/api/feed", params={"q": "python"})
+        client.get("/api/feed", params={"q": "rust"})
+
+        # Assert
+        run_count = db_session.scalar(select(func.count()).select_from(RecommendationRun))
+        assert run_count == 2
+
+    def test_reuses_the_same_run_when_topic_order_differs(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 受入基準: topics=a,b と topics=b,a は同じフィンガープリントになる
+        make_article(db_session, title="候補", topics=["llm", "rag"], embedding=make_embedding(0))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+
+        # Act
+        client.get("/api/feed", params={"topics": ["llm", "rag"]})
+        client.get("/api/feed", params={"topics": ["rag", "llm"]})
+
+        # Assert
+        run_count = db_session.scalar(select(func.count()).select_from(RecommendationRun))
+        assert run_count == 1
+
+    def test_no_filter_and_empty_filter_share_the_same_run(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Arrange — 既存の条件なし呼び出しの挙動が壊れていないことも兼ねて確認する
+        make_article(db_session, title="候補", embedding=make_embedding(0))
+        client.app.dependency_overrides[get_now] = lambda: NOW
+
+        # Act
+        first_response = client.get("/api/feed")
+        second_response = client.get("/api/feed")
+
+        # Assert
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        run_count = db_session.scalar(select(func.count()).select_from(RecommendationRun))
+        assert run_count == 1
 
     def test_generates_a_new_run_after_the_reuse_window_expires(
         self, client: TestClient, db_session: Session

@@ -46,6 +46,26 @@ def worker_session_factory(migrated_engine: Engine) -> Iterator[sessionmaker[Ses
         engine.dispose()
 
 
+# 条件が満たされるのを待つだけの上限。ここを短くしてもテストは速くならない（待ちは
+# 条件が満たされ次第そこで終わる）。一方で短いと、check.sh が複数のチェックを並列で
+# 走らせて CPU を奪い合ったときに待ちきれずに落ちる（Issue #61 と同じ轍。実測では
+# 2.0 秒でワーカーのテストが3件同時に落ちた）。落ちた側が本当に止まっているのか
+# 遅いだけなのかを分ける値ではないので、余裕を持たせる。
+#
+# 「処理が無期限にブロックしない」ことを見る待ちにもこの値を使う。握り潰しの実装なら
+# いつまでも戻らないため、上限が大きくても検知はできる。
+_WAIT_TIMEOUT_SECONDS = 15.0
+
+# スレッド側で「テストが合図をくれるまで足止めする」ときの保険。テストが合図し損ねた
+# ときにスレッドを永久に残さないためだけの値で、正常な流れでは満了しない。
+#
+# テスト側の待ちと同じ値にしてはいけない。両方が同時に満了すると、足止めを抜けた
+# スレッドの書き込みが stop() の release より先に走り、テストが確かめたい順序
+# （release が先、遅れた書き込みが後）が崩れる。実際、ここを同じ値にしたところ
+# `test_a_late_write_...` が「completed に上書きされた」と報告するようになった。
+_THREAD_GUARD_TIMEOUT_SECONDS = _WAIT_TIMEOUT_SECONDS * 4
+
+
 def _fast_settings(**overrides: Any) -> Settings:
     """テストが短時間で終わるよう、待機系の秒数を小さくした設定を返す。"""
     defaults: dict[str, Any] = {
@@ -77,7 +97,7 @@ async def _wait_for_job_status(
     job_id: uuid.UUID,
     expected: JobStatus,
     *,
-    timeout: float = 2.0,
+    timeout: float = _WAIT_TIMEOUT_SECONDS,
 ) -> Job:
     """ジョブが期待する status になるまで短い間隔でポーリングする。
 
@@ -118,7 +138,7 @@ async def test_worker_processes_a_job_with_the_registered_handler(
     # Act
     await worker.start()
     try:
-        await asyncio.wait_for(handled.wait(), timeout=2.0)
+        await asyncio.wait_for(handled.wait(), timeout=_WAIT_TIMEOUT_SECONDS)
         job = await _wait_for_job_status(worker_session_factory, job_id, JobStatus.COMPLETED)
     finally:
         await worker.stop()
@@ -195,7 +215,7 @@ async def test_stop_releases_a_job_that_exceeds_the_shutdown_grace_period(
     job_id = _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
     worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
     await worker.start()
-    await asyncio.wait_for(started.wait(), timeout=2.0)
+    await asyncio.wait_for(started.wait(), timeout=_WAIT_TIMEOUT_SECONDS)
 
     # Act
     await worker.stop()
@@ -225,7 +245,7 @@ async def test_stop_waits_for_a_handler_that_finishes_within_the_grace_period(
     job_id = _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
     worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
     await worker.start()
-    await asyncio.wait_for(started.wait(), timeout=2.0)
+    await asyncio.wait_for(started.wait(), timeout=_WAIT_TIMEOUT_SECONDS)
 
     # Act
     await worker.stop()
@@ -262,7 +282,7 @@ async def test_start_reclaims_jobs_left_in_a_running_status(
     # Act: start() の reclaim_stale で pending に戻らない限りこの待ちはタイムアウトする
     await worker.start()
     try:
-        await asyncio.wait_for(handled.wait(), timeout=2.0)
+        await asyncio.wait_for(handled.wait(), timeout=_WAIT_TIMEOUT_SECONDS)
     finally:
         await worker.stop()
 
@@ -278,7 +298,7 @@ async def test_worker_concurrency_processes_jobs_in_parallel(
     concurrent_gate = asyncio.Barrier(2)
 
     async def handler(context: JobContext) -> None:
-        await asyncio.wait_for(concurrent_gate.wait(), timeout=2.0)
+        await asyncio.wait_for(concurrent_gate.wait(), timeout=_WAIT_TIMEOUT_SECONDS)
 
     registry = JobHandlerRegistry()
     registry.register(JobType.FETCH_ARTICLE, handler)
@@ -414,7 +434,7 @@ async def test_worker_loop_continues_after_transient_session_factory_errors(
     job_id = _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
     try:
         # 例外のたびに poll interval だけ待って継続するため、猶予を持たせて待つ
-        await asyncio.wait_for(handled.wait(), timeout=2.0)
+        await asyncio.wait_for(handled.wait(), timeout=_WAIT_TIMEOUT_SECONDS)
         job = await _wait_for_job_status(worker_session_factory, job_id, JobStatus.COMPLETED)
     finally:
         await worker.stop()
@@ -426,6 +446,7 @@ async def test_worker_loop_continues_after_transient_session_factory_errors(
 
 async def test_stop_does_not_hang_when_a_handler_swallows_cancelled_error(
     worker_session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """MEDIUM: ハンドラが CancelledError を握り潰しても stop() がタイムアウトで戻ること。"""
     # Arrange: キャンセルを繰り返し握り潰したあと、自発的に終わるハンドラ
@@ -444,15 +465,30 @@ async def test_stop_does_not_hang_when_a_handler_swallows_cancelled_error(
     )
     job_id = _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
     worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
+
+    # 取り残されたタスクが完走して完了記録まで進んだことを、時間ではなく到達で捉える。
+    completion_attempted = threading.Event()
+    original_complete_job_sync = worker._complete_job_sync
+
+    def recording_complete_job_sync(claimed: Any, duration_ms: int) -> None:
+        try:
+            original_complete_job_sync(claimed, duration_ms)
+        finally:
+            completion_attempted.set()
+
+    monkeypatch.setattr(worker, "_complete_job_sync", recording_complete_job_sync)
+
     await worker.start()
-    await asyncio.wait_for(started.wait(), timeout=2.0)
+    await asyncio.wait_for(started.wait(), timeout=_WAIT_TIMEOUT_SECONDS)
 
     # Act: stop() 自体が無期限にブロックせず戻ってくること
-    await asyncio.wait_for(worker.stop(), timeout=2.0)
+    await asyncio.wait_for(worker.stop(), timeout=_WAIT_TIMEOUT_SECONDS)
 
-    # ハンドラのバックグラウンド継続分（最大 0.25 秒）が完全に終わるのを待ち、
-    # テスト終了後まで残留タスクが生き残らないようにする。
-    await asyncio.sleep(0.3)
+    # ハンドラのバックグラウンド継続分が終わり、完了記録まで進むのを待つ。固定秒数の
+    # sleep で仮定すると、まだ書き込みが来ていないだけの状態を「上書きされなかった」と
+    # 読み違える。テスト終了後まで残留タスクを生かさない意味でも、ここで待ち切る。
+    await asyncio.to_thread(completion_attempted.wait, _WAIT_TIMEOUT_SECONDS)
+    assert completion_attempted.is_set(), "取り残されたタスクが完了記録まで進まなかった"
 
     # Assert: 取り残されたタスクが後から完走しても、release で戻した pending を
     # completed へ書き換えないこと（Issue #27）。
@@ -474,7 +510,9 @@ async def test_a_late_write_from_an_abandoned_task_does_not_overwrite_a_released
     CancelledError で終わる一方、スレッドはそのまま完了を書きにくる。
     """
     # Arrange: 完了記録の直前で足止めし、stop() のキャンセルを受けさせる
-    reached_completion = asyncio.Event()
+    # ワーカーのスレッドから set するため、asyncio.Event は使えない（別スレッドからの
+    # set ではイベントループが起きず、待っている側はタイムアウトまで気付かない）。
+    reached_completion = threading.Event()
     allow_completion = threading.Event()
 
     async def handler(context: JobContext) -> None:
@@ -490,21 +528,30 @@ async def test_a_late_write_from_an_abandoned_task_does_not_overwrite_a_released
 
     original_complete_job_sync = worker._complete_job_sync
 
+    completion_written = threading.Event()
+
     def blocking_complete_job_sync(claimed: Any, duration_ms: int) -> None:
         # スレッド側で走る。ここで待たせている間に stop() がキャンセルと release を行う。
         reached_completion.set()
-        allow_completion.wait(timeout=5.0)
-        original_complete_job_sync(claimed, duration_ms)
+        allow_completion.wait(timeout=_THREAD_GUARD_TIMEOUT_SECONDS)
+        try:
+            original_complete_job_sync(claimed, duration_ms)
+        finally:
+            completion_written.set()
 
     monkeypatch.setattr(worker, "_complete_job_sync", blocking_complete_job_sync)
 
     await worker.start()
-    await asyncio.wait_for(reached_completion.wait(), timeout=2.0)
+    await asyncio.to_thread(reached_completion.wait, _WAIT_TIMEOUT_SECONDS)
+    assert reached_completion.is_set(), "完了記録の直前まで進まなかった"
 
     # Act: 完了記録が終わる前に停止し、そのあとスレッド側の書き込みを進ませる
-    await asyncio.wait_for(worker.stop(), timeout=2.0)
+    await asyncio.wait_for(worker.stop(), timeout=_WAIT_TIMEOUT_SECONDS)
     allow_completion.set()
-    await asyncio.sleep(0.3)
+    # 書き込みが実際に終わるまで待つ。固定秒数の sleep だと、遅れたときに「まだ
+    # 書かれていないだけ」を「上書きされなかった」と読み違える。
+    await asyncio.to_thread(completion_written.wait, _WAIT_TIMEOUT_SECONDS)
+    assert completion_written.is_set(), "スレッド側の完了記録が終わらなかった"
 
     # Assert: release で戻した pending のままで、completed に化けていない
     with worker_session_factory() as session:
@@ -524,7 +571,8 @@ async def test_a_late_failure_write_from_an_abandoned_task_does_not_overwrite_a_
     通ってしまうと利用者都合の中断がリトライ回数を消費する。
     """
     # Arrange: ハンドラを失敗させ、失敗記録の直前で足止めする
-    reached_failure = asyncio.Event()
+    # 完了側と同じ理由で threading.Event を使う。
+    reached_failure = threading.Event()
     allow_failure = threading.Event()
 
     async def handler(context: JobContext) -> None:
@@ -540,22 +588,30 @@ async def test_a_late_failure_write_from_an_abandoned_task_does_not_overwrite_a_
 
     original_fail_job_sync = worker._fail_job_sync
 
+    failure_written = threading.Event()
+
     def blocking_fail_job_sync(
         claimed: Any, error: str, duration_ms: int, *, retryable: bool
     ) -> None:
         reached_failure.set()
-        allow_failure.wait(timeout=5.0)
-        original_fail_job_sync(claimed, error, duration_ms, retryable=retryable)
+        allow_failure.wait(timeout=_THREAD_GUARD_TIMEOUT_SECONDS)
+        try:
+            original_fail_job_sync(claimed, error, duration_ms, retryable=retryable)
+        finally:
+            failure_written.set()
 
     monkeypatch.setattr(worker, "_fail_job_sync", blocking_fail_job_sync)
 
     await worker.start()
-    await asyncio.wait_for(reached_failure.wait(), timeout=2.0)
+    await asyncio.to_thread(reached_failure.wait, _WAIT_TIMEOUT_SECONDS)
+    assert reached_failure.is_set(), "失敗記録の直前まで進まなかった"
 
     # Act
-    await asyncio.wait_for(worker.stop(), timeout=2.0)
+    await asyncio.wait_for(worker.stop(), timeout=_WAIT_TIMEOUT_SECONDS)
     allow_failure.set()
-    await asyncio.sleep(0.3)
+    # 完了側と同じく、スレッドの書き込みが終わるのを待ってから見る。
+    await asyncio.to_thread(failure_written.wait, _WAIT_TIMEOUT_SECONDS)
+    assert failure_written.is_set(), "スレッド側の失敗記録が終わらなかった"
 
     # Assert: release で戻した pending のままで、attempts も増えていない
     with worker_session_factory() as session:
@@ -618,12 +674,12 @@ async def test_stop_completes_the_remaining_work_when_one_release_fails(
 
     await worker.start()
     for _ in range(concurrency):
-        await asyncio.wait_for(started.acquire(), timeout=2.0)
+        await asyncio.wait_for(started.acquire(), timeout=_WAIT_TIMEOUT_SECONDS)
     # start() も reclaim_stale を呼ぶため、差し替えは起動後にする。
     monkeypatch.setattr(worker, "_reclaim_stale_sync", counting_reclaim_stale_sync)
 
     # Act: stop() 自体は例外を投げずに完了する
-    await asyncio.wait_for(worker.stop(), timeout=3.0)
+    await asyncio.wait_for(worker.stop(), timeout=_WAIT_TIMEOUT_SECONDS)
 
     # Assert: 両方の release が試みられ、shutdown 時の reclaim_stale も走っている
     assert len(release_calls) == concurrency
@@ -638,48 +694,71 @@ async def test_stop_completes_the_remaining_work_when_one_release_fails(
 
 async def test_stop_cancels_overdue_tasks_concurrently(
     worker_session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """受入基準: 複数タスクが同時に猶予超過してもシャットダウンが直列に伸びないこと。
 
     キャンセル待ちを1件ずつ `await` していると、所要時間が
     `grace + N * cancel_await_timeout` まで伸びる。まとめて待てば
-    `cancel_await_timeout` 1回分に収まる。
+    `cancel_await_timeout` 1回分に収まる。所要時間そのものではなく、キャンセル待ちが
+    同時に走った本数で見る（時間で見ると CPU の奪い合いで落ちる。Issue #61）。
     """
     # Arrange: 2本とも猶予を超え、かつキャンセルを握り潰すハンドラ
     concurrency = 2
-    cancel_await_timeout = 0.4
     started = asyncio.Semaphore(0)
+    finished = asyncio.Semaphore(0)
 
     async def handler(context: JobContext) -> None:
         started.release()
-        for _ in range(20):
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.sleep(0.05)
+        try:
+            for _ in range(20):
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.sleep(0.05)
+        finally:
+            finished.release()
 
     registry = JobHandlerRegistry()
     registry.register(JobType.FETCH_ARTICLE, handler)
     settings = _fast_settings(
         worker_concurrency=concurrency,
         worker_shutdown_grace_seconds=0.05,
-        worker_cancel_await_timeout_seconds=cancel_await_timeout,
+        worker_cancel_await_timeout_seconds=0.4,
     )
     for _ in range(concurrency):
         _enqueue_committed(worker_session_factory, JobType.FETCH_ARTICLE)
     worker = JobWorker(settings=settings, registry=registry, session_factory=worker_session_factory)
+
+    # 並行かどうかを所要時間で測ると、CPU を奪い合ったときに落ちる（Issue #61）。
+    # キャンセル待ちが同時に何本走ったかを数えて見る。1件ずつ順番に待つ実装なら
+    # 最大同時数は 1 のままで、まとめて待てば猶予を超えた本数と一致する。
+    active = 0
+    max_active = 0
+    original_cancel_and_release = worker._cancel_and_release
+
+    async def counting_cancel_and_release(*args: Any, **kwargs: Any) -> None:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await original_cancel_and_release(*args, **kwargs)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(worker, "_cancel_and_release", counting_cancel_and_release)
+
     await worker.start()
     for _ in range(concurrency):
-        await asyncio.wait_for(started.acquire(), timeout=2.0)
+        await asyncio.wait_for(started.acquire(), timeout=_WAIT_TIMEOUT_SECONDS)
 
     # Act
-    began = time.monotonic()
-    await asyncio.wait_for(worker.stop(), timeout=5.0)
-    elapsed = time.monotonic() - began
+    await asyncio.wait_for(worker.stop(), timeout=_WAIT_TIMEOUT_SECONDS)
 
-    # Assert: 直列なら 2 * 0.4 = 0.8 秒を超える。並行なら 0.4 秒台に収まる。
-    assert elapsed < cancel_await_timeout * 2
+    # Assert: 猶予を超えた2本のキャンセル待ちが同時に走っている
+    assert max_active == concurrency
 
     # ハンドラのバックグラウンド継続分が終わるのを待ってからテストを抜ける。
-    await asyncio.sleep(1.1)
+    for _ in range(concurrency):
+        await asyncio.wait_for(finished.acquire(), timeout=_WAIT_TIMEOUT_SECONDS)
 
 
 async def test_stop_logs_exceptions_from_tasks_that_finish_within_the_grace_period(

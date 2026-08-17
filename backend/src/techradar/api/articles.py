@@ -7,8 +7,6 @@ MVP は単一ユーザー・認証なし（§22）のため、登録者は常に
 
 from __future__ import annotations
 
-import base64
-import binascii
 import math
 import uuid
 from collections.abc import Sequence
@@ -18,9 +16,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import Select, select, tuple_
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from techradar.api.bulk_import import (
     MAX_BULK_IMPORT_FILE_BYTES,
@@ -32,9 +31,11 @@ from techradar.api.bulk_import import (
     validate_bulk_import_url,
 )
 from techradar.api.deps import get_current_user_id, get_session
+from techradar.api.query_filters import MAX_PAGE_NUMBER, reject_oversized_list
 from techradar.db.enums import ArticleOrigin, JobStatus, JobType
 from techradar.db.errors import is_unique_violation
 from techradar.db.models import Article, ArticleRegistration, UserArticle
+from techradar.db.query import LIKE_ESCAPE_CHAR, escape_like_pattern
 from techradar.fetcher.url import normalize_url
 from techradar.jobs.queue import enqueue
 
@@ -60,20 +61,15 @@ INTEREST_LIST_ORIGIN_VALUES = frozenset(
 DEFAULT_INTEREST_LIST_PAGE_SIZE = 20
 MAX_INTEREST_LIST_PAGE_SIZE = 100
 
-# cursor（デコード後）中の created_at と id の区切り文字。
-_INTEREST_CURSOR_SEPARATOR = ":"
-
-# cursor がデコード後に含む raw 文字列の最大長。ISO8601 の datetime
-# （タイムゾーン付きで最大 32 文字程度）+ 区切り 1 文字 + UUID（36 文字）に
-# 余裕を持たせつつ、極端に長い文字列を `datetime.fromisoformat` /
-# `uuid.UUID` へ渡さないための安全弁（`recommendations.py` の cursor 検証と同じ方針）。
-_MAX_INTEREST_CURSOR_RAW_LENGTH = 96
-INTEREST_CURSOR_MAX_LENGTH = math.ceil(_MAX_INTEREST_CURSOR_RAW_LENGTH / 3) * 4
-
-# 関心記事一覧のテキストフィルター（domain/category/source_domain/language）の上限。
-# 実データはこれよりずっと短いが、際限なく長い文字列を DB 比較へ渡さないための安全弁
-# （`cursor` の `INTEREST_CURSOR_MAX_LENGTH` と同じ方針）。
+# 関心記事一覧のテキストフィルター（q/domain/category/source_domain/language）の上限。
+# 実データはこれよりずっと短いが、際限なく長い文字列を DB 比較へ渡さないための安全弁。
+# `topics` / `technologies` の要素ごとの長さにも同じ値を使う。
 INTEREST_LIST_TEXT_FILTER_MAX_LENGTH = 256
+
+# topics / technologies の件数上限（Issue #91）。`GET /api/feed` の
+# `FEED_LIST_FILTER_MAX_ITEMS` と同じ値・同じ検証
+# （`query_filters.reject_oversized_list`）にする。
+INTEREST_LIST_FILTER_MAX_ITEMS = 20
 
 
 class ArticleRegistrationCreate(BaseModel):
@@ -496,6 +492,16 @@ class InterestArticleItem(BaseModel):
     source_domain: str
     language: str | None
     topics: list[str]
+    # LLM 解析（`analysis/service.py`）が付与する技術タグ。関心プロファイルの
+    # 集計対象には既になっているが、この一覧に出ていなかったため Issue #92 で追加。
+    technologies: list[str]
+    # 解析の進行状態（`db/models.py` の `Article.analysis_status`）。
+    # `technologies` が空のとき「未解析だから空」（pending/analyzing/null）と
+    # 「解析済みだが実際に0件」（completed）を画面側で区別するために返す。
+    # 値は常に pending/analyzing/completed/failed のいずれか（`analysis/service.py`
+    # / `fetcher/service.py` がこの列へ書き込む値。`JobStatus` 自体は
+    # fetching/searching も持つが、この列には現れない）。
+    analysis_status: JobStatus | None
     domain: str | None
     category: str | None
     content_type: str | None
@@ -504,45 +510,21 @@ class InterestArticleItem(BaseModel):
 
 
 class InterestArticleListResponse(BaseModel):
-    """関心記事一覧のレスポンス。"""
+    """関心記事一覧のレスポンス（ページングは Issue #91 で番号付きへ変更）。
+
+    `GET /api/feed` の `FeedResponse` と同じ形にそろえ、画面側の
+    `components/ui/Pagination` を両方から同じように使えるようにする。
+    """
 
     items: list[InterestArticleItem]
-    # 次ページが無ければ null。
-    next_cursor: str | None
-
-
-class InvalidInterestCursorError(Exception):
-    """壊れた関心記事一覧の cursor 文字列を検出したときの例外。"""
-
-
-def _encode_interest_cursor(created_at: datetime, row_id: uuid.UUID) -> str:
-    """`user_articles` の `created_at` と `id` から、不透明な cursor 文字列を作る。"""
-    raw = f"{created_at.isoformat()}{_INTEREST_CURSOR_SEPARATOR}{row_id}".encode()
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
-def _decode_interest_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
-    """cursor 文字列を `created_at` と `id` へ復元する。
-
-    壊れた cursor（長すぎる・base64 として不正・区切り文字が無い・
-    datetime/UUID として不正）はすべて `InvalidInterestCursorError` にまとめる。
-    """
-    if len(cursor) > INTEREST_CURSOR_MAX_LENGTH:
-        raise InvalidInterestCursorError
-
-    padding = "=" * (-len(cursor) % 4)
-    try:
-        raw = base64.urlsafe_b64decode(cursor + padding).decode("utf-8")
-        created_at_text, row_id_text = raw.rsplit(_INTEREST_CURSOR_SEPARATOR, 1)
-    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
-        raise InvalidInterestCursorError from exc
-
-    try:
-        created_at = datetime.fromisoformat(created_at_text)
-        row_id = uuid.UUID(row_id_text)
-    except ValueError as exc:
-        raise InvalidInterestCursorError from exc
-    return created_at, row_id
+    # 絞り込み後の総件数（現在のページの件数ではない）。
+    total_count: int
+    # 要求されたページ番号（1 始まり）。範囲外でもそのまま返す。
+    page: int
+    # 1 ページあたりの件数（`limit` クエリパラメータの値）。
+    page_size: int
+    # `total_count` を `page_size` で割って切り上げた総ページ数。0 件なら 0。
+    total_pages: int
 
 
 def _build_interest_article_item(
@@ -560,6 +542,10 @@ def _build_interest_article_item(
         source_domain=article.source_domain,
         language=article.language,
         topics=list(article.topics),
+        technologies=list(article.technologies),
+        analysis_status=(
+            JobStatus(article.analysis_status) if article.analysis_status is not None else None
+        ),
         domain=article.domain,
         category=article.category,
         content_type=article.content_type,
@@ -601,10 +587,13 @@ def _resolve_allowed_origins(origin: Sequence[ArticleOrigin] | None) -> frozense
     return frozenset(value.value for value in origin) & INTEREST_LIST_ORIGIN_VALUES
 
 
-def _build_interest_article_query(
+def _build_interest_article_filters(
     user_id: uuid.UUID,
     *,
     allowed_origins: frozenset[str],
+    query: str | None,
+    topics: list[str] | None,
+    technologies: list[str] | None,
     domain: str | None,
     category: str | None,
     source_domain: str | None,
@@ -612,15 +601,40 @@ def _build_interest_article_query(
     registered_from: datetime | None,
     registered_to: datetime | None,
     is_primary_source: bool | None,
-) -> Select[tuple[UserArticle, Article]]:
-    """フィルター条件を反映した、関心記事一覧の SELECT 文を組み立てる。
+) -> list[ColumnElement[bool]]:
+    """フィルター条件を WHERE 句のリストにする。
 
-    `allowed_origins` は空でない前提（空集合なら呼び出し側がショートサーキットする）。
+    件数を数えるクエリと 1 ページ分を読むクエリの両方が同じ条件を使うため、
+    条件だけを組み立てて返す。`allowed_origins` は空でない前提
+    （空集合なら呼び出し側がショートサーキットする）。
+
+    検索語とタグの絞り込みは `recommendation/service.py` の `load_candidates`
+    （`GET /api/feed`）と同じ形にそろえる。検索語は title / translated_title /
+    summary_ja のいずれかへの部分一致（大文字小文字を区別しない）、
+    topics / technologies は JSONB の包含（`@>`）で「指定した全てを含む」
+    （AND）を表す。
+
+    検索語に含まれる LIKE の特殊文字（`%` / `_`）は `db/query.escape_like_pattern`
+    でエスケープしてから埋め込む。`api/sources.py` と `load_candidates` にも
+    同じ関数を使っている（Issue #94）。
     """
-    filters = [
+    filters: list[ColumnElement[bool]] = [
         UserArticle.user_id == user_id,
         UserArticle.origin.in_(allowed_origins),
     ]
+    if query:
+        pattern = f"%{escape_like_pattern(query)}%"
+        filters.append(
+            or_(
+                Article.title.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+                Article.translated_title.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+                Article.summary_ja.ilike(pattern, escape=LIKE_ESCAPE_CHAR),
+            )
+        )
+    if topics:
+        filters.append(Article.topics.contains(topics))
+    if technologies:
+        filters.append(Article.technologies.contains(technologies))
     if domain is not None:
         filters.append(Article.domain == domain)
     if category is not None:
@@ -636,11 +650,7 @@ def _build_interest_article_query(
     if is_primary_source is not None:
         filters.append(Article.is_primary_source == is_primary_source)
 
-    return (
-        select(UserArticle, Article)
-        .join(Article, Article.id == UserArticle.article_id)
-        .where(*filters)
-    )
+    return filters
 
 
 @router.get("", response_model=InterestArticleListResponse)
@@ -648,6 +658,23 @@ def list_interest_articles(
     session: SessionDep,
     user_id: UserIdDep,
     origin: Annotated[list[ArticleOrigin] | None, Query(description="登録方法。複数指定可")] = None,
+    q: Annotated[
+        str | None,
+        Query(
+            description=(
+                "検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない）"
+            ),
+            max_length=INTEREST_LIST_TEXT_FILTER_MAX_LENGTH,
+        ),
+    ] = None,
+    topics: Annotated[
+        list[str] | None,
+        Query(description="トピック。複数指定時は指定した全てを含む記事に絞る（AND）"),
+    ] = None,
+    technologies: Annotated[
+        list[str] | None,
+        Query(description="技術タグ。複数指定時は指定した全てを含む記事に絞る（AND）"),
+    ] = None,
     domain: Annotated[
         str | None,
         Query(description="ジャンル大分類", max_length=INTEREST_LIST_TEXT_FILTER_MAX_LENGTH),
@@ -671,17 +698,20 @@ def list_interest_articles(
         datetime | None, Query(description="登録日時の期間（上限、含む）")
     ] = None,
     is_primary_source: Annotated[bool | None, Query(description="公式 / 非公式")] = None,
-    cursor: Annotated[
-        str | None, Query(description="前回レスポンスの next_cursor をそのまま渡す")
-    ] = None,
+    page: Annotated[int, Query(ge=1, le=MAX_PAGE_NUMBER, description="1始まりのページ番号")] = 1,
     limit: Annotated[int, Query(ge=1, le=MAX_INTEREST_LIST_PAGE_SIZE)] = (
         DEFAULT_INTEREST_LIST_PAGE_SIZE
     ),
 ) -> InterestArticleListResponse:
-    """関心記事一覧を返す（`PROJECT_SPEC.md` §6.3）。
+    """関心記事一覧を返す（`PROJECT_SPEC.md` §6.3、検索・絞り込み・ページングは Issue #91）。
 
     手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）
-    降順で返す。タイブレークに `user_articles.id` を使い、cursor はこの2つの組から作る。
+    降順で返す。タイブレークに `user_articles.id` を使う。
+
+    ページングは番号付き（`page` / `limit`）で、`GET /api/feed` と同じく offset として
+    扱う。総ページ数を超える `page` はエラーにせず空の `items` を返すが、
+    `MAX_PAGE_NUMBER` を超える `page` は 422 で弾く（Issue #96）。Issue #91 以前は
+    cursor 方式だったが、目的のページへ直接移動できるようにするため置き換えた。
     """
     # naive な datetime 同士でも `>` 自体は例外を出さないが、片方だけ tz-aware だと
     # 比較で TypeError になる。ここで先に弾いておくことで、直後の順序比較を安全にする。
@@ -698,25 +728,29 @@ def list_interest_articles(
             detail="registered_from は registered_to 以前である必要があります",
         )
 
-    after: tuple[datetime, uuid.UUID] | None = None
-    if cursor is not None:
-        try:
-            after = _decode_interest_cursor(cursor)
-        except InvalidInterestCursorError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="cursor が不正です"
-            ) from exc
+    for param_name, values in (("topics", topics), ("technologies", technologies)):
+        reject_oversized_list(
+            values,
+            param_name=param_name,
+            max_items=INTEREST_LIST_FILTER_MAX_ITEMS,
+            max_item_length=INTEREST_LIST_TEXT_FILTER_MAX_LENGTH,
+        )
 
     allowed_origins = _resolve_allowed_origins(origin)
     if not allowed_origins:
         # 指定された origin が一覧対象の3経路と1つも重ならない
         # （例: read_full のみ指定）。DB へ問い合わせるまでもなく空配列が確定するため、
         # 常に偽になる `IN ()` 句を発行せずショートサーキットする。
-        return InterestArticleListResponse(items=[], next_cursor=None)
+        return InterestArticleListResponse(
+            items=[], total_count=0, page=page, page_size=limit, total_pages=0
+        )
 
-    statement = _build_interest_article_query(
+    filters = _build_interest_article_filters(
         user_id,
         allowed_origins=allowed_origins,
+        query=q,
+        topics=topics,
+        technologies=technologies,
         domain=domain,
         category=category,
         source_domain=source_domain,
@@ -725,28 +759,35 @@ def list_interest_articles(
         registered_to=registered_to,
         is_primary_source=is_primary_source,
     )
-    if after is not None:
-        statement = statement.where(tuple_(UserArticle.created_at, UserArticle.id) < after)
 
-    # 次ページの有無を判定するため、要求件数より 1 件多く取得する
-    # （`recommendations.py` の `get_feed` と同じ方針）。
-    rows = session.execute(
-        statement.order_by(UserArticle.created_at.desc(), UserArticle.id.desc()).limit(limit + 1)
-    ).all()
-    has_next_page = len(rows) > limit
-    page_rows = rows[:limit]
-
-    next_cursor = (
-        _encode_interest_cursor(page_rows[-1][0].created_at, page_rows[-1][0].id)
-        if has_next_page
-        else None
+    total_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(UserArticle)
+            .join(Article, Article.id == UserArticle.article_id)
+            .where(*filters)
+        )
+        or 0
     )
+    total_pages = math.ceil(total_count / limit) if total_count > 0 else 0
+
+    rows = session.execute(
+        select(UserArticle, Article)
+        .join(Article, Article.id == UserArticle.article_id)
+        .where(*filters)
+        .order_by(UserArticle.created_at.desc(), UserArticle.id.desc())
+        .offset((page - 1) * limit)
+        .limit(limit)
+    ).all()
+
     return InterestArticleListResponse(
         items=[
-            _build_interest_article_item(user_article, article)
-            for user_article, article in page_rows
+            _build_interest_article_item(user_article, article) for user_article, article in rows
         ],
-        next_cursor=next_cursor,
+        total_count=total_count,
+        page=page,
+        page_size=limit,
+        total_pages=total_pages,
     )
 
 

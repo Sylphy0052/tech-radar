@@ -19,12 +19,19 @@ from techradar.collectors.arxiv import ArxivCollector
 from techradar.collectors.base import CandidateArticle, SourceCollector
 from techradar.collectors.brave import BraveSearchCollector
 from techradar.collectors.config import FeedsConfig, get_feeds_config
+from techradar.collectors.discovery import (
+    DiscoveredFeedCollector,
+    discover_feeds,
+    load_enabled_discovered_feeds,
+    record_feed_health,
+    record_feed_novelty,
+)
 from techradar.collectors.filters import filter_recent, limit_candidates
 from techradar.collectors.github_releases import GitHubReleasesCollector
 from techradar.collectors.hackernews import HackerNewsCollector
 from techradar.collectors.jp_media import JpMediaCollector
 from techradar.collectors.query import build_search_queries
-from techradar.collectors.rss import RssCollector
+from techradar.collectors.rss import FeedFetchResult, RssCollector
 from techradar.config import Settings, get_settings
 from techradar.db.enums import JobStatus, JobType
 from techradar.db.models import Article, Job
@@ -71,13 +78,26 @@ def collect_candidates(
 
     処理順序（早い段階の絞り込みほど、以降の重い処理を減らす）:
     1. 各コレクターの `collect()` を呼ぶ（1 つの失敗が他を巻き込まない）
-    2. `filter_recent` で公開日不明・古い候補を除外する
-    3. `source_domain` が指定されていればホスト一致のものだけへ絞る
-    4. 正規化 URL で候補内の重複を排除する
-    5. 既に `articles` にある記事（正規化 URL 一致）を除外する
-    6. 既に pending / 実行中の `fetch_article` ジョブがある URL を除外する
-    7. `max_candidates_per_run` で上限を適用する
-    8. 残った候補を `fetch_article` として enqueue する
+    2. `DiscoveredFeedCollector` の巡回結果（成否）を `discovered_feeds` へ反映する
+       （Issue #105、発見済みフィードの死活監視。`feeds.yaml` 由来の手動フィードは
+       対象外）。ここで無効化した分だけ枠が空くため、同じ巡回の 10 で新しい
+       ドメインを開拓できる
+    3. `filter_recent` で公開日不明・古い候補を除外する
+    4. `source_domain` が指定されていればホスト一致のものだけへ絞る
+    5. 正規化 URL で候補内の重複を排除する
+    6. 既に `articles` にある記事（正規化 URL 一致）を除外する
+    7. 既に pending / 実行中の `fetch_article` ジョブがある URL を除外する
+    8. ここまでの除外を通り抜けた候補の件数をフィード単位で `discovered_feeds` へ
+       反映する（Issue #109、新着が出ないフィードの無効化。上限適用の前に数える
+       理由と `source_domain` 指定時に飛ばす理由は `_record_feed_novelty_safely`）
+    9. `max_candidates_per_run` で上限を適用する
+    10. 残った候補を `fetch_article` として enqueue する
+    11. 登録記事のドメインから新規巡回先を自動発見し `discovered_feeds` へ反映する
+        （Issue #93、次回以降の巡回で拾われる。今回の収集結果には使わない）
+
+    発見済みフィードへの反映を 2 と 8 の 2 段階に分けているのは、両者が別の問いを
+    数えるため（ADR 0008）。2 は取得の成否と配信件数を、8 は除外後の新着件数を見る。
+    どちらも新規発見（11）より前にあるので、無効化で空いた枠は同じ巡回で使える。
     """
     resolved_settings = settings or get_settings()
     resolved_feeds_config = feeds_config or get_feeds_config()
@@ -88,11 +108,15 @@ def collect_candidates(
     )
 
     raw_candidates = _collect_all(resolved_collectors)
+    _record_feed_health_safely(session, resolved_collectors)
     fresh = filter_recent(raw_candidates, freshness_days=resolved_feeds_config.freshness_days)
     scoped = _filter_by_source_domain(fresh, source_domain)
     deduped = _dedupe_by_normalized_url(scoped)
     unseen = _exclude_existing_articles(session, deduped)
     not_yet_queued = _exclude_already_queued(session, unseen)
+    _record_feed_novelty_safely(
+        session, resolved_collectors, not_yet_queued, source_domain=source_domain
+    )
     limited = limit_candidates(
         not_yet_queued, max_candidates=resolved_feeds_config.max_candidates_per_run
     )
@@ -112,19 +136,158 @@ def collect_candidates(
         result.enqueued_count,
         source_domain,
     )
+    _discover_new_feeds_safely(session, settings=resolved_settings)
     return result
+
+
+def _record_feed_health_safely(session: Session, collectors: Sequence[SourceCollector]) -> None:
+    """`DiscoveredFeedCollector` の巡回結果を `discovered_feeds` へ反映する（Issue #105, #108）。
+
+    `collectors` の中から `DiscoveredFeedCollector` のインスタンスだけを見つけて
+    `feed_results()`（`RssCollector` が持つ、フィード URL ごとの結果の記録。
+    `techradar.collectors.rss.RssCollector` / `FeedFetchResult` docstring 参照）を読み、まとめて
+    `discovery.record_feed_health` へ渡す。`feeds.yaml` 由来の `RssCollector` /
+    `JpMediaCollector`（`DiscoveredFeedCollector` のインスタンスではない）は
+    対象にしない。自動追加の枠（`discovery.MAX_DISCOVERED_FEEDS_TOTAL`）を
+    消費しないため無効化する動機が無く、人が意図して置いた手動フィードを
+    機械が黙って外す方が危ういため（`discovery.record_feed_health` docstring
+    にも同じ理由を記載）。
+
+    `_discover_new_feeds_safely` と同じ理由で savepoint（`session.begin_nested()`）
+    で囲み、例外はログのみに留める。`record_feed_health` は `discovered_feeds`
+    へ書き込むため、その flush が失敗するとセッションが「rollback 待ち」の
+    まま残り、呼び出し元の `session.commit()` が `PendingRollbackError` で
+    落ちて、既に enqueue 済みの候補まで巻き添えで消えてしまう。savepoint を
+    張っておけば、例外時に反映処理ぶんだけを巻き戻してセッションを使える
+    状態へ戻せる。
+
+    `DiscoveredFeedCollector` の判別（`isinstance`）も含めて丸ごと捕捉する。
+    `_build_default_collectors` の各コレクタークラスをテスト用に差し替える
+    ケース（`TestBuildDefaultCollectors`）では `DiscoveredFeedCollector` 自体が
+    クラスではなくなるため、ここが失敗しても巡回結果を巻き込まないようにする。
+    """
+    try:
+        feed_results = _discovered_feed_results(collectors)
+        if not feed_results:
+            return
+
+        with session.begin_nested():
+            record_feed_health(session, feed_results)
+    except Exception:
+        logger.warning("collectors.service.feed_health_recording_failed", exc_info=True)
+
+
+def _record_feed_novelty_safely(
+    session: Session,
+    collectors: Sequence[SourceCollector],
+    candidates: Sequence[CandidateArticle],
+    *,
+    source_domain: str | None,
+) -> None:
+    """除外を通り抜けた候補の件数を `discovered_feeds` へ反映する（Issue #109、ADR 0008）。
+
+    `candidates` は `_exclude_already_queued` を通過した時点の候補。
+    `limit_candidates` の**前**で数える。`max_candidates_per_run` で切られた分を
+    「新着が無かった」と数えると、他フィードの新着が多い巡回で、上限に押し出された
+    だけのフィードを無効化してしまうため。
+
+    数える対象は、その巡回で取得・パースに成功した `DiscoveredFeedCollector` の
+    フィードだけ（`record_feed_health` と同じく `feeds.yaml` 由来の手動フィードは
+    対象外）。取得に失敗した回は候補が 0 件になるのが当然であり、「新着が無かった」
+    と数えてはならない（`consecutive_failures` の側でのみ数える）。
+
+    `source_domain` が指定された再巡回では、この反映を丸ごと飛ばす。
+    `_filter_by_source_domain` が他ドメインの候補を全て落とすため、ここを数えると
+    指定ドメイン以外の全フィードが新着 0 件に見え、単一ドメインの再巡回を繰り返す
+    だけで無関係なフィードが軒並み無効化される。
+
+    `_record_feed_health_safely` と同じ理由で savepoint（`session.begin_nested()`）
+    で囲み、例外はログのみに留める（反映の失敗で enqueue 済みの候補を巻き添えに
+    しない）。
+    """
+    if source_domain is not None:
+        return
+
+    try:
+        feed_results = _discovered_feed_results(collectors)
+        new_entry_counts = _count_new_entries_by_feed_url(feed_results, candidates)
+        if not new_entry_counts:
+            return
+
+        with session.begin_nested():
+            record_feed_novelty(session, new_entry_counts)
+    except Exception:
+        logger.warning("collectors.service.feed_novelty_recording_failed", exc_info=True)
+
+
+def _discovered_feed_results(
+    collectors: Sequence[SourceCollector],
+) -> dict[str, FeedFetchResult]:
+    """`DiscoveredFeedCollector` のフィード URL ごとの巡回結果をまとめて返す。
+
+    `feeds.yaml` 由来の `RssCollector` / `JpMediaCollector`（`DiscoveredFeedCollector`
+    のインスタンスではない）は対象にしない。`isinstance` 自体が失敗しうる
+    （`_record_feed_health_safely` docstring 参照）ため、呼び出し側の try の中で使う。
+    """
+    feed_results: dict[str, FeedFetchResult] = {}
+    for collector in collectors:
+        if isinstance(collector, DiscoveredFeedCollector):
+            feed_results.update(collector.feed_results())
+    return feed_results
+
+
+def _count_new_entries_by_feed_url(
+    feed_results: dict[str, FeedFetchResult], candidates: Sequence[CandidateArticle]
+) -> dict[str, int]:
+    """取得に成功したフィードごとに、除外を通り抜けた候補の件数を数える（Issue #109）。
+
+    取得に成功したフィードは 0 件でも結果に含める（「新着が無かった」ことを数える
+    ため）。取得に失敗したフィードは含めない。`feed_url` を持たない候補
+    （HN / GitHub Releases / arXiv / Brave 由来）はどのフィードにも数えない。
+    """
+    counts = {feed_url: 0 for feed_url, result in feed_results.items() if result.succeeded}
+    for candidate in candidates:
+        feed_url = candidate.feed_url
+        if feed_url is not None and feed_url in counts:
+            counts[feed_url] += 1
+    return counts
+
+
+def _discover_new_feeds_safely(session: Session, *, settings: Settings) -> None:
+    """登録記事のドメインから新規巡回先を発見する（Issue #93）。
+
+    1 ドメインの発見失敗は `discovery.discover_feeds` の内部で吸収されるが、
+    ドメイン集計クエリ自体の失敗など想定外の例外まで含めて、この処理の失敗で
+    巡回結果（既に enqueue 済みの候補）を失わせないよう、ここでも `_collect_all`
+    と同じ「1 箇所の失敗が全体を止めない」方針で広く捕捉する。
+
+    捕捉するだけでは足りないため、発見処理全体を savepoint で囲む。`discover_feeds`
+    は `discovered_feeds` へ書き込むので、その flush が失敗するとセッションが
+    「rollback 待ち」のまま残り、呼び出し元（`jobs.handlers._shared._run_sync`）の
+    `session.commit()` が `PendingRollbackError` で落ちて、enqueue 済みの候補まで
+    巻き添えで消える。savepoint を張っておけば、例外時に発見処理ぶんだけを巻き戻して
+    セッションを使える状態へ戻せる。
+    """
+    try:
+        with session.begin_nested():
+            discover_feeds(session, user_id=settings.default_user_id, settings=settings)
+    except Exception:
+        logger.warning("collectors.service.feed_discovery_failed", exc_info=True)
 
 
 def _build_default_collectors(
     session: Session, settings: Settings, feeds_config: FeedsConfig
 ) -> tuple[SourceCollector, ...]:
-    """既定の巡回対象（RSS / 国内メディア / HN / GitHub Releases / arXiv / Brave）を組み立てる。"""
+    """既定の巡回対象（RSS / 国内メディア / HN / GitHub Releases / arXiv / 発見済み / Brave）
+    を組み立てる。
+    """
     collectors: list[SourceCollector] = [
         RssCollector(feeds_config.rss, settings),
         JpMediaCollector(feeds_config.jp_media, settings),
         HackerNewsCollector(feeds_config=feeds_config, settings=settings),
         GitHubReleasesCollector(feeds_config=feeds_config, settings=settings),
         ArxivCollector(feeds_config.arxiv_categories, settings),
+        DiscoveredFeedCollector(load_enabled_discovered_feeds(session), settings),
     ]
 
     # Brave は API キー未設定時、コレクター自身の `collect()` でも空リストを返す

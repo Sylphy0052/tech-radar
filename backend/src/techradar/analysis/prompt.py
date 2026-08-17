@@ -9,12 +9,19 @@
 
 from __future__ import annotations
 
-ANALYSIS_INSTRUCTION = """技術記事を解析し、指定された JSON を出力してください。
+from techradar.analysis.schema import MAX_SUMMARY_LENGTH
+
+# 上限はスキーマ側の値をそのまま埋め込む。ここへ数値を直接書くと、
+# スキーマの上限を変えたときに指示だけ古い値が残る。
+ANALYSIS_INSTRUCTION = f"""技術記事を解析し、指定された JSON を出力してください。
 
 各項目の作り方:
 
-- summary_ja: 日本語で 200 字程度に要約する。**原文が何語であっても日本語で書く**。
-  記事が何を主張し、読者が何を得られるかを書く。前置きや「この記事では」は不要。
+- summary_ja: 日本語で 200 字程度に要約する。**{MAX_SUMMARY_LENGTH} 字を超えてはならない**。
+  超えた分は切り捨てられ、要約が途中で終わる。記事が何を主張し、読者が何を得られるかを
+  書く。前置きや「この記事では」は不要。発表や新機能の列挙が多い記事では、
+  個々を並べずに全体の要点へまとめる。
+  **原文が何語であっても日本語で書く**。
 - translated_title: 原文タイトルの日本語訳。原文が日本語なら null にする。
 - domain: 大分類。例: Generative AI / Web Frontend / Database / Security
 - category: domain の中の位置づけ。例: Agentic Engineering / State Management

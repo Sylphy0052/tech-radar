@@ -13,10 +13,15 @@ export interface paths {
         };
         /**
          * List Interest Articles
-         * @description 関心記事一覧を返す（`PROJECT_SPEC.md` §6.3）。
+         * @description 関心記事一覧を返す（`PROJECT_SPEC.md` §6.3、検索・絞り込み・ページングは Issue #91）。
          *
          *     手動登録・Good・保存の3経路のみを対象にし、登録日時（`user_articles.created_at`）
-         *     降順で返す。タイブレークに `user_articles.id` を使い、cursor はこの2つの組から作る。
+         *     降順で返す。タイブレークに `user_articles.id` を使う。
+         *
+         *     ページングは番号付き（`page` / `limit`）で、`GET /api/feed` と同じく offset として
+         *     扱う。総ページ数を超える `page` はエラーにせず空の `items` を返すが、
+         *     `MAX_PAGE_NUMBER` を超える `page` は 422 で弾く（Issue #96）。Issue #91 以前は
+         *     cursor 方式だったが、目的のページへ直接移動できるようにするため置き換えた。
          */
         get: operations["list_interest_articles_api_articles_get"];
         put?: never;
@@ -214,18 +219,28 @@ export interface paths {
         };
         /**
          * Get Feed
-         * @description Discover フィードを返す（`PROJECT_SPEC.md` §13.2）。
+         * @description Discover フィードを返す（`PROJECT_SPEC.md` §13.2、検索・絞り込み・ページングは Issue #90）。
          *
-         *     `cursor` 省略時は、直近の run が再利用してよい時間内（`config/scoring.yaml` の
-         *     `limits.feed_run_reuse_seconds`）ならその run の先頭ページを返し、そうでなければ
-         *     新しい run を生成して DISCOVER モードの先頭ページを返す（`_resolve_discover_run_id`）。
-         *     `cursor` 指定時は cursor が指すのと同じ run を rank 順に辿ることで、
-         *     ページ間で重複が出ないようにする（受入基準）。
+         *     `q` / `topics` / `technologies` / `published_from` / `published_to` /
+         *     `source_domain` / `max_age_days` はいずれも省略可能な絞り込み条件で、全候補を
+         *     対象に推薦を作り直す（決定済みの設計、`generate_recommendations` の
+         *     `feed_filters`）。条件を反映したフィンガープリントが一致する直近の DISCOVER
+         *     run が再利用してよい時間内（`config/scoring.yaml` の
+         *     `limits.feed_run_reuse_seconds`）ならその run を再利用し、そうでなければ
+         *     新しい run を生成する（`_resolve_discover_run_id`）。
          *
-         *     `next_cursor` は Bad 除外（`_build_items`）より前の行から計算する。除外の有無で
-         *     cursor が巻き戻らないようにするためで、その結果 `items` が空でも `next_cursor` が
-         *     非 null になりうる（ページ内が全件 Bad の場合）。呼び出し側は `items` の空だけで
-         *     終端と判断せず、`next_cursor` が null になるまで辿ること。
+         *     `max_age_days` はフィードの対象期間そのもの（候補の絞り込み）を変える
+         *     パラメータで、freshness スコアの減衰基準（`ranking.compute_freshness`）とは
+         *     無関係（Issue #90 自己レビュー、`FeedFilters.max_age_days` のコメント参照）。
+         *     従来は `config/scoring.yaml` の `freshness.max_age_days`（既定 7 日）を
+         *     超える公開日で `published_from` / `published_to` を指定すると、この
+         *     ハード除外の内側でしか絞り込みが効かず黙って 0 件になっていた
+         *     （Issue #90 自己レビューで判明した不具合そのもの）。
+         *
+         *     ページングは番号付き（`page` / `limit`）で、run 内の rank に対する offset
+         *     として扱う。`total_count` は run に保存された件数（Bad 除外前）であり、
+         *     総ページ数を超える `page` はエラーにせず空の `items` を返すが、
+         *     `MAX_PAGE_NUMBER` を超える `page` は 422 で弾く（Issue #96）。
          *
          *     古い run は `jobs/handlers/purge_recommendation_runs.py` が保持期間超過分を
          *     削除し、呼び出し過多は `rate_limit.py` のレート制限（Issue #28）が抑える。
@@ -332,6 +347,11 @@ export interface paths {
          *     ここも topic 粒度で返す（`GET /api/interests` と同じ ORM クエリ）。
          *
          *     集計は SQL 側で完結させ、Python へ全件ロードしない（`/timeline` と同じ方針）。
+         *     ただし `origin_counts` だけは例外で、Python 側で数える（Issue #92）。この項目は
+         *     集計元が他と違い（`article_feedback JOIN articles` ではなく関心プロファイルの
+         *     構築対象）、母集団の決定に `user_articles` と `article_feedback` のマージが要る。
+         *     `load_weighted_interest_articles` と同じ `_load_interest_article_population` を
+         *     通さないと母集団がずれて画面の数字が嘘になるため、SQL 側での再実装は避けている。
          *     データが 1 件も無いときは各リストが空配列、`feedback_ratio` /
          *     `primary_source_ratio` は全項目 0 になる（GROUP BY 無しの集約クエリは
          *     行が無くても必ず 1 行返るため、例外にはならない）。
@@ -606,13 +626,24 @@ export interface components {
         };
         /**
          * FeedResponse
-         * @description Discover フィード（`GET /api/feed`）のレスポンス。
+         * @description Discover フィード（`GET /api/feed`）のレスポンス（Issue #90）。
+         *
+         *     ページングは番号付きページ（`page` / `page_size`）に統一する。
+         *     `total_count` は絞り込み後に run へ保存された件数（`count_recommendations`）で、
+         *     `limits.feed_run_size`（`config/scoring.yaml`）を超える候補は元々対象外になる
+         *     （決定済みの設計）。
          */
         FeedResponse: {
             /** Items */
             items: components["schemas"]["RecommendationItem"][];
-            /** Next Cursor */
-            next_cursor: string | null;
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Total Count */
+            total_count: number;
+            /** Total Pages */
+            total_pages: number;
         };
         /**
          * FeedbackAction
@@ -642,6 +673,7 @@ export interface components {
          * @description 関心記事一覧（`GET /api/articles`）1 件のレスポンス（`PROJECT_SPEC.md` §6.3）。
          */
         InterestArticleItem: {
+            analysis_status: components["schemas"]["JobStatus"] | null;
             /**
              * Article Id
              * Format: uuid
@@ -671,6 +703,8 @@ export interface components {
             registered_at: string;
             /** Source Domain */
             source_domain: string;
+            /** Technologies */
+            technologies: string[];
             /** Title */
             title: string;
             /** Topics */
@@ -680,13 +714,22 @@ export interface components {
         };
         /**
          * InterestArticleListResponse
-         * @description 関心記事一覧のレスポンス。
+         * @description 関心記事一覧のレスポンス（ページングは Issue #91 で番号付きへ変更）。
+         *
+         *     `GET /api/feed` の `FeedResponse` と同じ形にそろえ、画面側の
+         *     `components/ui/Pagination` を両方から同じように使えるようにする。
          */
         InterestArticleListResponse: {
             /** Items */
             items: components["schemas"]["InterestArticleItem"][];
-            /** Next Cursor */
-            next_cursor: string | null;
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Total Count */
+            total_count: number;
+            /** Total Pages */
+            total_pages: number;
         };
         /**
          * InterestClusterItem
@@ -766,6 +809,30 @@ export interface components {
             positive_count: number;
         };
         /**
+         * InterestOriginCounts
+         * @description 関心プロファイル構築対象の記事の origin 別件数（Issue #92）。
+         *
+         *     `interest/service.py` の `load_weighted_interest_articles`（Discover の
+         *     関心プロファイル）と同じ母集団（`count_interest_articles_by_origin`）を
+         *     使う。このレスポンスの他の項目（`article_feedback JOIN articles`、
+         *     多くは good/save のみに絞る）とは集計元が異なる点に注意（このクラスの
+         *     docstring と `get_interest_summary` の docstring を参照）。origin は
+         *     5値で固定のため、他の内容分布系（`InterestTechnologyItem` 等）のような
+         *     可変長リストではなく `InterestFeedbackRatio` と同じ固定フィールドの形にする。
+         */
+        InterestOriginCounts: {
+            /** Clicked Count */
+            clicked_count: number;
+            /** Good Count */
+            good_count: number;
+            /** Manual Count */
+            manual_count: number;
+            /** Read Full Count */
+            read_full_count: number;
+            /** Saved Count */
+            saved_count: number;
+        };
+        /**
          * InterestPrimarySourceRatio
          * @description 一次情報比率（`articles.is_primary_source`）。
          */
@@ -787,6 +854,7 @@ export interface components {
             feedback_ratio: components["schemas"]["InterestFeedbackRatio"];
             /** Genres */
             genres: components["schemas"]["InterestGenreItem"][];
+            origin_counts: components["schemas"]["InterestOriginCounts"];
             primary_source_ratio: components["schemas"]["InterestPrimarySourceRatio"];
             /** Suppressed Topics */
             suppressed_topics: components["schemas"]["SuppressedTopicItem"][];
@@ -905,6 +973,12 @@ export interface components {
             /** Type */
             type: string;
         };
+        /**
+         * JobStatus
+         * @description ジョブおよび記事登録の処理状態（`PROJECT_SPEC.md` §6.2）。
+         * @enum {string}
+         */
+        JobStatus: "pending" | "fetching" | "analyzing" | "searching" | "completed" | "failed";
         /**
          * RateLimitedResponse
          * @description 429 のレスポンスボディ（`HTTPException` の既定形）。
@@ -1074,6 +1148,12 @@ export interface operations {
             query?: {
                 /** @description 登録方法。複数指定可 */
                 origin?: components["schemas"]["ArticleOrigin"][] | null;
+                /** @description 検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない） */
+                q?: string | null;
+                /** @description トピック。複数指定時は指定した全てを含む記事に絞る（AND） */
+                topics?: string[] | null;
+                /** @description 技術タグ。複数指定時は指定した全てを含む記事に絞る（AND） */
+                technologies?: string[] | null;
                 /** @description ジャンル大分類 */
                 domain?: string | null;
                 /** @description ジャンル中分類 */
@@ -1088,8 +1168,8 @@ export interface operations {
                 registered_to?: string | null;
                 /** @description 公式 / 非公式 */
                 is_primary_source?: boolean | null;
-                /** @description 前回レスポンスの next_cursor をそのまま渡す */
-                cursor?: string | null;
+                /** @description 1始まりのページ番号 */
+                page?: number;
                 limit?: number;
             };
             header?: never;
@@ -1404,8 +1484,22 @@ export interface operations {
     get_feed_api_feed_get: {
         parameters: {
             query?: {
-                /** @description 前回レスポンスの next_cursor をそのまま渡す */
-                cursor?: string | null;
+                /** @description 検索語。title/translated_title/summary_jaへの部分一致（大文字小文字を区別しない） */
+                q?: string | null;
+                /** @description トピック。複数指定時は指定した全てを含む記事に絞る（AND） */
+                topics?: string[] | null;
+                /** @description 技術タグ。複数指定時は指定した全てを含む記事に絞る（AND） */
+                technologies?: string[] | null;
+                /** @description 公開日の下限（published_at、NULLはfetched_atで代替） */
+                published_from?: string | null;
+                /** @description 公開日の上限 */
+                published_to?: string | null;
+                /** @description 情報源ドメインの完全一致 */
+                source_domain?: string | null;
+                /** @description フィード対象期間（日数）。省略時はconfig/scoring.yamlのfreshness.max_age_daysを使う。freshnessスコアの減衰基準（新しさの点数）はこの値を変えても変わらない */
+                max_age_days?: number;
+                /** @description 1始まりのページ番号 */
+                page?: number;
                 limit?: number;
             };
             header?: never;

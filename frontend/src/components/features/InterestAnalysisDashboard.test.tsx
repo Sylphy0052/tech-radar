@@ -64,6 +64,13 @@ const filledSummary = {
   content_types: [{ content_type: "concept", count: 4 }],
   difficulties: [{ difficulty: "beginner", count: 4 }],
   suppressed_topics: [{ topic: "広告", negative_weight: 0.8, effective_weight: -0.2 }],
+  origin_counts: {
+    manual_count: 3,
+    good_count: 5,
+    saved_count: 2,
+    read_full_count: 1,
+    clicked_count: 0,
+  },
 };
 
 const filledClusters = {
@@ -108,6 +115,7 @@ const CHART_HEADINGS = [
   "概念・実装・研究・ニュースの比率",
   "難易度の分布",
   "抑制中のジャンル",
+  "関心プロファイルへの寄与元",
 ];
 
 describe("InterestAnalysisDashboard", () => {
@@ -120,7 +128,7 @@ describe("InterestAnalysisDashboard", () => {
     expect(screen.getByRole("status")).toHaveTextContent("読み込み中...");
   }, TEST_TIMEOUT_MS);
 
-  it("renders all 9 visualizations once data has loaded", async () => {
+  it("renders all 10 visualizations once data has loaded", async () => {
     // Arrange
     stubAllEndpoints();
 

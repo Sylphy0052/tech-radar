@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from techradar.interest.clusters import (
@@ -63,6 +65,45 @@ class TestClusterCountPrioritizesCapacity:
         clusters = build_interest_clusters(sources, SETTINGS)
         # Assert
         assert len(clusters) == 1
+
+
+class TestClusterCountIsCappedByMaxClusters:
+    """記事が十分にあると `max_clusters` が常に効くことを固定する（ADR 0006）。
+
+    2026-08-13 に実データ（関心記事 69 件）で計測したところ、
+    `min_articles_per_cluster` を 2 / 3 / 5 / 8 と変えてもクラスタ数と記事数の
+    内訳が同一だった。`capacity_based`（`69 // mn` で 34 / 23 / 13 / 8）が
+    常に `max_clusters`（8）以上になり、上限側だけが結果を決めるためである。
+    既定値を据え置く根拠がこの性質に依るので、テストで固定する。
+    """
+
+    # ADR 0006 の計測に使った関心記事の件数。
+    _MEASURED_ARTICLE_COUNT = 69
+
+    def test_reaches_max_clusters_once_capacity_exceeds_it(self):
+        # Arrange — capacity_based = 69 // 3 = 23 > max_clusters(8)
+        # Act / Assert — 上限で頭打ちになる
+        assert _cluster_count(self._MEASURED_ARTICLE_COUNT, SETTINGS) == SETTINGS.max_clusters
+
+    def test_min_articles_per_cluster_has_no_effect_above_capacity(self):
+        """capacity_based が上限を上回る限り `min_articles_per_cluster` は結果に現れない。"""
+        # Arrange — 8 のときの capacity_based は 69 // 8 = 8 で、max_clusters と同値
+        counts = {
+            minimum: _cluster_count(
+                self._MEASURED_ARTICLE_COUNT,
+                replace(SETTINGS, min_articles_per_cluster=minimum),
+            )
+            for minimum in (2, 3, 5, 8)
+        }
+        # Act / Assert — どれを指定しても max_clusters に揃う
+        assert set(counts.values()) == {SETTINGS.max_clusters}
+
+    def test_min_articles_per_cluster_takes_over_below_capacity(self):
+        """capacity_based が上限を下回る規模では、こちらが効く（対照）。"""
+        # Arrange — 記事 12 件なら capacity_based は 12 // 3 = 4 と 12 // 5 = 2
+        # Act / Assert — max_clusters(8) ではなく capacity_based が採られる
+        assert _cluster_count(12, SETTINGS) == 4
+        assert _cluster_count(12, replace(SETTINGS, min_articles_per_cluster=5)) == 2
 
 
 class TestEmptyAndSmallInputs:

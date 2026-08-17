@@ -20,7 +20,14 @@ dependencies = [
     "charset-normalizer>=3.4",
     "sentence-transformers>=3.3",
     "scikit-learn>=1.5",
-    "torch==2.9.1",
+    # scikit-learn 経由の推移依存でしか入っていなかったが、`recommendation/ranking.py`
+    # が最近傍類似度の一括計算（Issue #89）で直接 import するため明示する。
+    "numpy>=2.0",
+    "torch==2.13.0",
+    # torch の XPU ビルドが要求する推移依存だが、PyPI には無く XPU インデックスにしか
+    # 置かれていない。`explicit = true` のインデックスは直接依存しか解決しないため、
+    # ここで直接依存として宣言しないと解決に失敗する（ADR 0003 の torch と同じ理由）。
+    "triton-xpu==3.7.2",
     "py3langid>=0.3",
     "pyyaml>=6.0",
     "feedparser>=6.0.14",
@@ -32,6 +39,7 @@ dev = [
     "pytest>=8.4",
     "pytest-asyncio>=1.0",
     "pytest-cov>=6.0",
+    "pytest-xdist>=3.8.0",
     "httpx>=0.28",
     "ruff>=0.14",
     "ty>=0.0.1a1",
@@ -108,18 +116,22 @@ python-version = "3.12"
 # tests は `tests.conftest` のヘルパーを import するためパッケージとして解決させる。
 root = ["./src", "."]
 
-# PyTorch はドライバが対応する CUDA 版を明示的に選ぶ。
-# 既定の PyPI 版は cu130 でビルドされており、CUDA 12.8 までのドライバでは
-# CUDA が使えず CPU へ落ちる（実測で確認）。
+# PyTorch は実行環境の GPU に合わせたビルドを明示的に選ぶ。
+# 現行機は NVIDIA GPU を持たず Intel Arc (Core Ultra 7 165H の統合GPU) のため、
+# XPU ビルドを使う。既定の PyPI 版でも CPU では動くが、GPU は使えない（Issue #77）。
+# NVIDIA 機へ戻すときは cu<version> のインデックスへ差し替える。uv のインデックス
+# 指定はプラットフォーム条件で分岐できないため、両方を同時には満たせない。
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
+torch = { index = "pytorch-xpu" }
+triton-xpu = { index = "pytorch-xpu" }
 
 [dependency-groups]
 dev = [
+    "detect-secrets>=1.5.0",
     "types-pyyaml>=6.0",
 ]

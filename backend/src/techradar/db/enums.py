@@ -105,3 +105,20 @@ class RecommendationMode(StrEnum):
 
     ARTICLE_BASED = "article_based"
     DISCOVER = "discover"
+
+
+class DiscoveredFeedStatus(StrEnum):
+    """登録記事のドメインから自動発見したフィードの状態（Issue #93）。"""
+
+    # フィードを発見し、巡回対象として使える状態。
+    FOUND = "found"
+    # ドメインのトップページは取得できたが、フィードを発見できなかった。
+    NOT_FOUND = "not_found"
+    # ドメインのトップページ自体を取得できなかった（ネットワーク・SSRF拒否等）。
+    FETCH_FAILED = "fetch_failed"
+    # 巡回で使えなくなったため無効化した。理由は2種類あり、取得・パースが連続で
+    # 失敗した場合（Issue #105）と、取得はできるが記事を1件も配信しない状態が
+    # 連続した場合（Issue #108）。どちらで無効化したかは `discovered_feeds` の
+    # `consecutive_failures` / `consecutive_empty_fetches` と、無効化時のログの
+    # イベント名（`feed_disabled` / `feed_disabled_empty`）で区別する。
+    DISABLED = "disabled"

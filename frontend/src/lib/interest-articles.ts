@@ -22,10 +22,19 @@ export const INTEREST_ARTICLE_ORIGINS = [
   "saved",
 ] as const satisfies readonly ArticleOrigin[];
 
-export const ORIGIN_LABELS: Record<(typeof INTEREST_ARTICLE_ORIGINS)[number], string> = {
+/**
+ * `ArticleOrigin`（5値）すべての日本語ラベル。関心記事一覧のフィルターUI
+ * （`INTEREST_ARTICLE_ORIGINS` の3値）だけでなく、関心分析画面の origin 別
+ * 内訳（`InterestOriginChart`、Issue #92）が read_full/clicked も含めて
+ * 表示するために全5値ぶん持つ。`全文閲覧`/`クリック` の訳語は
+ * `PROJECT_SPEC.md` §7.1 の重み表と揃える。
+ */
+export const ORIGIN_LABELS: Record<ArticleOrigin, string> = {
   manual: "手動登録",
   good: "Good",
   saved: "保存",
+  read_full: "全文閲覧",
+  clicked: "クリック",
 };
 
 /** `content_type`（`analysis/prompt.py` の分類）の日本語ラベル。未知の値はそのまま表示する。 */
@@ -37,17 +46,65 @@ export const CONTENT_TYPE_LABELS: Record<string, string> = {
 };
 
 /**
- * 登録方法の表示ラベルを返す。`InterestArticleItem.origin` の型は `ArticleOrigin`
- * （5値）だが、`GET /api/articles` は実際には常に3経路（`INTEREST_ARTICLE_ORIGINS`）
- * だけを返す（backend 側で絞り込み済み）。型としてはそれ以外の値も排除できないため、
- * `ORIGIN_LABELS` に無い値はそのまま表示するフォールバックを用意する。
+ * 登録方法の表示ラベルを返す。`ORIGIN_LABELS` は `ArticleOrigin`（5値）を
+ * 全て網羅しているため型上は必ず引ける値だが、実行時に届く値が TS の型と
+ * ずれる可能性（backend が返す実際の文字列は型チェックを経ない）に備えて
+ * `?? origin` で未知の値もそのまま表示するフォールバックを残す。
  */
 export function originLabel(origin: ArticleOrigin): string {
   return (ORIGIN_LABELS as Partial<Record<ArticleOrigin, string>>)[origin] ?? origin;
 }
 
+/**
+ * 関心記事一覧のカードで技術タグ欄に何を出すかの状態（Issue #92）。
+ *
+ * `InterestArticleItem.analysis_status` が `null` のときは値ではなく
+ * `TechnologyDisplayStatus` を明示的に持たせる。`analysis_status` の値を
+ * そのまま画面の分岐に使うと、呼び出し側で「completed かどうか」の判定を
+ * 毎回書くことになり、`fetching`/`searching`（`JobStatus` 全体には存在するが
+ * `articles.analysis_status` には実際には現れない値、`api/articles.py` の
+ * `InterestArticleItem.analysis_status` docstring 参照）のような想定外の値の
+ * 扱いも呼び出し側ごとにばらつきうるため、ここへ一本化する。
+ */
+export type TechnologyDisplayStatus = "pending" | "failed" | "empty" | "tags";
+
+/**
+ * `analysis_status` と `technologies` から `TechnologyDisplayStatus` を決める。
+ *
+ * - `completed` でタグが1件以上 → `tags`（タグを並べる）
+ * - `completed` でタグが0件 → `empty`（「タグなし」、未解析と区別する）
+ * - `failed` → `failed`（「解析に失敗」）
+ * - それ以外（`pending`/`analyzing`/`null`、および `articles.analysis_status`
+ *   には実際には現れない想定外の値）→ `pending`（「解析待ち」に丸める）
+ */
+export function technologyDisplayStatus(
+  analysisStatus: InterestArticleItem["analysis_status"],
+  technologies: readonly string[],
+): TechnologyDisplayStatus {
+  if (analysisStatus === "completed") {
+    return technologies.length > 0 ? "tags" : "empty";
+  }
+  if (analysisStatus === "failed") {
+    return "failed";
+  }
+  return "pending";
+}
+
+/** `TechnologyDisplayStatus` のうち、タグの代わりに文言を出す3状態の日本語ラベル。 */
+export const TECHNOLOGY_STATUS_LABELS: Record<Exclude<TechnologyDisplayStatus, "tags">, string> = {
+  pending: "解析待ち",
+  failed: "解析に失敗",
+  empty: "タグなし",
+};
+
 export interface ArticleFilters {
   origin: ArticleOrigin[];
+  /** 検索語。title/translated_title/summary_jaへの部分一致（Issue #91）。 */
+  q: string | null;
+  /** 複数指定時は指定した全てを含む記事に絞る（AND、backend 側の仕様）。 */
+  topics: string[];
+  /** 複数指定時は指定した全てを含む記事に絞る（AND、backend 側の仕様）。 */
+  technologies: string[];
   domain: string | null;
   category: string | null;
   sourceDomain: string | null;
@@ -61,6 +118,9 @@ export interface ArticleFilters {
 
 export const EMPTY_ARTICLE_FILTERS: ArticleFilters = {
   origin: [],
+  q: null,
+  topics: [],
+  technologies: [],
   domain: null,
   category: null,
   sourceDomain: null,
@@ -98,6 +158,9 @@ export function parseArticleFiltersFromSearchParams(searchParams: URLSearchParam
   const isPrimarySourceRaw = searchParams.get("is_primary_source");
   return {
     origin: searchParams.getAll("origin").filter(isInterestArticleOrigin),
+    q: searchParams.get("q"),
+    topics: searchParams.getAll("topics"),
+    technologies: searchParams.getAll("technologies"),
     domain: searchParams.get("domain"),
     category: searchParams.get("category"),
     sourceDomain: searchParams.get("source_domain"),
@@ -115,6 +178,11 @@ export function parseArticleFiltersFromSearchParams(searchParams: URLSearchParam
 export function buildSearchParamsFromFilters(filters: ArticleFilters): URLSearchParams {
   const params = new URLSearchParams();
   filters.origin.forEach((origin) => params.append("origin", origin));
+  if (filters.q) {
+    params.set("q", filters.q);
+  }
+  filters.topics.forEach((topic) => params.append("topics", topic));
+  filters.technologies.forEach((technology) => params.append("technologies", technology));
   if (filters.domain) {
     params.set("domain", filters.domain);
   }
@@ -174,19 +242,24 @@ export function isoToJstDateInputValue(isoString: string): string {
 }
 
 interface ListInterestArticlesOptions {
-  /** 前回レスポンスの next_cursor をそのまま渡す。省略時は先頭ページを返す。 */
-  cursor?: string | null;
+  /** 1始まりのページ番号。省略時は backend の既定値（1）。 */
+  page?: number;
   limit?: number;
 }
 
-/** 関心記事一覧を取得する（`PROJECT_SPEC.md` §6.3）。 */
+/**
+ * 関心記事一覧を取得する（`PROJECT_SPEC.md` §6.3）。
+ *
+ * ページングは番号付き（`page` / `limit`）。Issue #91 以前は cursor 方式だったが、
+ * 目的のページへ直接移動できるようにするため置き換えた（`getFeed` と同じ形）。
+ */
 export function listInterestArticles(
   filters: ArticleFilters,
-  { cursor, limit }: ListInterestArticlesOptions = {},
+  { page, limit }: ListInterestArticlesOptions = {},
 ): Promise<InterestArticleListResponse> {
   const query = buildSearchParamsFromFilters(filters);
-  if (cursor) {
-    query.set("cursor", cursor);
+  if (page !== undefined) {
+    query.set("page", String(page));
   }
   if (limit !== undefined) {
     query.set("limit", String(limit));

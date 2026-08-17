@@ -1,8 +1,10 @@
 # ADR 0001: 技術スタックと実行モデルの選定
 
-- ステータス: 採用
+- ステータス: 採用（実行環境の記述のみ [ADR 0005](0005-embedding-on-intel-xpu.md) で更新）
 - 日付: 2026-08-01
-- 関連: `PROJECT_SPEC.md` §18, §27 / Issue #1
+- 関連: `PROJECT_SPEC.md` §18, §27 / Issue #1 / [ADR 0005](0005-embedding-on-intel-xpu.md)
+
+> **2026-08-12 追記**: この ADR が前提とするハード構成（RTX 4050 Laptop 6GB VRAM / i7-13700H 20 コア / RAM 16GB）は現行機と異なる。現行機は NVIDIA GPU を持たず Intel Arc Graphics（Core Ultra 7 165H の統合GPU）で、Embedding は XPU で実行する。実行環境と PyTorch のビルド選択は [ADR 0005](0005-embedding-on-intel-xpu.md) を参照。技術スタックの選定（LLM / Embedding モデル / DB / フレームワーク）自体はこの ADR のまま有効で、以下のハード名は当時の記録として残す。
 
 ## コンテキスト
 
@@ -33,7 +35,7 @@
 #### 検討したが採用しなかった案
 
 - **OpenAI / Anthropic の API を直接利用**: 品質と安定性は高いが従量課金が発生する。無料方針から外れる
-- **社内チャット API**: 社内で利用可能だが chat 専用であり embedding エンドポイントを持たない。また `projectId` / `chatId` を要求する会話指向の API で、NDJSON ストリームから構造化 JSON を取り出すためのパース層が余分に必要になる。必要になった時点で `LLMProvider` の実装として追加できるため、MVP では見送る
+- **HEROZ ASK API**: 社内で利用可能だが chat 専用であり embedding エンドポイントを持たない。また `projectId` / `chatId` を要求する会話指向の API で、NDJSON ストリームから構造化 JSON を取り出すためのパース層が余分に必要になる。必要になった時点で `LLMProvider` の実装として追加できるため、MVP では見送る
 - **Ollama によるローカル LLM**: 完全無料だが、6GB VRAM で動く規模のモデルでは日本語要約の品質が実用水準に届かない
 
 ### Embedding: Qwen3-Embedding-0.6B をローカル GPU で実行する

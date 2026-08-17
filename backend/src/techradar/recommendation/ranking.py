@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import math
 import uuid
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+
+import numpy as np
 
 # 経過日数を求めるための秒数。
 _SECONDS_PER_DAY = 86400
@@ -73,19 +76,27 @@ class WeightedEmbedding:
 class InterestProfile:
     """ユーザーの関心プロファイル（`PROJECT_SPEC.md` §8）。
 
-    関心記事の重み付き embedding 群（`embeddings`）と、既知トピックの集合
-    （`known_topics`）、Bad 済み記事の embedding 群（`bad_embeddings`）を持つ。
-    単一の平均 embedding ではなく複数の embedding を保持し、上位 k 件の
-    加重平均で類似度を求める（`compute_interest_similarity`）。
+    関心記事の重み付き embedding 群（`embeddings`）と、Bad 済み記事の
+    embedding 群（`bad_embeddings`）を持つ。単一の平均 embedding ではなく
+    複数の embedding を保持し、上位 k 件の加重平均で類似度を求める
+    （`compute_interest_similarity`）。
 
     `bad_embeddings` は Bad 近傍抑制（`compute_bad_similarity_penalty`）専用
     で、関心一致度の計算には使わない。Bad は「関心の逆」ではなく「意味的に
     近い記事を抑制する」対象のため重みを持たせない（`PROJECT_SPEC.md` §7.2）。
+
+    `cluster_centroids` は関心クラスタ（`interest/clusters.py` の
+    `InterestCluster.centroid`）の重心群で、新規性（`compute_novelty`）が
+    「既知の関心クラスタからどれだけ離れているか」を測るのに使う（Issue #89）。
+    `embeddings` と違って重みを持たない（クラスタの大小に関わらず、候補が
+    どのクラスタからも離れていれば新規とみなすため）。既定値は空タプルで、
+    クラスタが構築されていない・対象外のプロファイル（記事起点推薦など）では
+    `compute_novelty` が `default_when_no_embedding` にフォールバックする。
     """
 
     embeddings: tuple[WeightedEmbedding, ...]
-    known_topics: frozenset[str]
     bad_embeddings: tuple[tuple[float, ...], ...]
+    cluster_centroids: tuple[tuple[float, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -174,8 +185,8 @@ class MatchSettings:
 class NoveltySettings:
     """新規性の計算設定。"""
 
-    # topics が空の記事に使う既定値。
-    default_when_no_topics: float
+    # 候補に embedding が無い、または関心プロファイルが空で比較できないときの既定値。
+    default_when_no_embedding: float
 
 
 @dataclass(frozen=True)
@@ -443,21 +454,116 @@ def compute_freshness(
 
 
 def compute_novelty(
-    candidate: CandidateSignature, profile: InterestProfile, settings: NoveltySettings
+    candidate: CandidateSignature,
+    profile: InterestProfile,
+    settings: NoveltySettings,
+    *,
+    neighbor_similarity: float | None,
 ) -> float:
-    """新規性のスコアを返す。
+    """新規性のスコアを返す（Issue #89）。
 
-    `topics` のうちユーザーの既知トピック集合（`known_topics`）に無いものの
-    割合。`topics` が空なら比較できないため `default_when_no_topics` を返す。
+    Issue #87 時点の実装は、候補の embedding と関心記事群（`profile.embeddings`）
+    とのコサイン類似度の最大値を裏返した値だった。これは
+    `compute_interest_similarity`（上位 `top_k` の加重平均）とほぼ完全な相補
+    になっており（実データでの Spearman 順位相関 -0.991）、`composition.py` の
+    `_slot_for` が 1 段目（strong_interest）と 3 段目（exploration）で同じ値の
+    表裏しか見られず、枠判定が実質 1 軸になっていた（Issue #89 の核心）。
+
+    実データ（関心記事 69 件 / 候補 163 件 / クラスタ 8 個）で 6 つの式を比較し、
+    次の 2 成分の min を採用した（Spearman -0.687、分布 min 0.094 / p25 0.320 /
+    p50 0.429 / p75 0.501 / max 0.738）。
+
+    * `cluster_part`: 候補と `profile.cluster_centroids`（関心クラスタの重心群、
+      `interest/clusters.py`）とのコサイン類似度の最大値を `1 -` した値。
+      「既知の関心クラスタ群からどれだけ離れているか」を測る
+    * `neighbor_part`: 候補と `neighbor_similarity`（同じ採点対象の他の候補との
+      コサイン類似度の最大値、`rank_candidates` が一括計算して渡す）を
+      `1 -` した値。「今回の候補集合の中でどれだけ孤立しているか」を測る
+
+    min を取るのは、どちらか一方だけが高くても新規とは言えないため
+    （既知クラスタから離れていても、今回の候補集合の中に似た記事が大量に
+      あれば「新規テーマ」というより「今回たまたま束で来ただけ」であり、
+      逆に集合内で孤立していても既知クラスタのど真ん中なら新規ではない）。
+
+    `neighbor_similarity` が `None`（比較対象になる他の候補が無い。採点対象が
+    候補 1 件だけ、または他が全て embedding 無しか次元不一致）のときは
+    `neighbor_part` を測れないため min の対象から外し、`cluster_part` を
+    そのまま返す。`default_when_no_embedding`（中立値）との min は取らない。
+    取ってしまうと、候補が 1 件だけのときに限って novelty が不自然に
+    切り下がる（他の成分と扱いが非対称になる）ため。
+
+    候補に embedding が無い、または `profile.cluster_centroids` が空（クラスタ
+    未構築・記事起点推薦など）なら `cluster_part` 自体を測れないため
+    `default_when_no_embedding` を返す。コサイン類似度は負にもなりうるため、
+    各成分は `_clamp01` で [0.0, 1.0] へ丸める。
     """
-    if not candidate.topics:
-        return settings.default_when_no_topics
+    if candidate.embedding is None or not profile.cluster_centroids:
+        return settings.default_when_no_embedding
 
-    known_topics = frozenset(_normalize_text(topic) for topic in profile.known_topics)
-    unknown_count = sum(
-        1 for topic in candidate.topics if _normalize_text(topic) not in known_topics
+    max_centroid_similarity = max(
+        cosine_similarity(candidate.embedding, centroid) for centroid in profile.cluster_centroids
     )
-    return unknown_count / len(candidate.topics)
+    cluster_part = _clamp01(1.0 - max_centroid_similarity)
+
+    if neighbor_similarity is None:
+        return cluster_part
+
+    neighbor_part = _clamp01(1.0 - neighbor_similarity)
+    return min(cluster_part, neighbor_part)
+
+
+def _compute_neighbor_similarities(
+    candidates: Sequence[CandidateSignature],
+) -> tuple[float | None, ...]:
+    """候補群それぞれについて、同じ採点対象の他の候補との最大コサイン類似度を返す。
+
+    `compute_novelty` の `neighbor_part`（Issue #89）の入力。純 Python の総当たり
+    （候補数の 2 乗）は候補 500 件（`limits.max_candidates_per_run` の上限）で
+    20.41 秒かかると実測されており、numpy の行列積に置き換えると 0.14 秒になる
+    （`docs/adr/0007-embedding-based-novelty.md` の実測表）。そのため素朴な
+    二重ループにはせず、embedding を正規化した行列同士の積で一括計算する。
+
+    embedding が無い候補は比較できないため `None`。次元が違う embedding が
+    候補間に混ざる可能性があるため（モデル更新などによる混入、
+    `cosine_similarity` が次元不一致を 0.0 として扱っているのと同じ理由）、
+    最も多くの候補が共有する次元（`dominant_dim`）のグループだけを行列計算の
+    対象にし、それ以外の次元の候補は比較対象が無いものとして `None` のままにする
+    （少数の次元違いのために全体を Python ループへ落とさないため）。
+
+    比較対象になる他の候補が 1 件も無い（採点対象が自分だけ、または
+    dominant_dim のグループに自分しかいない）候補も `None`。
+    """
+    result: list[float | None] = [None] * len(candidates)
+
+    indices_by_dim: dict[int, list[int]] = defaultdict(list)
+    for index, candidate in enumerate(candidates):
+        if candidate.embedding is not None:
+            indices_by_dim[len(candidate.embedding)].append(index)
+
+    if not indices_by_dim:
+        return tuple(result)
+
+    dominant_dim = max(indices_by_dim, key=lambda dim: len(indices_by_dim[dim]))
+    indices = indices_by_dim[dominant_dim]
+    if len(indices) < 2:
+        return tuple(result)
+
+    matrix = np.array([candidates[index].embedding for index in indices], dtype=np.float64)
+    norms = np.linalg.norm(matrix, axis=1)
+    # ゼロベクトルは正規化できないため 1.0 で代用する。分子（内積）もゼロのままなので
+    # 結果の類似度は 0.0 になり、`cosine_similarity` がゼロベクトルを 0.0 として
+    # 扱うのと同じ挙動になる（0 除算を避けるためだけの epsilon ではない）。
+    safe_norms = np.where(norms == 0.0, 1.0, norms)
+    normalized = matrix / safe_norms[:, np.newaxis]
+    similarity_matrix = normalized @ normalized.T
+    # 対角成分（自分自身との類似度 1.0）を最大値の対象から除外する。
+    np.fill_diagonal(similarity_matrix, -np.inf)
+    max_similarities = similarity_matrix.max(axis=1)
+
+    for position, original_index in enumerate(indices):
+        result[original_index] = float(max_similarities[position])
+
+    return tuple(result)
 
 
 def compute_bad_similarity_penalty(
@@ -534,14 +640,26 @@ def score_candidate(
     profile: InterestProfile,
     settings: ScoringSettings,
     now: datetime,
+    *,
+    neighbor_similarity: float | None,
 ) -> ScoreBreakdown:
-    """1 件の候補のスコア内訳を返す（`PROJECT_SPEC.md` §14）。"""
+    """1 件の候補のスコア内訳を返す（`PROJECT_SPEC.md` §14）。
+
+    `neighbor_similarity` は `compute_novelty` の `neighbor_part`（Issue #89）の
+    入力で、同じ採点対象の他の候補との最大コサイン類似度（無ければ `None`）。
+    既定値を付けていないのは意図的で、呼び出し側（`rank_candidates`）が
+    `_compute_neighbor_similarities` の一括計算結果を渡し忘れたまま
+    `settings.novelty.default_when_no_embedding` にフォールバックし続ける事故を
+    型で気付けるようにするため。
+    """
     interest_similarity = compute_interest_similarity(profile, candidate, settings.interest)
     source_authority = _clamp01(candidate.source_authority)
     source_article_match = compute_source_article_match(candidate, settings.source_match)
     freshness = compute_freshness(candidate, now, settings.freshness)
     technical_quality = _clamp01(candidate.technical_quality)
-    novelty = compute_novelty(candidate, profile, settings.novelty)
+    novelty = compute_novelty(
+        candidate, profile, settings.novelty, neighbor_similarity=neighbor_similarity
+    )
 
     gate_factor = _authority_gate_factor(interest_similarity, settings.authority_gate)
     # ユーザー固有の情報源選好（Issue #34）。`gate_factor` とは独立に、同じ
@@ -615,12 +733,25 @@ def rank_candidates(
 
     同点は id の文字列順にすることで、実行のたびに順序が変わらないようにする
     （`select_representative` と同じ考え方、`dedup/rules.py`）。
+
+    採点前に `_compute_neighbor_similarities` で全候補の最近傍類似度を一括計算
+    してから `score_candidate` へ渡す（Issue #89）。候補ごとに他の全候補との
+    類似度を測る必要があり、`score_candidate` の外（候補集合全体を見られる
+    ここ）でしか計算できない。
     """
+    neighbor_similarities = _compute_neighbor_similarities(candidates)
     scored = (
         ScoredCandidate(
-            candidate=candidate, breakdown=score_candidate(candidate, profile, settings, now)
+            candidate=candidate,
+            breakdown=score_candidate(
+                candidate,
+                profile,
+                settings,
+                now,
+                neighbor_similarity=neighbor_similarities[index],
+            ),
         )
-        for candidate in candidates
+        for index, candidate in enumerate(candidates)
     )
     return tuple(
         sorted(

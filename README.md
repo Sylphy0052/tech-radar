@@ -22,7 +22,7 @@ scripts/    開発用スクリプト (check.sh)
 | Node.js 22 以上 / npm | frontend のビルドと実行 |
 | Docker / Docker Compose | PostgreSQL + pgvector |
 | [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) | 要約・分類・翻訳・推薦理由の生成 |
-| NVIDIA GPU（任意） | Embedding のローカル実行。無い場合は CPU にフォールバックする |
+| GPU（任意、NVIDIA または Intel Arc） | Embedding のローカル実行。無い場合は CPU にフォールバックする。GPU ベンダーに応じて `backend/pyproject.toml` の PyTorch インデックスを手で切り替える必要がある（uv のインデックス指定はプラットフォーム条件で分岐できないため）。詳細は [docs/adr/0005-embedding-on-intel-xpu.md](docs/adr/0005-embedding-on-intel-xpu.md) を参照 |
 
 ## セットアップ
 
@@ -35,6 +35,14 @@ cp .env.example .env   # 必要に応じて値を編集する
 
 ポートは `.env` の `BACKEND_PORT` / `FRONTEND_PORT` で変更できる。変更する場合は CORS 許可オリジン（`CORS_ALLOW_ORIGINS`）と frontend の API ベース URL（`NEXT_PUBLIC_API_BASE_URL`）も揃える。
 
+listen するインターフェースは `.env` の `BIND_HOST`（既定 `127.0.0.1`）で変更できる。backend・frontend・PostgreSQL のすべてに効く。認証を置いていないため、`0.0.0.0` などへ広げると同じ LAN の誰でも API と UI に触れる状態になる。PostgreSQL も同じで、接続情報はローカル実行を前提にした弱い既定値のまま晒される。広げる前に [PROJECT_SPEC.md](PROJECT_SPEC.md) の §24「認証を置かない前提で守る対策」を読むこと。
+
+`BIND_HOST` を変えても、既に起動している PostgreSQL コンテナは作り直すまで公開範囲が変わらない。`./run.sh --stop` で一度落としてから起動し直す。食い違っている間は `run.sh` と `check.sh` が起動のたびに警告する。ただし docker へ到達できないシェルや、compose を通さず立てた PostgreSQL、別のプロジェクト名で起動したコンテナは判定できない。その場合は確認できなかった旨を出す。
+
+PostgreSQL へ `BIND_HOST` が渡るのは `run.sh` から起動したときだけ。`check.sh` は `.env` を読まないため、そちらが先にコンテナを作ると閉じた既定（`127.0.0.1`）になる。
+
+別の端末のブラウザから UI を開くつもりなら `NEXT_PUBLIC_API_BASE_URL` も揃える。この値は画面上の JavaScript が API を呼ぶ宛先で、既定の `http://localhost:18700` のままだと、その端末自身の localhost を見にいって失敗する。
+
 常駐するのは PostgreSQL コンテナのみ。完全に停止するには次を実行する。
 
 ```bash
@@ -43,7 +51,7 @@ cp .env.example .env   # 必要に応じて値を編集する
 
 ## 開発
 
-lint・整形・型チェック・テストを一括実行する。commit 前に必ず緑にする。
+lint・整形・型チェック・テストを一括実行する。手動で実行する（2026-08-12 に commit 前の自動実行を廃止した）。MR を作る前に一度は緑にする。
 
 ```bash
 bash scripts/ai-harness/check.sh

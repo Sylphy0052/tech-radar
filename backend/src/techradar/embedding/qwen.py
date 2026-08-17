@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING
 
 from techradar.config import Settings, get_settings
@@ -42,19 +42,47 @@ def is_cuda_available() -> bool:
     return bool(torch.cuda.is_available())
 
 
+def is_xpu_available() -> bool:
+    """Intel GPU（XPU）が使えるかを返す。
+
+    `torch.xpu` は PyTorch 2.5 以降で追加されたモジュールで、古い torch や
+    XPU ビルドでない torch には存在しない。属性の有無を確認してから呼び出し、
+    無ければ例外を投げず False を返す。
+    is_cuda_available と同様に torch の import をこの関数に閉じ込め、
+    呼び出し側とテストが torch へ直接依存せずに済むようにする。
+    """
+    try:
+        import torch
+    except ImportError:  # pragma: no cover - torch は必須依存
+        return False
+
+    xpu = getattr(torch, "xpu", None)
+    if xpu is None:
+        return False
+    return bool(xpu.is_available())
+
+
 def resolve_device(
     configured: str,
     *,
     cuda_available: Callable[[], bool] = is_cuda_available,
+    xpu_available: Callable[[], bool] = is_xpu_available,
 ) -> str:
     """使用するデバイスを決める。
 
-    `auto` のときは CUDA が使えれば CUDA、なければ CPU を選ぶ。
+    `auto` のときは CUDA → XPU → CPU の順で使えるものを選ぶ。NVIDIA の
+    単体GPU（dGPU）がある環境では、Intel の統合GPU（XPU）より高速なため
+    CUDA を優先する。現行の開発機は NVIDIA GPU を持たず Intel Arc
+    Graphics（Core Ultra 7 165H の統合GPU）のみを持つため、実際には CUDA
+    判定が False になり XPU が選ばれる。NVIDIA GPU を積んだ機体へ戻した
+    ときに備え、判定の順序自体は CUDA を先に見る形を維持する。
     判定は引数で差し替えられるようにし、テストが torch を読み込まずに済むようにする。
     """
     if configured != "auto":
         return configured
-    return "cuda" if cuda_available() else "cpu"
+    if cuda_available():
+        return "cuda"
+    return "xpu" if xpu_available() else "cpu"
 
 
 @lru_cache(maxsize=1)
@@ -72,6 +100,11 @@ def load_model(
     try:
         model = SentenceTransformer(
             model_name,
+            # SentenceTransformer はデバイス省略時に cuda / mps / cpu しか
+            # 自動選択せず、xpu は対象外（明示指定が必須）。ここで
+            # resolve_device の結果を明示的に渡しているからこそ XPU で動く。
+            # 将来 device 引数を省略する変更を入れると、XPU 環境では黙って
+            # CPU へ落ちるため注意する。
             device=device,
             revision=revision,
             # モデルリポジトリ側のコードを実行しない。
@@ -94,17 +127,36 @@ class QwenEmbeddingProvider:
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
         self.dimensions = self._settings.embedding_dimensions
-        self._device = resolve_device(self._settings.embedding_device)
 
-    @property
+    @cached_property
     def device(self) -> str:
-        """実際に使用するデバイス。"""
-        return self._device
+        """実際に使用するデバイス。
+
+        最初に参照された時点で `resolve_device` を呼んで解決し、以降は
+        `functools.cached_property` がインスタンスへキャッシュした値を返す。
+        `__init__` で解決すると、ジョブハンドラの登録
+        （`create_default_registry`）だけで `resolve_device` 経由の
+        `import torch` が走ってしまうため、実際に必要になるまで遅延させる
+        （Issue #80）。
+
+        **同時アクセス時は `resolve_device` が複数回走りうる。** Python 3.12 の
+        `cached_property` は排他制御を持たず（3.10 系にあった `RLock` は撤去
+        された）、ワーカーは `worker_concurrency` ぶんのジョブをそれぞれ別スレッド
+        （`asyncio.to_thread`）で処理する一方、`make_embed_article_handler` は
+        プロバイダーを 1 個だけ作って使い回す。2 件の `embed_article` がほぼ同時に
+        走ると、両方のスレッドが初回参照に入りうる。
+
+        ロックは入れない。`resolve_device` は決定的で副作用が無く、内部の
+        `import torch` も CPython のモジュール単位のロックで直列化されるため、
+        どちらのスレッドが書いても同じ値になる。排他を足しても防げるのは
+        「二度計算すること」だけで、それに見合わない。
+        """
+        return resolve_device(self._settings.embedding_device)
 
     def _model(self) -> SentenceTransformer:
         return load_model(
             self._settings.embedding_model,
-            self._device,
+            self.device,
             self._settings.embedding_max_length,
             self._settings.embedding_model_revision,
         )
