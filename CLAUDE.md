@@ -180,16 +180,15 @@ Issue起票を経ずに実装へ着手しない。以下の順序で進める (s
 
 ### 自己マージ許可
 
-グローバル規約の「MR自己マージ禁止」は**本リポジトリでは適用しない**。以下を満たせば作成者自身が `glab mr merge <IID> --remove-source-branch` を実行してよい (理由: 1名運用でレビュアーが不在。承認待ちと冷却期間が無意味な遅延にしかならない)。
+以下を満たせば作成者自身が `glab mr merge <IID> --remove-source-branch` を実行してよい (理由: 1名運用でレビュアーが不在。承認待ちと冷却期間が無意味な遅延にしかならない)。ただし`critical`/`high`/`medium`の未対応が0件という条件は外さない。
 
-- [ ] `gitlab-mr-review` skill の self モードを実行済みで、CRITICAL/HIGH の指摘がゼロ
+- [ ] `gitlab-mr-review` skill の self モードを実行済みで、CRITICAL/HIGH/MEDIUM の指摘がゼロ
 - [ ] MR の diff が Issue の受入基準を満たしている (`check-mr-scope.sh` が警告したときは、意図した追補かどうかを確認済み)
 
 上記を満たせば即マージする。以下のグローバル要件は本リポジトリでは**撤廃**する:
 
 - reviewer への承認依頼 (`gitlab-mr-flow` の「reviewer依頼note投稿」ステップは不要)
 - reviewer または権限保有者による merge 実行 (`~/.claude/skills/gitlab-mr-flow/SKILL.md` L112, L134)
-- self-merge 前の24時間待機・翌日見直し (`~/.claude/docs/gitlab/README.md` L98)
 - **CI pipeline の完了待ち** — CI を停止しているため待つ対象が無い (Issue #82、上記「CI は使わない」)。`glab mr merge <IID> --remove-source-branch` を即実行してよい
 
   この根拠は3度変わっている。当初は「commit 前に check.sh が全緑であることを hook が強制済み」だったが、2026-08-12 にその強制を廃止し (Issue #76)、同日 CI を再開して (Issue #81)、同日その CI も止めた (Issue #82)。現在の担保は、マージ前の self review と手動の `check.sh` の2つだけである
